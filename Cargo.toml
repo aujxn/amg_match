@@ -1,0 +1,10 @@
+[package]
+name = "amg_match"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sprs = "0.11.0"
+image = "0.24.1"
+indexmap = "1.8.0"
+rand = "0.8.5"
