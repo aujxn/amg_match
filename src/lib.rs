@@ -1,4 +1,4 @@
-pub mod luby;
+pub mod partitioner;
 
 use sprs::CsMat;
 
