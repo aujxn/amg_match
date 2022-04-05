@@ -1,176 +1,221 @@
 use indexmap::IndexSet;
-use rand::prelude::*;
 use sprs::{CsMat, TriMat};
+use std::collections::VecDeque;
 
+/// Resulting object from running the modularity matching algorithm.
+/// NOTE: Maybe don't store each matrix and just provide the P's.
 pub struct Hierarchy {
-    pub partition_matrices: Vec<CsMat<f64>>,
-    pub matrices: Vec<CsMat<f64>>,
+    partition_matrices: Vec<CsMat<f64>>,
+    matrices: Vec<CsMat<f64>>,
 }
 
-pub fn modularity(mat: CsMat<f64>) -> Hierarchy {
-    let mut level = 0;
-    let mut hierarchy = Hierarchy {
-        partition_matrices: vec![],
-        matrices: vec![mat],
-    };
+impl Hierarchy {
+    pub fn new(mat: CsMat<f64>) -> Self {
+        Self {
+            partition_matrices: vec![],
+            matrices: vec![mat],
+        }
+    }
+
+    /// Number of levels in the hierarchy. (Number of P matrices is one less)
+    pub fn len(&self) -> usize {
+        self.matrices.len()
+    }
+
+    /// Adds a level to the hierarchy.
+    pub fn push(&mut self, partition_mat: CsMat<f64>) {
+        let level = self.partition_matrices.len();
+        let p_transpose = partition_mat.transpose_view().to_owned();
+        let coarse_mat = &p_transpose * &(&self.matrices[level] * &partition_mat);
+        self.matrices.push(coarse_mat);
+        self.partition_matrices.push(partition_mat);
+    }
+
+    /// Get a single matrix from the hierarchy.
+    pub fn get_matrix(&self, level: usize) -> &CsMat<f64> {
+        &self.matrices[level]
+    }
+
+    /// Get a single P matrix from the hierarchy.
+    pub fn get_partition(&self, level: usize) -> &CsMat<f64> {
+        &self.partition_matrices[level]
+    }
+
+    /// Get a reference to the matrices Vec.
+    pub fn get_matrices(&self) -> &Vec<CsMat<f64>> {
+        &self.matrices
+    }
+
+    /// Get a reference to the P matrices Vec.
+    pub fn get_partitions(&self) -> &Vec<CsMat<f64>> {
+        &self.partition_matrices
+    }
+}
+
+/// Takes a s.p.d matrix (mat), a vector that is near the nullspace of the matrix,
+/// and a minimum coarsening factor for each level of the aggregation and provides a
+/// hierarchy of partitions of the matrix.
+pub fn modularity_matching(
+    mat: CsMat<f64>,
+    near_null: &Vec<f64>,
+    coarsening_factor: f64,
+) -> Hierarchy {
+    let mut modularity_mat = build_sparse_modularity_matrix(&mat, near_null);
+    let mut hierarchy = Hierarchy::new(mat);
+    let mut partition_mat = None;
 
     loop {
-        let vertex_count = hierarchy.matrices[level].rows();
-        let row_sums: Vec<f64> = hierarchy.matrices[level]
-            .outer_iterator()
-            .map(|row| row.data().iter().sum())
-            .collect();
+        let vertex_count = modularity_mat.rows();
 
-        let total_sum: f64 = row_sums.iter().sum();
-        let inverse_t = 1.0 / total_sum;
+        match find_pairs(&modularity_mat, 30) {
+            None => return hierarchy,
+            Some(pairs) => {
+                let pairs_count = pairs.len();
+                println!("num edges merged: {pairs_count}");
+                let mut new_partition = build_partition_from_pairs(pairs, vertex_count);
 
-        let wants_to_merge: Vec<Option<usize>> = hierarchy.matrices[level]
-            .outer_iterator()
-            .enumerate()
-            .map(|(i, row)| {
-                row.iter()
-                    .filter(|(j, _)| i != *j)
-                    .fold(None, |max, (j, val)| {
-                        let delta_q = val - inverse_t * row_sums[i] * row_sums[j];
-                        if delta_q < 0.0 {
-                            max
-                        } else {
-                            match max {
-                                Some((_, old_delta_q)) => {
-                                    if old_delta_q > delta_q {
-                                        max
-                                    } else {
-                                        Some((j, delta_q))
-                                    }
-                                }
-                                None => Some((j, delta_q)),
-                            }
-                        }
-                    })
-                    .map(|(j, _)| j)
-            })
-            .collect();
+                if let Some(old_partition) = partition_mat {
+                    partition_mat = Some(&old_partition * &new_partition);
+                } else {
+                    partition_mat = Some(new_partition.to_owned());
+                }
 
-        if wants_to_merge.iter().all(|x| x.is_none()) {
-            return hierarchy;
+                let p_transpose = new_partition.transpose_view().to_owned();
+                modularity_mat = &p_transpose * &modularity_mat;
+
+                if vertex_count as f64 / new_partition.rows() as f64 > coarsening_factor {
+                    println!("added level! num vertices coarse: {}", new_partition.rows());
+                    hierarchy.push(partition_mat.unwrap());
+                    partition_mat = None;
+                }
+            }
         }
+    }
+}
 
-        let mut alive = vec![true; vertex_count];
-        let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(vertex_count / 2);
+/// Constructs the modularity matrix for `mat` but only include the positive values.
+/// The resulting matrix has a sparsity pattern that is the same or strictly more sparse
+/// than the sparsity pattern of `mat`. Uses the `near_null` component to generate the
+/// weights used to build the modularity matrix.
+fn build_sparse_modularity_matrix(mat: &CsMat<f64>, near_null: &Vec<f64>) -> CsMat<f64> {
+    let num_vertices = mat.rows();
+    let mut mat_bar = TriMat::new((num_vertices, num_vertices));
+    for (i, row_vec) in mat.outer_iterator().enumerate() {
+        for (j, val) in row_vec.iter().filter(|(j, _)| *j != i) {
+            let val_ij = val * -near_null[i] * near_null[j];
+            mat_bar.add_triplet(i, j, val_ij);
+        }
+    }
+    let mat_bar = mat_bar.to_csr::<usize>();
 
+    let row_sums: Vec<f64> = mat_bar
+        .outer_iterator()
+        .enumerate()
+        .map(|(_, row_vec)| row_vec.data().iter().sum())
+        .collect();
+
+    let total: f64 = row_sums.iter().sum();
+    let inverse_total = 1.0 / total;
+
+    // NOTE: adding in row major order so maybe can use just CsMat,
+    // but CsMat empty constructor doesn't take dimension so possibly bad?
+    let mut modularity_mat = TriMat::new((num_vertices, num_vertices));
+
+    for (i, row_vec) in mat_bar.outer_iterator().enumerate() {
+        for (j, a_bar_ij) in row_vec.iter() {
+            let modularity_ij = a_bar_ij - inverse_total * row_sums[i] * row_sums[j];
+            if modularity_ij > 0.0 {
+                modularity_mat.add_triplet(i, j, modularity_ij);
+            }
+        }
+    }
+
+    modularity_mat.to_csr::<usize>()
+}
+
+fn find_pairs(modularity_mat: &CsMat<f64>, k_passes: usize) -> Option<Vec<(usize, usize)>> {
+    let vertex_count = modularity_mat.rows();
+    let mut wants_to_merge: Vec<VecDeque<usize>> = modularity_mat
+        .outer_iterator()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut possible_matches: Vec<(usize, f64)> = row
+                .iter()
+                .filter(|(j, _)| i != *j)
+                .map(|(j, weight)| (j, *weight))
+                .collect();
+            // crashes on NaNs
+            // NOTE: sorting here might be a bad idea... maybe get top (n?) instead?
+            possible_matches.sort_by(|(_, w1), (_, w2)| w2.partial_cmp(w1).unwrap());
+            possible_matches
+                .into_iter()
+                .map(|(j, _)| j)
+                .collect::<VecDeque<usize>>()
+        })
+        .collect();
+
+    if wants_to_merge.iter().all(|x| x.len() == 0) {
+        return None;
+    }
+
+    let mut alive: Vec<bool> = wants_to_merge.iter().map(|x| x.len() > 0).collect();
+    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(vertex_count / 2);
+
+    for _ in 0..k_passes {
         for i in 0..vertex_count {
-            let j = wants_to_merge[i];
+            if !alive[i] {
+                continue;
+            }
+            if wants_to_merge[i].len() == 0 {
+                alive[i] = false;
+                continue;
+            }
+
+            let j = loop {
+                if let Some(j) = wants_to_merge[i].pop_front() {
+                    if !alive[j] {
+                        continue;
+                    } else {
+                        break Some(j);
+                    }
+                } else {
+                    break None;
+                }
+            };
+
             if let Some(j) = j {
-                if wants_to_merge[j] == Some(i) && alive[j] && alive[i] {
+                if wants_to_merge[j].front() == Some(&i) {
                     pairs.push((i, j));
                     alive[j] = false;
                     alive[i] = false;
                 }
             }
         }
+    }
 
-        let pairs_count = pairs.len();
-        println!("num edges merged: {pairs_count}\n num vertices: {vertex_count}");
-        let mut not_merged_vertices: IndexSet<usize> = (0..vertex_count).collect();
-        let aggregate_count = vertex_count - pairs_count;
-        let mut partition_mat = TriMat::new((vertex_count, aggregate_count));
-
-        for (aggregate, (i, j)) in pairs.into_iter().enumerate() {
-            partition_mat.add_triplet(i, aggregate, 1.0);
-            partition_mat.add_triplet(j, aggregate, 1.0);
-            assert!(not_merged_vertices.remove(&i));
-            assert!(not_merged_vertices.remove(&j));
-        }
-
-        for (aggregate, vertex) in not_merged_vertices.into_iter().enumerate() {
-            partition_mat.add_triplet(vertex, aggregate + pairs_count, 1.0);
-        }
-        let partition_mat = partition_mat.to_csr::<usize>();
-
-        let coarse_mat = &partition_mat.transpose_view().to_owned()
-            * &(&hierarchy.matrices[level] * &partition_mat);
-        hierarchy.matrices.push(coarse_mat);
-        hierarchy.partition_matrices.push(partition_mat);
-        level += 1;
+    if pairs.len() > 0 {
+        Some(pairs)
+    } else {
+        None
     }
 }
 
-pub fn lubys(mat: &CsMat<f64>, weights: Option<Vec<f64>>) -> CsMat<f64> {
-    let e_ij: Vec<(usize, usize)> = mat
-        .iter()
-        .filter(|(_, (i, j))| i > j)
-        .map(|(_, (i, j))| (i, j))
-        .collect();
-    let edge_count = e_ij.len();
-    let vertex_count = mat.rows();
-    println!("num vertices: {}", vertex_count);
-    println!("num edges: {}", edge_count);
-
-    let weights = match weights {
-        Some(vec) => vec,
-        None => {
-            let mut rng = rand::thread_rng();
-            (0..edge_count).map(|_| rng.gen()).collect()
-        }
-    };
-
-    let mut edge_vertex = TriMat::new((edge_count, vertex_count));
-
-    for (edge, (i, j)) in e_ij.into_iter().enumerate() {
-        edge_vertex.add_triplet(edge, i, 1);
-        edge_vertex.add_triplet(edge, j, 1);
-    }
-
-    let edge_vertex: CsMat<i32> = edge_vertex.to_csr::<usize>();
-    let vertex_edge: CsMat<i32> = edge_vertex.transpose_view().to_owned();
-    let edge_edge = &edge_vertex * &vertex_edge;
-    println!("dim of edge_edge: {:?}", edge_edge.shape());
-
-    let mut maximal_edges: IndexSet<usize> = IndexSet::with_capacity(edge_count);
-    let mut not_maximal_edges: IndexSet<usize> = IndexSet::with_capacity(edge_count);
-
-    for (i, weight) in weights.iter().enumerate() {
-        if not_maximal_edges.contains(&i) {
-            continue;
-        }
-
-        let connected_edges = edge_edge.outer_view(i).expect("out of range in edge_edge");
-
-        if connected_edges
-            .iter()
-            .filter(|(j, _)| *j != i)
-            .all(|(j, _)| *weight > weights[j])
-        {
-            maximal_edges.insert(i);
-            for (j, _) in connected_edges.iter().filter(|(j, _)| *j != i) {
-                not_maximal_edges.insert(j);
-            }
-        }
-    }
-
-    let merged_edge_count = maximal_edges.len();
-    println!("num edges merged: {}", merged_edge_count);
+fn build_partition_from_pairs(pairs: Vec<(usize, usize)>, vertex_count: usize) -> CsMat<f64> {
     let mut not_merged_vertices: IndexSet<usize> = (0..vertex_count).collect();
-    let aggregate_count = vertex_count - merged_edge_count;
+    let pairs_count = pairs.len();
+    let aggregate_count = vertex_count - pairs_count;
     let mut partition_mat = TriMat::new((vertex_count, aggregate_count));
 
-    for (aggregate, edge) in maximal_edges.into_iter().enumerate() {
-        if let Some(vertex_pair) = edge_vertex.outer_view(edge) {
-            let vertex_pair = vertex_pair.indices();
-            let i = vertex_pair[0] as usize;
-            let j = vertex_pair[1] as usize;
-            partition_mat.add_triplet(i, aggregate, 1.0);
-            partition_mat.add_triplet(j, aggregate, 1.0);
-            assert!(not_merged_vertices.remove(&i));
-            assert!(not_merged_vertices.remove(&j));
-        } else {
-            panic!("row doesn't exist in edge_vertex")
-        }
+    for (aggregate, (i, j)) in pairs.into_iter().enumerate() {
+        partition_mat.add_triplet(i, aggregate, 1.0);
+        partition_mat.add_triplet(j, aggregate, 1.0);
+        assert!(not_merged_vertices.remove(&i));
+        assert!(not_merged_vertices.remove(&j));
     }
 
     for (aggregate, vertex) in not_merged_vertices.into_iter().enumerate() {
-        partition_mat.add_triplet(vertex, aggregate + merged_edge_count, 1.0);
+        partition_mat.add_triplet(vertex, aggregate + pairs_count, 1.0);
     }
 
-    return partition_mat.to_csr::<usize>();
+    partition_mat.to_csr::<usize>()
 }
