@@ -1,4 +1,5 @@
 pub mod partitioner;
+pub mod solver;
 
 use sprs::CsMat;
 

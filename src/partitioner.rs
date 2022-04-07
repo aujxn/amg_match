@@ -1,4 +1,5 @@
 use indexmap::IndexSet;
+use ndarray::Array1;
 use sprs::{CsMat, TriMat};
 use std::collections::VecDeque;
 
@@ -60,19 +61,22 @@ pub fn modularity_matching(
     near_null: &Vec<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {
-    let mut modularity_mat = build_sparse_modularity_matrix(&mat, near_null);
+    let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, near_null);
+    let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);
     let mut partition_mat = None;
+    let mut starting_vertex_count = modularity_mat.rows() as f64;
 
     loop {
         let vertex_count = modularity_mat.rows();
 
-        match find_pairs(&modularity_mat, 30) {
+        match find_pairs(&modularity_mat, 10) {
             None => return hierarchy,
             Some(pairs) => {
                 let pairs_count = pairs.len();
                 println!("num edges merged: {pairs_count}");
-                let mut new_partition = build_partition_from_pairs(pairs, vertex_count);
+                let new_partition = build_partition_from_pairs(pairs, vertex_count);
+                let coarse_vertex_count = new_partition.cols() as f64;
 
                 if let Some(old_partition) = partition_mat {
                     partition_mat = Some(&old_partition * &new_partition);
@@ -81,23 +85,27 @@ pub fn modularity_matching(
                 }
 
                 let p_transpose = new_partition.transpose_view().to_owned();
-                modularity_mat = &p_transpose * &modularity_mat;
 
-                if vertex_count as f64 / new_partition.rows() as f64 > coarsening_factor {
+                a_bar = &p_transpose * &(&a_bar * &new_partition);
+                row_sums = &p_transpose * &row_sums;
+                modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
+
+                if starting_vertex_count / coarse_vertex_count > coarsening_factor {
                     println!("added level! num vertices coarse: {}", new_partition.rows());
                     hierarchy.push(partition_mat.unwrap());
                     partition_mat = None;
+                    starting_vertex_count = coarse_vertex_count;
                 }
             }
         }
     }
 }
 
-/// Constructs the modularity matrix for `mat` but only include the positive values.
-/// The resulting matrix has a sparsity pattern that is the same or strictly more sparse
-/// than the sparsity pattern of `mat`. Uses the `near_null` component to generate the
-/// weights used to build the modularity matrix.
-fn build_sparse_modularity_matrix(mat: &CsMat<f64>, near_null: &Vec<f64>) -> CsMat<f64> {
+/// Takes a SPD matrix and a near null component and creates a weighted matrix with positive
+/// row sums and a zero on the diagonal. This matrix can then be used for modularity based
+/// matching to build the coarse systems. Returns a tuple with the weighted matrix, the row sums,
+/// and the inverse of the total sum of the matrix.
+fn build_weighted_matrix(mat: &CsMat<f64>, near_null: &Vec<f64>) -> (CsMat<f64>, Array1<f64>, f64) {
     let num_vertices = mat.rows();
     let mut mat_bar = TriMat::new((num_vertices, num_vertices));
     for (i, row_vec) in mat.outer_iterator().enumerate() {
@@ -108,22 +116,33 @@ fn build_sparse_modularity_matrix(mat: &CsMat<f64>, near_null: &Vec<f64>) -> CsM
     }
     let mat_bar = mat_bar.to_csr::<usize>();
 
-    let row_sums: Vec<f64> = mat_bar
+    let row_sums: Array1<f64> = mat_bar
         .outer_iterator()
-        .enumerate()
-        .map(|(_, row_vec)| row_vec.data().iter().sum())
+        .map(|row_vec| row_vec.data().iter().sum())
         .collect();
 
     let total: f64 = row_sums.iter().sum();
     let inverse_total = 1.0 / total;
 
+    (mat_bar, row_sums, inverse_total)
+}
+
+/// Constructs the modularity matrix for `mat` but only include the positive values.
+/// The resulting matrix has a sparsity pattern that is the same or strictly more sparse
+/// than the sparsity pattern of `mat`.
+fn build_sparse_modularity_matrix(
+    mat: &CsMat<f64>,
+    row_sums: &Array1<f64>,
+    inverse_total: f64,
+) -> CsMat<f64> {
+    let num_vertices = mat.rows();
     // NOTE: adding in row major order so maybe can use just CsMat,
     // but CsMat empty constructor doesn't take dimension so possibly bad?
     let mut modularity_mat = TriMat::new((num_vertices, num_vertices));
 
-    for (i, row_vec) in mat_bar.outer_iterator().enumerate() {
-        for (j, a_bar_ij) in row_vec.iter() {
-            let modularity_ij = a_bar_ij - inverse_total * row_sums[i] * row_sums[j];
+    for (i, row_vec) in mat.outer_iterator().enumerate() {
+        for (j, weight_ij) in row_vec.iter() {
+            let modularity_ij = weight_ij - inverse_total * row_sums[i] * row_sums[j];
             if modularity_ij > 0.0 {
                 modularity_mat.add_triplet(i, j, modularity_ij);
             }
