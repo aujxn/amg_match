@@ -8,7 +8,7 @@ pub fn pcg<F>(
     max_iter: usize,
     epsilon: f64,
     preconditioner: F,
-) -> Result<Array1<f64>, &'static str>
+) -> (Array1<f64>, bool)
 where
     F: Fn(&Array1<f64>) -> Array1<f64>,
 {
@@ -29,12 +29,13 @@ where
         let d_old = d;
         d = inner_product(&r, &r_bar);
 
-        if i % 100 == 0 {
+        if i % 10 == 0 {
             println!("squared norm iter {i}: {d}");
         }
 
         if d < epsilon * epsilon * d0 {
-            return Ok(x);
+            println!("converged in {i} iterations");
+            return (x, true);
         }
 
         let beta = d / d_old;
@@ -42,7 +43,7 @@ where
         p += &r_bar;
     }
 
-    Err("exceded max iter")
+    (x, false)
 }
 
 pub fn inner_product(lhs: &Array1<f64>, rhs: &Array1<f64>) -> f64 {

@@ -58,7 +58,7 @@ impl Hierarchy {
 /// hierarchy of partitions of the matrix.
 pub fn modularity_matching(
     mat: CsMat<f64>,
-    near_null: &Vec<f64>,
+    near_null: &Array1<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, near_null);
@@ -74,7 +74,7 @@ pub fn modularity_matching(
             None => return hierarchy,
             Some(pairs) => {
                 let pairs_count = pairs.len();
-                println!("num edges merged: {pairs_count}");
+                //println!("num edges merged: {pairs_count}");
                 let new_partition = build_partition_from_pairs(pairs, vertex_count);
                 let coarse_vertex_count = new_partition.cols() as f64;
 
@@ -91,7 +91,7 @@ pub fn modularity_matching(
                 modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
-                    println!("added level! num vertices coarse: {}", new_partition.rows());
+                    //println!("added level! num vertices coarse: {}", new_partition.rows());
                     hierarchy.push(partition_mat.unwrap());
                     partition_mat = None;
                     starting_vertex_count = coarse_vertex_count;
@@ -105,7 +105,10 @@ pub fn modularity_matching(
 /// row sums and a zero on the diagonal. This matrix can then be used for modularity based
 /// matching to build the coarse systems. Returns a tuple with the weighted matrix, the row sums,
 /// and the inverse of the total sum of the matrix.
-fn build_weighted_matrix(mat: &CsMat<f64>, near_null: &Vec<f64>) -> (CsMat<f64>, Array1<f64>, f64) {
+fn build_weighted_matrix(
+    mat: &CsMat<f64>,
+    near_null: &Array1<f64>,
+) -> (CsMat<f64>, Array1<f64>, f64) {
     let num_vertices = mat.rows();
     let mut mat_bar = TriMat::new((num_vertices, num_vertices));
     for (i, row_vec) in mat.outer_iterator().enumerate() {
