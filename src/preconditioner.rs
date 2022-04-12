@@ -1,5 +1,4 @@
 use crate::partitioner::Hierarchy;
-use ndarray::prelude::*;
 use ndarray::Array1;
 use ndarray_linalg::cholesky::*;
 use sprs::CsMat;
@@ -15,10 +14,7 @@ pub fn l1(mat: &CsMat<f64>) -> Box<dyn Fn(&Array1<f64>) -> Array1<f64>> {
     Box::new(move |r: &Array1<f64>| -> Array1<f64> { r * &l1_inverse })
 }
 
-pub fn multilevel(
-    //mat: &'a CsMat<f64>,
-    hierarchy: Hierarchy,
-) -> Box<dyn Fn(&Array1<f64>) -> Array1<f64>> {
+pub fn multilevel(hierarchy: Hierarchy) -> Box<dyn Fn(&Array1<f64>) -> Array1<f64>> {
     let mat_coarse = hierarchy.get_matrices().last().unwrap().to_dense();
     let methods = hierarchy
         .get_matrices()

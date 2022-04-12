@@ -74,7 +74,7 @@ pub fn modularity_matching(
             None => return hierarchy,
             Some(pairs) => {
                 let pairs_count = pairs.len();
-                //println!("num edges merged: {pairs_count}");
+                trace!("num edges merged: {pairs_count}");
                 let new_partition = build_partition_from_pairs(pairs, vertex_count);
                 let coarse_vertex_count = new_partition.cols() as f64;
 
@@ -91,7 +91,7 @@ pub fn modularity_matching(
                 modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
-                    //println!("added level! num vertices coarse: {}", new_partition.rows());
+                    trace!("added level! num vertices coarse: {}", new_partition.rows());
                     hierarchy.push(partition_mat.unwrap());
                     partition_mat = None;
                     starting_vertex_count = coarse_vertex_count;

@@ -2,6 +2,9 @@ pub mod partitioner;
 pub mod preconditioner;
 pub mod solver;
 
+#[macro_use]
+extern crate log;
+
 use sprs::CsMat;
 
 /// Saves the sparsity graph of the matrix as a png
