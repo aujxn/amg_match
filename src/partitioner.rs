@@ -3,6 +3,8 @@ use ndarray::Array1;
 use sprs::{CsMat, TriMat};
 use std::collections::VecDeque;
 
+//TODO test with P*1 = 1
+
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
 pub struct Hierarchy {

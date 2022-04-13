@@ -1,6 +1,10 @@
 use ndarray::Array1;
 use sprs::CsMat;
 
+//TODO sgs, more smoothing, check symmetry with more smoothing
+//then -> adaptivity
+//TESTS: P*1 = 1, symmetry of precon, sum of nnz of all levels / nnz fine < 2 (~1 is best)
+
 /// Stationary iterative method based on the preconditioner. Solves the
 /// system Ax = b for x where 'mat' is A and 'rhs' is b. Common preconditioners
 /// include L1 smoother, forward/backward/symmetric Gauss-Seidel, and
@@ -14,7 +18,7 @@ pub fn stationary<F>(
     preconditioner: &F,
 ) -> (Array1<f64>, bool)
 where
-    F: Fn(&Array1<f64>) -> Array1<f64>,
+    F: Fn(&mut Array1<f64>),
 {
     let mut x = initial_iterate.clone();
     let mut r = rhs - &(mat * &x);
@@ -30,12 +34,12 @@ where
         }
 
         if r_norm < epsilon_squared * r0_norm {
-            trace!("converged in {iter} iterations\n");
+            info!("converged in {iter} iterations\n");
             return (x, true);
         }
 
-        let correction = preconditioner(&r);
-        x += &correction;
+        preconditioner(&mut r);
+        x += &r;
     }
 
     (x, false)
@@ -53,11 +57,12 @@ pub fn pcg<F>(
     preconditioner: &F,
 ) -> (Array1<f64>, bool)
 where
-    F: Fn(&Array1<f64>) -> Array1<f64>,
+    F: Fn(&mut Array1<f64>),
 {
     let mut x = initial_iterate.clone();
     let mut r = rhs - mat * &x;
-    let mut r_bar = preconditioner(&r);
+    let mut r_bar = r.clone();
+    preconditioner(&mut r_bar);
     let d0 = r.t().dot(&r_bar);
     let mut d = d0;
     let mut p = r_bar.clone();
@@ -68,7 +73,8 @@ where
         g *= alpha;
         x += &(alpha * &p);
         r -= &g;
-        r_bar = preconditioner(&r);
+        r_bar = r.clone();
+        preconditioner(&mut r_bar);
         let d_old = d;
         d = r.t().dot(&r_bar);
 
@@ -77,7 +83,7 @@ where
         }
 
         if d < epsilon * epsilon * d0 {
-            trace!("converged in {i} iterations\n");
+            info!("converged in {i} iterations\n");
             return (x, true);
         }
 
