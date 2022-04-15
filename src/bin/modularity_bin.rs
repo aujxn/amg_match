@@ -1,7 +1,7 @@
 use amg_match::{
     //mat_to_image,
     partitioner::modularity_matching,
-    preconditioner::{bgs, fgs, l1, multilevel, sgs},
+    preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
 use ndarray::Array1;
@@ -84,7 +84,7 @@ fn main() {
         Preconditioner::Fgs => fgs(&mat),
         Preconditioner::Bgs => bgs(&mat),
         Preconditioner::Sgs => sgs(&mat),
-        Preconditioner::Ml1 => {
+        _ => {
             let iterations_for_near_null = 5;
             info!(
                 "calculating near null component... {} iterations using stationary L1",
@@ -109,32 +109,13 @@ fn main() {
                 hierarchy.get_matrices().last().unwrap().rows()
             );
 
-            /* TODO: write test to do this
-            for p in hierarchy.get_partitions().iter() {
-                let ones = ndarray::Array::from_vec(vec![1.0; p.cols()]);
-                let result = p * &ones;
-                info!("{:?}", result);
+            match opt.preconditioner {
+                Preconditioner::Ml1 => multilevell1(hierarchy),
+                Preconditioner::Mgs => multilevelgs(hierarchy),
+                _ => unimplemented!(),
             }
-            */
-
-            multilevel(hierarchy)
         }
-        Preconditioner::Mgs => unimplemented!(),
     };
-
-    /* TODO: this is not correct but add test for precond symmetry
-    for _ in 0..50 {
-        let mut u = ndarray::Array::random(dim, Uniform::new(0., 2.));
-        let mut v = ndarray::Array::random(dim, Uniform::new(0., 2.));
-        let left: f64 = u.t().dot(&v);
-        let right: f64 = v.t().dot(&u);
-        assert!(left - right < 10.0_f64.powi(-6));
-        let pos: f64 = u.t().dot(&u);
-        assert!(pos > 0.0);
-        let pos: f64 = v.t().dot(&v);
-        assert!(pos > 0.0);
-    }
-    */
 
     let _rhs = match opt.solver {
         Solver::Stationary => stationary(

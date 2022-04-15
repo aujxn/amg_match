@@ -1,7 +1,7 @@
 use ndarray::Array1;
 use sprs::CsMat;
 
-//TODO sgs, more smoothing, check symmetry with more smoothing
+//TODO more smoothing, check symmetry with more smoothing
 //then -> adaptivity
 //TESTS: P*1 = 1, symmetry of precon, sum of nnz of all levels / nnz fine < 2 (~1 is best)
 

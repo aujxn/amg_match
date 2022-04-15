@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
+#[derive(Clone)]
 pub struct Hierarchy {
     partition_matrices: Vec<CsMat<f64>>,
     matrices: Vec<CsMat<f64>>,
@@ -170,6 +171,7 @@ fn find_pairs(modularity_mat: &CsMat<f64>, k_passes: usize) -> Option<Vec<(usize
                 .collect();
             // crashes on NaNs
             // NOTE: sorting here might be a bad idea... maybe get top (n?) instead?
+            // probably best just to find largest every time and remove ones that are dead
             possible_matches.sort_by(|(_, w1), (_, w2)| w2.partial_cmp(w1).unwrap());
             possible_matches
                 .into_iter()
@@ -242,4 +244,35 @@ fn build_partition_from_pairs(pairs: Vec<(usize, usize)>, vertex_count: usize) -
     }
 
     partition_mat.to_csr::<usize>()
+}
+
+#[cfg(test)]
+extern crate test_generator;
+
+#[cfg(test)]
+mod tests {
+    use crate::{partitioner::modularity_matching, preconditioner::l1, solver::stationary};
+    use ndarray::Array;
+    use test_generator::test_resources;
+
+    #[test_resources("test_matrices/*")]
+    fn partition_times_ones_is_ones(mat_path: &str) {
+        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
+            .unwrap()
+            .to_csr::<usize>();
+
+        let ones = Array::from_vec(vec![1.0; mat.rows()]);
+        let zeros = Array::from_vec(vec![0.0; mat.rows()]);
+
+        let (near_null, _) = stationary(&mat, &zeros, &ones, 5, 10.0_f64.powi(-6), &l1(&mat));
+
+        let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+
+        for p in hierarchy.get_partitions().iter() {
+            let ones = ndarray::Array::from_vec(vec![1.0; p.cols()]);
+            let result = p * &ones;
+            let inner_product = result.t().dot(&result);
+            assert!((inner_product - result.len() as f64).abs() < 10e-6)
+        }
+    }
 }
