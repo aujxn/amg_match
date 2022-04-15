@@ -185,7 +185,12 @@ mod tests {
 
             let left: f64 = u.t().dot(&preconditioned_v);
             let right: f64 = v.t().dot(&preconditioned_u);
-            assert!(left - right < 10e-6);
+            assert!(
+                (left - right).abs() < 10e-6,
+                "Left: {}, Right: {}",
+                left,
+                right
+            );
         }
     }
 

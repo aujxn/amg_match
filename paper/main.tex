@@ -1,0 +1,58 @@
+\documentclass[10pt]{article}
+\title{Adaptive Algebraic Multigrid with Graph Modularity Matching for Symmetric Positive Definite Matrices}
+
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+This library implements some tools to explore techniques of adaptive AMG.
+In classical AMG, the performance of the solver depends on the construction
+of the relaxation and coarse-grid correction process (cite M. BREZINA).
+Convergence of the method slows when the residual approaches the rhs of the
+system (the iterate is in the `near null space` of the system).
+This happens when the current iterate is an approximation of a minimal
+eigenvalue of the matrix. Using this near null component and utilizing graph
+modularity, we can construct a new relaxation and coarse-grid correction.
+This provides the adaptivity when convergence suffers. Combining multiple of
+these adaptive relaxation steps can provide a composite adaptive multigrid method.
+
+\section{Library Details}
+The library is broken into 3 main modules: partitioner, preconditioner, and solver.
+
+\subsection{Partitioner module}
+Here is implemented an algorithm described in (quiring 2019) which is graph pairwise
+matching algorithm that only merges vertices where the change in modularity is
+positive. The only requirement for this algorithm is that the matrix has positive
+row sums. To convert our system to have positive rowsums, we construct a new system
+with a matching sparsity pattern using a `near null` component. The modularity
+matching algorithm applied to this new system then gives a hierarchy of interpolation
+matrices that can be applied the the original system to create the coarse problem.
+
+\subsection{Preconditioner module}
+This module is called preconditioner but maybe a better name could be smoothers or
+methods. In this module there are functions that take a system and provide the inverse
+action of some method than can be used in an iterative solver. Currently, one can build 
+L1 smoother, symmetric/forward/backward Gauss-Seidel, multilevel L1, and multilevel
+Gauss-Seidel. All of these can be used as methods for the stationary solver but only
+the symmetric methods can be used as a preconditioner in the conjugate gradient method.
+
+\subsection{Solver module}
+This module implements different iterative solvers that accept linear systems, a
+method to base the solver on, and some parameters for the solver. Currently, only
+the classical stationary iterative method and preconditioned conjugate gradient is
+implemented. Soon I will be adding an adaptive solver to this module.
+
+\section{Example Usage}
+The library is currently packaged with a CLI binary that can show how the library
+can be used to test different solvers on your systems.
+
+\section{Goals}
+Classical AMG often breaks down on highly anisotropic problems often found in finite
+element methods. To address this failure, sometimes specific knowledge of the system
+can be used to carefully construct a preconidtioner. The goal of this research is to
+test some adaptive methods that don't require any knowledge about the system and
+measure the computational complexity and memory demands of these methods on systems
+where classical AMG performs poorly.
+
+\end{document}
