@@ -1,5 +1,5 @@
 use crate::partitioner::Hierarchy;
-use ndarray::Array1;
+use ndarray::{Array, Array1};
 use ndarray_linalg::cholesky::*;
 use sprs::{
     linalg::trisolve::{
@@ -121,7 +121,8 @@ pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
 
 pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
     let mat_coarse = hierarchy.get_matrices().last().unwrap().to_dense();
-    let methods = hierarchy
+    let smoothing_steps = 10;
+    let smoothers = hierarchy
         .get_matrices()
         .iter()
         .map(|mat| l1(mat))
@@ -129,32 +130,37 @@ pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
     let levels = hierarchy.get_partitions().len();
 
     Box::new(move |r: &mut Array1<f64>| {
-        let mut x_ks = Vec::with_capacity(levels);
-        let mut b_ks = Vec::with_capacity(levels);
-        b_ks.push(r.clone());
-
-        for (level, ((method, partition_mat), mat)) in methods
+        let mut x_ks: Vec<Array1<f64>> = hierarchy
+            .get_matrices()
             .iter()
-            .zip(hierarchy.get_partitions().iter())
-            .zip(hierarchy.get_matrices().iter())
-            .enumerate()
-        {
-            x_ks.push(b_ks[level].clone());
-            method(x_ks.last_mut().unwrap());
-            let p_t = partition_mat.transpose_view().to_owned();
-            let r_k = &b_ks[level] - &(mat * &x_ks[level]);
-            b_ks.push(&p_t * &r_k);
+            .map(|p| Array::from_vec(vec![0.0; p.rows()]))
+            .collect();
+        let mut b_ks = x_ks.clone();
+        let p_ks = hierarchy.get_partitions();
+        let mat_ks = hierarchy.get_matrices();
+        b_ks[0] = r.clone();
+
+        for level in 0..levels {
+            for _ in 0..smoothing_steps {
+                let mut r_k = &b_ks[level] - &(&mat_ks[level] * &x_ks[level]);
+                smoothers[level](&mut r_k);
+                x_ks[level] += &r_k;
+            }
+            let p_t = p_ks[level].transpose_view().to_owned();
+            let r_k = &b_ks[level] - &(&mat_ks[level] * &x_ks[level]);
+            b_ks[level + 1] = &p_t * &r_k;
         }
 
-        let x_c = mat_coarse.solvec(&b_ks[levels]).unwrap();
-        x_ks.push(x_c);
+        x_ks[levels] = mat_coarse.solvec(&b_ks[levels]).unwrap();
 
         for level in (0..levels).rev() {
             let interpolated_x = hierarchy.get_partition(level) * &x_ks[level + 1];
             x_ks[level] += &interpolated_x;
-            b_ks[level] -= &(hierarchy.get_matrix(level) * &x_ks[level]);
-            methods[level](&mut b_ks[level]);
-            x_ks[level] += &b_ks[level];
+            for _ in 0..smoothing_steps {
+                let mut r_k = &b_ks[level] - &(hierarchy.get_matrix(level) * &x_ks[level]);
+                smoothers[level](&mut r_k);
+                x_ks[level] += &r_k;
+            }
         }
         *r = x_ks.remove(0);
     })
