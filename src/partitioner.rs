@@ -187,7 +187,7 @@ fn find_pairs(modularity_mat: &CsrMatrix<f64>, k_passes: usize) -> Option<Vec<(u
         return None;
     }
 
-    let mut alive: Vec<bool> = wants_to_merge.iter().map(|x| x.is_empty()).collect();
+    let mut alive: Vec<bool> = wants_to_merge.iter().map(|x| !x.is_empty()).collect();
     let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(vertex_count / 2);
 
     for _ in 0..k_passes {
@@ -222,7 +222,7 @@ fn find_pairs(modularity_mat: &CsrMatrix<f64>, k_passes: usize) -> Option<Vec<(u
         }
     }
 
-    if pairs.is_empty() {
+    if !pairs.is_empty() {
         Some(pairs)
     } else {
         None
