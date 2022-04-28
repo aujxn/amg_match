@@ -1,72 +1,55 @@
-use crate::partitioner::Hierarchy;
-use ndarray::{Array, Array1};
-use ndarray_linalg::cholesky::*;
-use sprs::{
-    linalg::trisolve::{
-        lsolve_csr_dense_rhs as lsolve, usolve_csc_dense_rhs as usolve_csc,
-        usolve_csr_dense_rhs as usolve_csr,
-    },
-    CompressedStorage::CSR,
-    CsMat,
+use crate::{
+    partitioner::Hierarchy,
+    solver::{lsolve, usolve},
 };
+use nalgebra::base::DVector;
+use nalgebra_sparse::CsrMatrix;
 
-pub fn l1(mat: &CsMat<f64>) -> Box<dyn Fn(&mut Array1<f64>)> {
-    let l1_inverse: Array1<f64> = mat
-        .outer_iterator()
+pub fn l1(mat: &CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>)> {
+    let l1_inverse: Vec<f64> = mat
+        .row_iter()
         .map(|row_vec| {
-            let row_sum_abs: f64 = row_vec.data().iter().map(|val| val.abs()).sum();
+            let row_sum_abs: f64 = row_vec.values().iter().map(|val| val.abs()).sum();
             1.0 / row_sum_abs
         })
         .collect();
-    Box::new(move |r: &mut Array1<f64>| {
-        *r *= &l1_inverse;
+    let l1_inverse: DVector<f64> = DVector::from(l1_inverse);
+    Box::new(move |r: &mut DVector<f64>| {
+        r.component_mul_assign(&l1_inverse);
     })
 }
 
-pub fn fgs(mat: &CsMat<f64>) -> Box<dyn Fn(&mut Array1<f64>)> {
-    let mut lower_triangle: CsMat<f64> = CsMat::empty(CSR, mat.rows());
-    for (val, (i, j)) in mat.iter() {
-        if i >= j {
-            lower_triangle.insert(i, j, *val);
-        }
-    }
-    Box::new(move |r: &mut Array1<f64>| {
-        lsolve(lower_triangle.view(), r).expect("linalg error fgs");
+pub fn fgs(mat: &CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>)> {
+    let lower_triangle = mat.lower_triangle();
+    Box::new(move |r: &mut DVector<f64>| {
+        lsolve(&lower_triangle, r);
     })
 }
 
-pub fn bgs(mat: &CsMat<f64>) -> Box<dyn Fn(&mut Array1<f64>)> {
-    let mut upper_triangle: CsMat<f64> = CsMat::empty(CSR, mat.rows());
-    for (val, (i, j)) in mat.iter() {
-        if i <= j {
-            upper_triangle.insert(i, j, *val);
-        }
-    }
-    Box::new(move |r: &mut Array1<f64>| {
-        usolve_csr(upper_triangle.view(), r).expect("linalg error fgs");
+pub fn bgs(mat: &CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>)> {
+    let upper_triangle = mat.upper_triangle();
+    Box::new(move |r: &mut DVector<f64>| {
+        usolve(&upper_triangle, r);
     })
 }
 
-pub fn sgs<'a>(mat: &'a CsMat<f64>) -> Box<dyn 'a + Fn(&mut Array1<f64>)> {
-    let diag: Array1<f64> = mat
-        .diag_iter()
-        .map(|x| *x.expect("missing diagonal element"))
-        .collect();
-    let mut lower_triangle: CsMat<f64> = CsMat::empty(CSR, mat.rows());
-    for (val, (i, j)) in mat.iter() {
-        if i >= j {
-            lower_triangle.insert(i, j, *val);
-        }
-    }
-    Box::new(move |r: &mut Array1<f64>| {
-        lsolve(lower_triangle.view(), r.view_mut()).expect("lsolve sgs linalg error");
-        *r *= &diag;
-        usolve_csc(lower_triangle.transpose_view(), r).expect("usolve sgs linalg error");
+pub fn sgs<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn 'a + Fn(&mut DVector<f64>)> {
+    let (_, _, diag) = mat.diagonal_as_csr().disassemble();
+    let diag = DVector::from(diag);
+
+    let lower_triangle = mat.lower_triangle();
+    let upper_triangle = mat.upper_triangle();
+
+    Box::new(move |r: &mut DVector<f64>| {
+        lsolve(&lower_triangle, r);
+        r.component_mul_assign(&diag);
+        usolve(&upper_triangle, r);
     })
 }
 
-pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
-    let mat_coarse = hierarchy.get_matrices().last().unwrap().to_dense();
+pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
+    let mat_coarse = nalgebra::DMatrix::from(hierarchy.get_matrices().last().unwrap());
+    let decomp = mat_coarse.lu();
     let presmooth = hierarchy
         .get_matrices()
         .iter()
@@ -79,7 +62,7 @@ pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
         .collect::<Vec<_>>();
     let levels = hierarchy.get_partitions().len();
 
-    Box::new(move |r: &mut Array1<f64>| {
+    Box::new(move |r: &mut DVector<f64>| {
         let mut x_ks = Vec::with_capacity(levels);
         let mut b_ks = Vec::with_capacity(levels);
         b_ks.push(r.clone());
@@ -92,12 +75,12 @@ pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
         {
             x_ks.push(b_ks[level].clone());
             presmoother(x_ks.last_mut().unwrap());
-            let p_t = partition_mat.transpose_view().to_owned();
+            let p_t = partition_mat.transpose();
             let r_k = &b_ks[level] - &(mat * &x_ks[level]);
             b_ks.push(&p_t * &r_k);
         }
 
-        let x_c = mat_coarse.solvec(&b_ks[levels]).unwrap();
+        let x_c = decomp.solve(&b_ks[levels]).unwrap();
         x_ks.push(x_c);
 
         for (level, (((partition_mat, postsmoother), b_k), mat)) in hierarchy
@@ -119,8 +102,9 @@ pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
     })
 }
 
-pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
-    let mat_coarse = hierarchy.get_matrices().last().unwrap().to_dense();
+pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
+    let mat_coarse = nalgebra::DMatrix::from(hierarchy.get_matrices().last().unwrap());
+    let decomp = mat_coarse.lu();
     let smoothing_steps = 10;
     let smoothers = hierarchy
         .get_matrices()
@@ -129,11 +113,11 @@ pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
         .collect::<Vec<_>>();
     let levels = hierarchy.get_partitions().len();
 
-    Box::new(move |r: &mut Array1<f64>| {
-        let mut x_ks: Vec<Array1<f64>> = hierarchy
+    Box::new(move |r: &mut DVector<f64>| {
+        let mut x_ks: Vec<DVector<f64>> = hierarchy
             .get_matrices()
             .iter()
-            .map(|p| Array::from_vec(vec![0.0; p.rows()]))
+            .map(|p| DVector::from(vec![0.0; p.nrows()]))
             .collect();
         let mut b_ks = x_ks.clone();
         let p_ks = hierarchy.get_partitions();
@@ -146,12 +130,12 @@ pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut Array1<f64>)> {
                 smoothers[level](&mut r_k);
                 x_ks[level] += &r_k;
             }
-            let p_t = p_ks[level].transpose_view().to_owned();
+            let p_t = p_ks[level].transpose();
             let r_k = &b_ks[level] - &(&mat_ks[level] * &x_ks[level]);
             b_ks[level + 1] = &p_t * &r_k;
         }
 
-        x_ks[levels] = mat_coarse.solvec(&b_ks[levels]).unwrap();
+        x_ks[levels] = decomp.solve(&b_ks[levels]).unwrap();
 
         for level in (0..levels).rev() {
             let interpolated_x = hierarchy.get_partition(level) * &x_ks[level + 1];
@@ -173,24 +157,27 @@ mod tests {
         preconditioner::{l1, multilevelgs, multilevell1, sgs},
         solver::stationary,
     };
-    use ndarray::{Array, Array1};
-    use ndarray_rand::{rand_distr::Uniform, RandomExt};
+    use nalgebra::base::DVector;
+    use nalgebra_sparse::csr::CsrMatrix;
+    use rand::{distributions::Uniform, thread_rng};
     use test_generator::test_resources;
 
     fn test_symmetry<F>(preconditioner: &F, dim: usize)
     where
-        F: Fn(&mut Array1<f64>),
+        F: Fn(&mut DVector<f64>),
     {
+        let mut rng = thread_rng();
+        let distribution = Uniform::new(-2.0_f64, 2.0_f64);
         for _ in 0..50 {
-            let u = ndarray::Array::random(dim, Uniform::new(0., 2.));
-            let v = ndarray::Array::random(dim, Uniform::new(0., 2.));
+            let u: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+            let v: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
             let mut preconditioned_v = v.clone();
             let mut preconditioned_u = u.clone();
             preconditioner(&mut preconditioned_v);
             preconditioner(&mut preconditioned_u);
 
-            let left: f64 = u.t().dot(&preconditioned_v);
-            let right: f64 = v.t().dot(&preconditioned_u);
+            let left: f64 = u.dot(&preconditioned_v);
+            let right: f64 = v.dot(&preconditioned_u);
             assert!(
                 (left - right).abs() < 10e-6,
                 "Left: {}, Right: {}",
@@ -202,30 +189,32 @@ mod tests {
 
     fn test_positive_definiteness<F>(preconditioner: &F, dim: usize)
     where
-        F: Fn(&mut Array1<f64>),
+        F: Fn(&mut DVector<f64>),
     {
+        let mut rng = thread_rng();
+        let distribution = Uniform::new(-2.0_f64, 2.0_f64);
         for _ in 0..50 {
-            let u = ndarray::Array::random(dim, Uniform::new(0., 2.));
-            let v = ndarray::Array::random(dim, Uniform::new(0., 2.));
+            let u: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+            let v: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
             let mut preconditioned_v = v.clone();
             let mut preconditioned_u = u.clone();
             preconditioner(&mut preconditioned_v);
             preconditioner(&mut preconditioned_u);
 
-            let pos: f64 = u.t().dot(&preconditioned_u);
+            let pos: f64 = u.dot(&preconditioned_u);
             assert!(pos > 0.0);
-            let pos: f64 = v.t().dot(&preconditioned_v);
+            let pos: f64 = v.dot(&preconditioned_v);
             assert!(pos > 0.0);
         }
     }
 
     fn multilevel_loader(mat_path: &str) -> (super::Hierarchy, usize) {
-        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
-            .unwrap()
-            .to_csr::<usize>();
-        let dim = mat.rows();
-        let ones = Array::from_vec(vec![1.0; mat.rows()]);
-        let zeros = Array::from_vec(vec![0.0; mat.rows()]);
+        let mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+        let dim = mat.nrows();
+        let ones = DVector::from(vec![1.0; mat.nrows()]);
+        let zeros = DVector::from(vec![0.0; mat.nrows()]);
         let (near_null, _) = stationary(&mat, &zeros, &ones, 5, 10.0_f64.powi(-6), &l1(&mat));
 
         (modularity_matching(mat.clone(), &near_null, 2.0), dim)
@@ -233,40 +222,40 @@ mod tests {
 
     #[test_resources("test_matrices/*")]
     fn test_symmetry_l1(mat_path: &str) {
-        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
-            .unwrap()
-            .to_csr::<usize>();
-        let dim = mat.rows();
+        let mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+        let dim = mat.nrows();
         let preconditioner = l1(&mat);
         test_symmetry(&preconditioner, dim);
     }
 
     #[test_resources("test_matrices/*")]
     fn test_positive_definiteness_l1(mat_path: &str) {
-        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
-            .unwrap()
-            .to_csr::<usize>();
-        let dim = mat.rows();
+        let mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+        let dim = mat.nrows();
         let preconditioner = l1(&mat);
         test_positive_definiteness(&preconditioner, dim);
     }
 
     #[test_resources("test_matrices/*")]
     fn test_symmetry_sgs(mat_path: &str) {
-        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
-            .unwrap()
-            .to_csr::<usize>();
-        let dim = mat.rows();
+        let mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+        let dim = mat.nrows();
         let preconditioner = sgs(&mat);
         test_symmetry(&preconditioner, dim);
     }
 
     #[test_resources("test_matrices/*")]
     fn test_positive_definiteness_sgs(mat_path: &str) {
-        let mat = sprs::io::read_matrix_market::<f64, usize, _>(mat_path)
-            .unwrap()
-            .to_csr::<usize>();
-        let dim = mat.rows();
+        let mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+        let dim = mat.nrows();
         let preconditioner = sgs(&mat);
         test_positive_definiteness(&preconditioner, dim);
     }

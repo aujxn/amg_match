@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sprs = "0.11.0"
-ndarray = "0.15.4"
-ndarray-rand = "0.14.0"
-ndarray-linalg = {version = "0.14.1", features = ["openblas-system"]}
+nalgebra = { version = "0.30.1", features = ["rand"] }
+nalgebra-sparse = { version = "0.6.0", features = ["io"] }
 image = "0.24.1"
 indexmap = "1.8.0"
 rand = "0.8.5"

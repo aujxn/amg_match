@@ -4,8 +4,9 @@ use amg_match::{
     preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
-use ndarray::Array1;
-use ndarray_rand::{rand_distr::Uniform, RandomExt};
+use nalgebra::DVector;
+use nalgebra_sparse::CsrMatrix;
+use rand::{distributions::Uniform, thread_rng};
 use structopt::StructOpt;
 use strum_macros::{Display, EnumString};
 
@@ -64,19 +65,16 @@ fn main() {
     pretty_env_logger::init();
     let opt = Opt::from_args();
 
-    let mat = sprs::io::read_matrix_market::<f64, usize, _>(&opt.input)
-        .unwrap()
-        .to_csr::<usize>();
-    /*
-    if let Some(file_out) = opt.picture {
-        mat_to_image(&mat, &file_out);
-    }
-    */
+    let mat = CsrMatrix::from(
+        &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
+    );
 
-    let dim = mat.rows();
-    let ones = ndarray::Array::from_vec(vec![1.0; mat.rows()]);
-    let zeros = ndarray::Array::from_vec(vec![0.0; mat.rows()]);
-    let x: Array1<f64> = ndarray::Array::random(dim, Uniform::new(-2., 2.));
+    let dim = mat.nrows();
+    let ones = DVector::from(vec![1.0; mat.nrows()]);
+    let zeros = DVector::from(vec![0.0; mat.nrows()]);
+    let mut rng = thread_rng();
+    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
+    let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
     let b = &mat * &x;
 
     let preconditioner = match opt.preconditioner {
@@ -106,7 +104,7 @@ fn main() {
             );
             info!(
                 "Size of coarsest: {}",
-                hierarchy.get_matrices().last().unwrap().rows()
+                hierarchy.get_matrices().last().unwrap().nrows()
             );
 
             match opt.preconditioner {
