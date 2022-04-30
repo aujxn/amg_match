@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
+use rayon::prelude::*;
 
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
@@ -65,7 +66,8 @@ pub fn modularity_matching_no_copies(
     near_null: &DVector<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {
-    let k_passes = 10;
+    use std::sync::{Arc, Mutex};
+    let k_passes = 50;
     let mut coarse_mat = mat.clone();
     let mut pairs = Vec::with_capacity(mat.nrows() / 3);
     let mut starting_vertex_count = mat.nrows() as f64;
@@ -77,52 +79,65 @@ pub fn modularity_matching_no_copies(
     loop {
         let vertex_count = coarse_mat.nrows();
         let mut wants_to_merge: Vec<Option<(usize, f64)>> = vec![None; vertex_count];
-        let mut alive: Vec<bool> = vec![true; vertex_count];
+        let mut alive = vec![true; vertex_count];
+        let alive_pairs = Arc::new(Mutex::new((&mut alive, &mut pairs)));
 
         for _ in 0..k_passes {
-            let mut pair_found = false;
-            for (i, j, val) in coarse_mat
-                .triplet_iter()
-                .filter(|(i, j, _)| *i != *j && alive[*i] && alive[*j])
             {
-                let weight = val * -near_null[i] * near_null[j];
-                let modularity_ij = weight - inverse_total * row_sums[i] * row_sums[j];
-                if modularity_ij > 0.0 {
-                    match wants_to_merge[i] {
-                        None => wants_to_merge[i] = Some((j, modularity_ij)),
-                        Some((_, max)) => {
-                            if max < modularity_ij {
-                                wants_to_merge[i] = Some((j, modularity_ij));
+                let (ref alive, _) = *alive_pairs.lock().unwrap();
+                wants_to_merge
+                    .par_iter_mut()
+                    .enumerate()
+                    .filter(|(i, _)| alive[*i])
+                    .for_each(|(i, wants_to_merge)| {
+                        let row = coarse_mat.row(i);
+                        for (&j, val) in row
+                            .col_indices()
+                            .iter()
+                            .zip(row.values())
+                            .filter(|(&j, _)| i != j && alive[j])
+                        {
+                            let weight = val * -near_null[i] * near_null[j];
+                            let modularity_ij = weight - inverse_total * row_sums[i] * row_sums[j];
+                            if modularity_ij > 0.0 {
+                                match wants_to_merge {
+                                    None => *wants_to_merge = Some((j, modularity_ij)),
+                                    Some((_, max)) => {
+                                        if *max < modularity_ij {
+                                            *wants_to_merge = Some((j, modularity_ij));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+            }
+
+            let start_pair_count = { alive_pairs.lock().unwrap().1.len() };
+            wants_to_merge
+                .par_iter()
+                .enumerate()
+                .filter(|(_, max)| max.is_some())
+                .map(|(i, max)| (i, max.unwrap().0))
+                .for_each(|(i, j)| {
+                    if let Some((maybe_i, _)) = wants_to_merge[j] {
+                        if maybe_i == i {
+                            let (ref mut alive, ref mut pairs) = *alive_pairs.lock().unwrap();
+                            if alive[i] && alive[j] {
+                                pairs.push((i, j));
+                                alive[i] = false;
+                                alive[j] = false;
                             }
                         }
                     }
-                }
-            }
-
-            for (i, max) in wants_to_merge.iter().enumerate() {
-                let j = match max {
-                    None => continue,
-                    Some((index, _)) => *index,
-                };
-
-                if !alive[i] || !alive[j] {
-                    continue;
-                }
-
-                if let Some((maybe_i, _)) = wants_to_merge[j] {
-                    if maybe_i == i {
-                        pairs.push((i, j));
-                        alive[i] = false;
-                        alive[j] = false;
-                        pair_found = true;
-                    }
-                }
-            }
-            if !pair_found {
+                });
+            let end_pair_count = { alive_pairs.lock().unwrap().1.len() };
+            if start_pair_count == end_pair_count {
                 break;
             }
         }
 
+        let (_, ref mut pairs) = *alive_pairs.lock().unwrap();
         // TODO also return somewhere if delta Q is too small per iteration
         if pairs.is_empty() {
             return hierarchy;
@@ -135,7 +150,7 @@ pub fn modularity_matching_no_copies(
         let coarse_vertex_count = new_partition.ncols() as f64;
 
         if let Some(old_partition) = partition_mat {
-            partition_mat = Some(&old_partition * &new_partition);
+            partition_mat = Some(old_partition * &new_partition);
         } else {
             partition_mat = Some(new_partition.to_owned());
         }
