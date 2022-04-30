@@ -1,6 +1,6 @@
 use amg_match::{
     //mat_to_image,
-    partitioner::modularity_matching,
+    partitioner::{modularity_matching, modularity_matching_no_copies},
     preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
@@ -83,13 +83,14 @@ fn main() {
         Preconditioner::Fgs => fgs(&mat),
         Preconditioner::Bgs => bgs(&mat),
         Preconditioner::Sgs => sgs(&mat),
-        Preconditioner::Adaptive => adaptive(&mat, 5),
+        Preconditioner::Adaptive => adaptive(&mat, 5), //TODO add cli arg for steps and smoothing steps
         _ => {
             let iterations_for_near_null = 5;
             info!(
                 "calculating near null component... {} iterations using stationary L1",
                 iterations_for_near_null
             );
+            /*
             let (near_null, _) = stationary(
                 &mat,
                 &zeros,
@@ -98,8 +99,9 @@ fn main() {
                 10.0_f64.powi(-6),
                 &l1(&mat),
             );
+            */
 
-            let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+            let hierarchy = modularity_matching(mat.clone(), &ones, 2.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),
@@ -117,6 +119,7 @@ fn main() {
         }
     };
 
+    info!("solving");
     let _rhs = match opt.solver {
         Solver::Stationary => stationary(
             &mat,
@@ -149,7 +152,7 @@ fn adaptive(mat: &CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVector<f64>)
     let mut solvers = vec![];
     solvers.push(l1_preconditioner);
 
-    while convergence_rate > 0.15 {
+    while convergence_rate > 0.20 {
         let starting_iterate: DVector<f64> =
             DVector::from_distribution(dim, &distribution, &mut rng);
         let starting_residual = &zeros - mat * &starting_iterate;
@@ -175,7 +178,7 @@ fn adaptive(mat: &CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVector<f64>)
 
         let near_null_norm = near_null.norm();
         let w = &near_null / near_null_norm;
-        let hierarchy = modularity_matching(mat.clone(), &w, 2.0);
+        let hierarchy = modularity_matching_no_copies(mat.clone(), &w, 2.0);
         let ml1 = multilevell1(hierarchy);
         solvers.push(ml1);
     }
