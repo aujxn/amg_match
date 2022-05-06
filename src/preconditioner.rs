@@ -106,7 +106,7 @@ pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
     let mat_coarse = nalgebra::DMatrix::from(hierarchy.get_matrices().last().unwrap());
     trace!("decomposing coarse problem");
     let decomp = mat_coarse.lu();
-    let smoothing_steps = 3;
+    let smoothing_steps = 2;
     trace!("building multilevel smoothers");
     let smoothers = hierarchy
         .get_matrices()

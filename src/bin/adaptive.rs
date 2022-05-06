@@ -1,6 +1,6 @@
 use amg_match::{
     //mat_to_image,
-    partitioner::{modularity_matching, modularity_matching_no_copies},
+    partitioner::{find_near_null, modularity_matching, modularity_matching_no_copies},
     preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
@@ -36,7 +36,7 @@ struct Opt {
 
     /// Stop iterations after scaled residual is less
     /// than tolerance squared
-    #[structopt(default_value = "10e-6")]
+    #[structopt(default_value = "1e-6")]
     tolerance: f64,
     //#[structopt(short, long)]
     //picture: Option<String>,
@@ -85,23 +85,22 @@ fn main() {
         Preconditioner::Sgs => sgs(&mat),
         Preconditioner::Adaptive => adaptive(&mat, 5), //TODO add cli arg for steps and smoothing steps
         _ => {
-            let iterations_for_near_null = 5;
+            let iterations_for_near_null = 10;
             info!(
                 "calculating near null component... {} iterations using stationary L1",
                 iterations_for_near_null
             );
-            /*
+
             let (near_null, _) = stationary(
                 &mat,
                 &zeros,
-                &ones,
+                &x,
                 iterations_for_near_null,
                 10.0_f64.powi(-6),
                 &l1(&mat),
             );
-            */
 
-            let hierarchy = modularity_matching(mat.clone(), &ones, 2.0);
+            let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),
@@ -140,61 +139,46 @@ fn main() {
     };
 }
 
-fn adaptive(mat: &CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVector<f64>)> {
-    let mut convergence_rate = 1.0;
-    let dim = mat.nrows();
-    let zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut rng = thread_rng();
-    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    let root = 1.0 / (steps as f64);
+fn adaptive<'a>(mat: &'a CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
+    let mut solvers = vec![l1(mat)];
 
-    let l1_preconditioner = l1(mat);
-    let mut solvers = vec![];
-    solvers.push(l1_preconditioner);
+    loop {
+        let (near_null, row_sums, inverse_total) = {
+            let preconditioner = test_pc(mat, &solvers);
+            find_near_null(mat, &l1(mat))
+        };
 
-    while convergence_rate > 0.20 {
-        let starting_iterate: DVector<f64> =
-            DVector::from_distribution(dim, &distribution, &mut rng);
-        let starting_residual = &zeros - mat * &starting_iterate;
-        let starting_residual_norm = starting_residual.norm();
-
-        let (near_null, _) = composite_tester(
-            mat,
-            &zeros,
-            &starting_iterate,
-            steps,
-            10.0_f64.powi(-6),
-            &solvers,
+        info!("found suitable near null");
+        /*
+        let hierarchy = modularity_matching_no_copies(
+            mat.clone(),
+            near_null.clone(),
+            row_sums.clone(),
+            inverse_total,
+            2.0,
+            12.0,
         );
+        */
+        let hierarchy = modularity_matching(mat.clone(), &near_null, 3.0);
+        let ml1 = multilevell1(hierarchy);
+        solvers.push(ml1);
 
-        let final_residual = mat * &near_null - &zeros;
-        let final_residual_norm = final_residual.norm();
-        convergence_rate = (final_residual_norm / starting_residual_norm).powf(root);
+        let convergence_rate = composite_tester(mat, steps, &solvers);
         info!(
             "components: {} convergence_rate: {}",
             solvers.len(),
             convergence_rate
         );
-
-        let near_null_norm = near_null.norm();
-        let w = &near_null / near_null_norm;
-        let hierarchy = modularity_matching_no_copies(mat.clone(), &w, 2.0);
-        let ml1 = multilevell1(hierarchy);
-        solvers.push(ml1);
+        if convergence_rate < 0.3 {
+            return build_adaptive_preconditioner(mat, solvers);
+        }
     }
-
-    build_adaptive_preconditioner(&mat, solvers)
 }
 
-pub fn build_adaptive_preconditioner<F: 'static>(
-    mat: &CsrMatrix<f64>,
-    components: Vec<F>,
-) -> Box<dyn Fn(&mut DVector<f64>)>
-where
-    F: Fn(&mut DVector<f64>),
-{
-    // TODO figure out lifetimes
-    let mat = mat.clone();
+pub fn build_adaptive_preconditioner<'a>(
+    mat: &'a CsrMatrix<f64>,
+    components: Vec<Box<dyn Fn(&mut DVector<f64>)>>,
+) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
     Box::new(move |r: &mut DVector<f64>| {
         let mut x = DVector::from(vec![0.0; r.len()]);
 
@@ -202,7 +186,24 @@ where
             let mut y = r.clone();
             component(&mut y);
             x += &y;
-            *r -= &mat * &y;
+            *r -= mat * &y;
+        }
+        *r = x;
+    })
+}
+
+pub fn test_pc<'a>(
+    mat: &'a CsrMatrix<f64>,
+    components: &'a Vec<Box<dyn Fn(&mut DVector<f64>)>>,
+) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
+    Box::new(move |r: &mut DVector<f64>| {
+        let mut x = DVector::from(vec![0.0; r.len()]);
+
+        for component in components.iter().chain(components.iter().rev()) {
+            let mut y = r.clone();
+            component(&mut y);
+            x += &y;
+            *r -= mat * &y;
         }
         *r = x;
     })
@@ -210,28 +211,45 @@ where
 
 pub fn composite_tester<F>(
     mat: &CsrMatrix<f64>,
-    rhs: &DVector<f64>,
-    initial_iterate: &DVector<f64>,
-    iter: usize,
-    _epsilon: f64,
+    steps: usize,
     composite_preconditioner: &Vec<F>,
-) -> (DVector<f64>, bool)
+) -> f64
 where
     F: Fn(&mut DVector<f64>),
 {
-    let mut residual = rhs - mat * initial_iterate;
-    let mut iterate = initial_iterate.clone();
+    let test_runs = 3;
+    let mut avg = 0.0;
+    let dim = mat.nrows();
+    let root = 1.0 / (2.0 * steps as f64);
+    let distribution = Uniform::new(-1e-3_f64, 1e-3_f64);
+    let mut rng = thread_rng();
 
-    for _i in 0..iter {
-        for component in composite_preconditioner
-            .iter()
-            .chain(composite_preconditioner.iter().rev())
-        {
-            let mut y = residual.clone();
-            component(&mut y);
-            iterate += &y;
-            residual -= mat * &y;
+    for _ in 0..test_runs {
+        let mut iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+        let starting_residual_norm = iterate.dot(&(mat * &iterate));
+        let zeros = DVector::zeros(dim);
+
+        let mut residual = &zeros - mat * &iterate;
+        for _i in 0..steps {
+            for component in composite_preconditioner
+                .iter()
+                .chain(composite_preconditioner.iter().rev())
+            {
+                let mut y = residual.clone();
+                component(&mut y);
+                iterate += &y;
+                residual -= mat * &y;
+            }
+            if iterate.dot(&(mat * &iterate)) < 1e-12 {
+                warn!("tester converged");
+                break;
+            }
         }
+        let final_residual_norm = iterate.dot(&(mat * &iterate));
+        let convergence_rate = (final_residual_norm / starting_residual_norm).powf(root);
+        avg += convergence_rate;
     }
-    (iterate, false)
+    avg /= test_runs as f64;
+
+    avg
 }

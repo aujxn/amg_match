@@ -6,11 +6,12 @@ import random
 
 for i in range(3):
     box = Box((-1, -1, -1), (1, 1, 1))
+    box.faces.name = "out"
     mesh = Mesh(OCCGeometry(box).GenerateMesh(maxh=0.1))
     for j in range(i):
         mesh.Refine()
 
-    fes = H1(mesh, order=1, dirichlet=".*")
+    fes = H1(mesh, order=1, dirichlet="out")
     u,v = fes.TnT()
 
     theta = Parameter(random.random())

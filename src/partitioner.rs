@@ -3,7 +3,11 @@ use std::collections::VecDeque;
 
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
+use rand::prelude::*;
+use rand::{distributions::Uniform, thread_rng};
 use rayon::prelude::*;
+
+//TODO check pos rowsums in tests
 
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
@@ -61,18 +65,50 @@ impl Hierarchy {
     }
 }
 
+pub fn find_near_null<F>(
+    mat: &CsrMatrix<f64>,
+    preconditioner: &F,
+) -> (DVector<f64>, DVector<f64>, f64)
+where
+    F: Fn(&mut DVector<f64>),
+{
+    let zeros = DVector::from(vec![0.0; mat.nrows()]);
+    let mut rng = thread_rng();
+    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
+    let mut near_null: DVector<f64> =
+        DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
+
+    loop {
+        no_zeroes(&mut near_null);
+        let (mut result, converged) =
+            crate::solver::stationary(mat, &zeros, &near_null, 50, 1.0e-8_f64, preconditioner);
+        result /= result.norm();
+
+        if let Some((row_sums, inverse_total)) = try_row_sums(mat, &mut result) {
+            return (result, row_sums, inverse_total);
+        }
+        if converged {
+            near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
+        } else {
+            near_null = result;
+        }
+    }
+}
+
 pub fn modularity_matching_no_copies(
     mat: CsrMatrix<f64>,
-    near_null: &DVector<f64>,
-    coarsening_factor: f64,
+    mut near_null: DVector<f64>,
+    mut row_sums: DVector<f64>,
+    inverse_total: f64,
+    coarsening_factor_per_level: f64,
+    total_coarsening_factor: f64,
 ) -> Hierarchy {
     use std::sync::{Arc, Mutex};
     let k_passes = 50;
     let mut coarse_mat = mat.clone();
     let mut pairs = Vec::with_capacity(mat.nrows() / 3);
-    let mut starting_vertex_count = mat.nrows() as f64;
-    let (mut row_sums, inverse_total) = row_sums(&mat, near_null);
-    let mut near_null = near_null.clone();
+    let starting_vertex_count = mat.nrows() as f64;
+    let mut level_starting_vertex_count = starting_vertex_count;
     let mut hierarchy = Hierarchy::new(mat);
     let mut partition_mat = None;
 
@@ -161,32 +197,41 @@ pub fn modularity_matching_no_copies(
         row_sums = &p_transpose * row_sums;
         near_null = &p_transpose * near_null;
 
-        let current_coarsening_factor = starting_vertex_count / coarse_vertex_count;
-        if current_coarsening_factor > coarsening_factor {
+        let current_coarsening_factor = level_starting_vertex_count / coarse_vertex_count;
+        if current_coarsening_factor > coarsening_factor_per_level {
             info!(
                 "added level! num vertices coarse: {}",
                 new_partition.ncols()
             );
             hierarchy.push(partition_mat.unwrap());
             partition_mat = None;
-            starting_vertex_count = coarse_vertex_count;
-        } else {
-            //trace!("current_coarsening_factor: {current_coarsening_factor}");
+            level_starting_vertex_count = coarse_vertex_count;
+            if starting_vertex_count / coarse_vertex_count > total_coarsening_factor {
+                return hierarchy;
+            }
         }
     }
 }
 
-fn row_sums(mat: &CsrMatrix<f64>, near_null: &DVector<f64>) -> (DVector<f64>, f64) {
+fn try_row_sums(mat: &CsrMatrix<f64>, near_null: &mut DVector<f64>) -> Option<(DVector<f64>, f64)> {
+    no_zeroes(near_null);
     let num_vertices = mat.nrows();
     let mut row_sums: DVector<f64> = DVector::from(vec![0.0; num_vertices]);
-    for (i, j, val) in mat.triplet_iter() {
+    for (i, j, val) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
         row_sums[i] += val * -near_null[i] * near_null[j];
     }
 
-    let total: f64 = row_sums.iter().sum();
+    let mut total = 0.0;
+    for sum in row_sums.iter() {
+        if *sum < 0.0 {
+            return None;
+        }
+        total += sum;
+    }
+
     let inverse_total = 1.0 / total;
 
-    (row_sums, inverse_total)
+    Some((row_sums, inverse_total))
 }
 
 /// Takes a s.p.d matrix (mat), a vector that is near the nullspace of the matrix,
@@ -197,7 +242,9 @@ pub fn modularity_matching(
     near_null: &DVector<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {
-    let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, near_null);
+    let mut near_null = near_null.clone();
+    no_zeroes(&mut near_null);
+    let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);
     let mut partition_mat = None;
@@ -234,7 +281,7 @@ pub fn modularity_matching(
                 modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
-                    info!(
+                    trace!(
                         "added level! num vertices coarse: {}",
                         new_partition.ncols()
                     );
@@ -259,7 +306,7 @@ fn build_weighted_matrix(
     let mut mat_bar = CooMatrix::new(num_vertices, num_vertices);
     // NOTE: don't actually have to form this, can check if positive when looking
     // for pairs to merge which could save copying the entire matrix
-    for (i, j, val) in mat.triplet_iter() {
+    for (i, j, val) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
         let val_ij = val * -near_null[i] * near_null[j];
         mat_bar.push(i, j, val_ij);
     }
@@ -267,6 +314,15 @@ fn build_weighted_matrix(
     let ones = DVector::from(vec![1.0; num_vertices]);
 
     let row_sums: DVector<f64> = &mat_bar * ones;
+
+    for (i, sum) in row_sums.iter().enumerate() {
+        assert!(
+            *sum > 0.0,
+            "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}",
+            mat.get_entry(i, i).unwrap().into_value() * near_null[i] * near_null[i],
+            near_null[i]
+        );
+    }
 
     let total: f64 = row_sums.iter().sum();
     let inverse_total = 1.0 / total;
@@ -390,6 +446,23 @@ fn build_partition_from_pairs(pairs: &Vec<(usize, usize)>, vertex_count: usize) 
     CsrMatrix::from(&partition_mat)
 }
 
+fn no_zeroes(near_null: &mut DVector<f64>) {
+    let mut rng = thread_rng();
+    let epsilon = 1.0e-10_f64;
+    let threshold = 1.0e-12_f64;
+    let negative = rand::distributions::Uniform::new(-epsilon, -threshold);
+    let positive = rand::distributions::Uniform::new(threshold, epsilon);
+
+    for x in near_null.iter_mut().filter(|x| x.abs() < threshold) {
+        //warn!("perturbed element");
+        if rng.gen() {
+            *x = negative.sample(&mut rng)
+        } else {
+            *x = positive.sample(&mut rng)
+        }
+    }
+}
+
 #[cfg(test)]
 extern crate test_generator;
 
@@ -409,9 +482,9 @@ mod tests {
         let ones = DVector::from(vec![1.0; mat.nrows()]);
         let zeros = DVector::from(vec![0.0; mat.nrows()]);
 
-        let (near_null, _) = stationary(&mat, &zeros, &ones, 5, 10.0_f64.powi(-6), &l1(&mat));
+        let (mut near_null, _) = stationary(&mat, &zeros, &ones, 5, 10.0_f64.powi(-6), &l1(&mat));
 
-        let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+        let hierarchy = modularity_matching(mat.clone(), &mut near_null, 2.0);
 
         for p in hierarchy.get_partitions().iter() {
             let ones = DVector::from(vec![1.0; p.ncols()]);
