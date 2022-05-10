@@ -184,7 +184,7 @@ pub fn modularity_matching_no_copies(
 }
 
 fn try_row_sums(mat: &CsrMatrix<f64>, near_null: &mut DVector<f64>) -> Option<(DVector<f64>, f64)> {
-    no_zeroes(near_null);
+    //no_zeroes(near_null);
     let num_vertices = mat.nrows();
     let mut row_sums: DVector<f64> = DVector::from(vec![0.0; num_vertices]);
     for (i, j, val) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
@@ -212,8 +212,6 @@ pub fn modularity_matching(
     near_null: &DVector<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {
-    let mut near_null = near_null.clone();
-    no_zeroes(&mut near_null);
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);
@@ -274,8 +272,6 @@ fn build_weighted_matrix(
 ) -> (CsrMatrix<f64>, DVector<f64>, f64) {
     let num_vertices = mat.nrows();
     let mut mat_bar = CooMatrix::new(num_vertices, num_vertices);
-    // NOTE: don't actually have to form this, can check if positive when looking
-    // for pairs to merge which could save copying the entire matrix
     for (i, j, val) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
         let val_ij = val * -near_null[i] * near_null[j];
         mat_bar.push(i, j, val_ij);
@@ -283,15 +279,17 @@ fn build_weighted_matrix(
     let mat_bar = CsrMatrix::from(&mat_bar);
     let ones = DVector::from(vec![1.0; num_vertices]);
 
-    let row_sums: DVector<f64> = &mat_bar * ones;
+    let mut row_sums: DVector<f64> = &mat_bar * ones;
 
-    for (i, sum) in row_sums.iter().enumerate() {
-        assert!(
-            *sum > 0.0,
-            "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}",
-            mat.get_entry(i, i).unwrap().into_value() * near_null[i] * near_null[i],
-            near_null[i]
-        );
+    for (i, sum) in row_sums.iter_mut().enumerate() {
+        if *sum < 0.0 {
+            warn!(
+                "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}. Setting to 0.0",
+                mat.get_entry(i, i).unwrap().into_value() * near_null[i] * near_null[i],
+                near_null[i]
+            );
+            *sum = 0.0
+        }
     }
 
     let total: f64 = row_sums.iter().sum();

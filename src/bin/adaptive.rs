@@ -1,6 +1,7 @@
 use amg_match::{
+    adaptive::adaptive,
     //mat_to_image,
-    partitioner::{find_near_null, modularity_matching, modularity_matching_no_copies},
+    partitioner::{modularity_matching, modularity_matching_no_copies},
     preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
@@ -83,7 +84,7 @@ fn main() {
         Preconditioner::Fgs => fgs(&mat),
         Preconditioner::Bgs => bgs(&mat),
         Preconditioner::Sgs => sgs(&mat),
-        Preconditioner::Adaptive => adaptive(&mat, 10), //TODO add cli arg for steps and smoothing steps
+        Preconditioner::Adaptive => adaptive(&mat),
         _ => {
             let iterations_for_near_null = 10;
             info!(
@@ -142,120 +143,4 @@ fn main() {
             &preconditioner,
         ),
     };
-}
-
-fn adaptive<'a>(mat: &'a CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
-    let mut solvers = vec![l1(mat)];
-
-    loop {
-        let (near_null, row_sums, inverse_total) = {
-            let preconditioner = test_pc(mat, &solvers);
-            find_near_null(mat, &l1(mat))
-        };
-
-        info!("found suitable near null");
-        /*
-        let hierarchy = modularity_matching_no_copies(
-            mat.clone(),
-            near_null.clone(),
-            row_sums.clone(),
-            inverse_total,
-            2.0,
-            12.0,
-        );
-        */
-        let hierarchy = modularity_matching(mat.clone(), &near_null, 3.0);
-        let ml1 = multilevell1(hierarchy);
-        solvers.push(ml1);
-
-        let convergence_rate = composite_tester(mat, steps, &solvers);
-        info!(
-            "components: {} convergence_rate: {}",
-            solvers.len(),
-            convergence_rate
-        );
-        if convergence_rate < 0.50 {
-            //if solvers.len() == 8 {
-            return build_adaptive_preconditioner(mat, solvers);
-        }
-    }
-}
-
-pub fn build_adaptive_preconditioner<'a>(
-    mat: &'a CsrMatrix<f64>,
-    components: Vec<Box<dyn Fn(&mut DVector<f64>)>>,
-) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
-    Box::new(move |r: &mut DVector<f64>| {
-        let mut x = DVector::from(vec![0.0; r.len()]);
-
-        for component in components.iter().chain(components.iter().rev()) {
-            let mut y = r.clone();
-            component(&mut y);
-            x += &y;
-            *r -= mat * &y;
-        }
-        *r = x;
-    })
-}
-
-pub fn test_pc<'a>(
-    mat: &'a CsrMatrix<f64>,
-    components: &'a Vec<Box<dyn Fn(&mut DVector<f64>)>>,
-) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
-    Box::new(move |r: &mut DVector<f64>| {
-        let mut x = DVector::from(vec![0.0; r.len()]);
-
-        for component in components.iter().chain(components.iter().rev()) {
-            let mut y = r.clone();
-            component(&mut y);
-            x += &y;
-            *r -= mat * &y;
-        }
-        *r = x;
-    })
-}
-
-pub fn composite_tester<F>(
-    mat: &CsrMatrix<f64>,
-    steps: usize,
-    composite_preconditioner: &Vec<F>,
-) -> f64
-where
-    F: Fn(&mut DVector<f64>),
-{
-    let test_runs = 3;
-    let mut avg = 0.0;
-    let dim = mat.nrows();
-    let root = 1.0 / (2.0 * steps as f64);
-    let distribution = Uniform::new(-1e-3_f64, 1e-3_f64);
-    let mut rng = thread_rng();
-
-    for _ in 0..test_runs {
-        let mut iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
-        let starting_residual_norm = iterate.dot(&(mat * &iterate));
-        let zeros = DVector::zeros(dim);
-
-        let mut residual = &zeros - mat * &iterate;
-        for _i in 0..steps {
-            for component in composite_preconditioner
-                .iter()
-                .chain(composite_preconditioner.iter().rev())
-            {
-                let mut y = residual.clone();
-                component(&mut y);
-                iterate += &y;
-                residual -= mat * &y;
-            }
-            if iterate.dot(&(mat * &iterate)) < 1e-12 {
-                warn!("tester converged");
-                break;
-            }
-        }
-        let final_residual_norm = iterate.dot(&(mat * &iterate));
-        let convergence_rate = (final_residual_norm / starting_residual_norm).powf(root);
-        avg += convergence_rate;
-    }
-    avg /= test_runs as f64;
-
-    avg
 }
