@@ -57,7 +57,7 @@ where
         r = rhs - &(mat * &x);
         let r_norm = r.dot(&r);
 
-        if iter % 50 == 0 && iter > 0 {
+        if iter % 50 == 0 {
             trace!("squared norm iter {iter}: {r_norm}");
         }
 

@@ -65,36 +65,6 @@ impl Hierarchy {
     }
 }
 
-pub fn find_near_null<F>(
-    mat: &CsrMatrix<f64>,
-    preconditioner: &F,
-) -> (DVector<f64>, DVector<f64>, f64)
-where
-    F: Fn(&mut DVector<f64>),
-{
-    let zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut rng = thread_rng();
-    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    let mut near_null: DVector<f64> =
-        DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
-
-    loop {
-        no_zeroes(&mut near_null);
-        let (mut result, converged) =
-            crate::solver::stationary(mat, &zeros, &near_null, 50, 1.0e-8_f64, preconditioner);
-        result /= result.norm();
-
-        if let Some((row_sums, inverse_total)) = try_row_sums(mat, &mut result) {
-            return (result, row_sums, inverse_total);
-        }
-        if converged {
-            near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
-        } else {
-            near_null = result;
-        }
-    }
-}
-
 pub fn modularity_matching_no_copies(
     mat: CsrMatrix<f64>,
     mut near_null: DVector<f64>,
@@ -444,23 +414,6 @@ fn build_partition_from_pairs(pairs: &Vec<(usize, usize)>, vertex_count: usize) 
     }
 
     CsrMatrix::from(&partition_mat)
-}
-
-fn no_zeroes(near_null: &mut DVector<f64>) {
-    let mut rng = thread_rng();
-    let epsilon = 1.0e-10_f64;
-    let threshold = 1.0e-12_f64;
-    let negative = rand::distributions::Uniform::new(-epsilon, -threshold);
-    let positive = rand::distributions::Uniform::new(threshold, epsilon);
-
-    for x in near_null.iter_mut().filter(|x| x.abs() < threshold) {
-        //warn!("perturbed element");
-        if rng.gen() {
-            *x = negative.sample(&mut rng)
-        } else {
-            *x = positive.sample(&mut rng)
-        }
-    }
 }
 
 #[cfg(test)]

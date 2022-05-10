@@ -83,13 +83,18 @@ fn main() {
         Preconditioner::Fgs => fgs(&mat),
         Preconditioner::Bgs => bgs(&mat),
         Preconditioner::Sgs => sgs(&mat),
-        Preconditioner::Adaptive => adaptive(&mat, 5), //TODO add cli arg for steps and smoothing steps
+        Preconditioner::Adaptive => adaptive(&mat, 10), //TODO add cli arg for steps and smoothing steps
         _ => {
             let iterations_for_near_null = 10;
             info!(
                 "calculating near null component... {} iterations using stationary L1",
                 iterations_for_near_null
             );
+
+            /*
+            let test = &mat * &ones;
+            info!("{:?}", test);
+            */
 
             let (near_null, _) = stationary(
                 &mat,
@@ -169,7 +174,8 @@ fn adaptive<'a>(mat: &'a CsrMatrix<f64>, steps: usize) -> Box<dyn Fn(&mut DVecto
             solvers.len(),
             convergence_rate
         );
-        if convergence_rate < 0.3 {
+        if convergence_rate < 0.50 {
+            //if solvers.len() == 8 {
             return build_adaptive_preconditioner(mat, solvers);
         }
     }
