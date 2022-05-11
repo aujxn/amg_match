@@ -14,6 +14,9 @@ use strum_macros::{Display, EnumString};
 #[macro_use]
 extern crate log;
 
+//TODO make preconditioner construction and impl parallel
+//     and replace decomp with LAPACK
+
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "amg_match_cli",

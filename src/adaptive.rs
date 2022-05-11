@@ -7,7 +7,7 @@ use rand::{distributions::Uniform, thread_rng};
 
 pub fn adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
     let mut solvers = vec![l1(mat)];
-    let steps = 3;
+    let steps = 10;
 
     loop {
         let mut near_null = find_near_null(mat, &solvers);
@@ -24,7 +24,7 @@ pub fn adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>) + 
             12.0,
         );
         */
-        let hierarchy = modularity_matching(mat.clone(), &near_null, 3.0);
+        let hierarchy = modularity_matching(mat.clone(), &near_null, 1.8);
         let ml1 = multilevell1(hierarchy);
         solvers.push(ml1);
 
@@ -34,7 +34,7 @@ pub fn adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>) + 
             solvers.len(),
             convergence_rate
         );
-        if convergence_rate < 0.70 || solvers.len() == 10 {
+        if convergence_rate < 0.50 || solvers.len() == 5 {
             return build_adaptive_preconditioner(mat, solvers);
         }
     }
@@ -66,6 +66,7 @@ fn find_near_null<F>(mat: &CsrMatrix<f64>, composite_preconditioner: &Vec<F>) ->
 where
     F: Fn(&mut DVector<f64>),
 {
+    trace!("searching for near null");
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
     let mut iterate: DVector<f64> =
@@ -80,19 +81,19 @@ where
     loop {
         let error_norm_new = iterate.dot(&(mat * &iterate));
 
-        if error_norm_new < 1e-16 {
+        if error_norm_new < 1e-12 {
             warn!("find_near_null converged during search");
             return iterate;
         }
 
-        if iter % 10 == 0 {
+        if iter % 10 == 0 && iter != 0 {
             trace!(
                 "asymptotic convergence rate: {}",
                 error_norm_new / error_norm_old
             );
         }
 
-        if error_norm_new / error_norm_old > 0.95 {
+        if error_norm_new / error_norm_old > 0.97 {
             info!("convergence has stopped");
             return iterate;
         }
@@ -141,7 +142,8 @@ fn composite_tester<F>(mat: &CsrMatrix<f64>, steps: usize, composite_preconditio
 where
     F: Fn(&mut DVector<f64>),
 {
-    let test_runs = 3;
+    trace!("testing convergence...");
+    let test_runs = 1;
     let mut avg = 0.0;
     let dim = mat.nrows();
     // 1 / (2.0 * however many steps done after test)

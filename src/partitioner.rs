@@ -228,7 +228,7 @@ pub fn modularity_matching(
             }
             Some(pairs) => {
                 let pairs_count = pairs.len();
-                if pairs_count < 5 {
+                if pairs_count < 3 {
                     info!("Levels: {}", hierarchy.len());
                     return hierarchy;
                 }
