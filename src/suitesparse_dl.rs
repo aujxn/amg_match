@@ -6,20 +6,17 @@ pub async fn download_all() -> Result<(), Box<dyn std::error::Error>> {
     let builder = reqwest::ClientBuilder::new();
     let client = builder.http2_max_frame_size(u32::MAX).build()?;
     info!("Getting list of matrices from suitesparse");
-    let res = client
-        .get("https://sparse.tamu.edu/?per_page=All")
-        .header("query", "filterrific[rb_type]: Real")
-        .header("query", "filterrific[structure]: Symmetric")
-        .header("query", "filterrific[positive_definite]: Yes")
-        .send()
-        .await?;
+    let url = "https://sparse.tamu.edu/?per_page=All".to_string();
+    let args = "&filterrific[sorted_by]=id_asc&filterrific[rb_type]=Real&filterrific[positive_definite]=Yes";
+    let res = client.get(url + args).send().await?;
 
     let soup = Soup::new(&res.text().await?);
-    let urls: Vec<String> = soup
+    let results = soup.attr("id", "matrices").find().unwrap();
+    let urls: Vec<String> = results
         .tag("a")
         .find_all()
         .filter_map(|link| link.get("href"))
-        .filter(|url| url.contains("https://suitesparse-collection-website.herokuapp.com/MM/HB/"))
+        .filter(|url| url.contains("https://suitesparse-collection-website.herokuapp.com/MM/"))
         .collect();
     info!("Downloading {} matrices...", urls.len());
 
