@@ -1,4 +1,4 @@
-use crate::preconditioner_new::Preconditioner;
+use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 

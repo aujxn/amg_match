@@ -6,7 +6,8 @@ use rand::{distributions::Uniform, thread_rng};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
-//TODO check pos rowsums in tests
+//TODO bring back tests you deleted when preconditioner refactor happened
+//     also, stop copying the fine mat into the hierarchy
 
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
@@ -207,7 +208,7 @@ fn try_row_sums(mat: &CsrMatrix<f64>, near_null: &mut DVector<f64>) -> Option<(D
 /// and a minimum coarsening factor for each level of the aggregation and provides a
 /// hierarchy of partitions of the matrix.
 pub fn modularity_matching(
-    mat: CsrMatrix<f64>,
+    mat: CsrMatrix<f64>, //TODO here don't take ownership anymore
     near_null: &DVector<f64>,
     coarsening_factor: f64,
 ) -> Hierarchy {

@@ -1,5 +1,5 @@
 use crate::partitioner::modularity_matching;
-use crate::preconditioner_new::{Multilevel, Preconditioner, L1};
+use crate::preconditioner::{Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1};
 use crate::solver::pcg;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -69,7 +69,7 @@ impl<'a> Adaptive<'a> {
                         components.len(),
                         convergence_rate
                     );
-                    if convergence_rate < 0.50 || components.len() == 20 {
+                    if convergence_rate < 0.50 || components.len() == 50 {
                         return Self { mat, components };
                     }
                 }
@@ -79,6 +79,7 @@ impl<'a> Adaptive<'a> {
     }
 }
 
+// TODO on tester make *relative* error be convergence test
 fn stationary_composite(
     mat: &CsrMatrix<f64>,
     iterate: &mut DVector<f64>,
@@ -201,7 +202,7 @@ fn composite_tester(
             &iterate,
             4,
             1e-16,
-            &mut crate::preconditioner_new::SymmetricGaussSeidel::new(mat),
+            &mut Sgs::new(mat),
         );
         let starting_error_norm = iterate.dot(&(mat * &iterate));
         stationary_composite(mat, &mut iterate, 3, composite_preconditioner);

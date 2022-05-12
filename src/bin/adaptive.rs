@@ -6,9 +6,9 @@ use amg_match::{
     solver::{pcg, stationary},
 };
 
-use amg_match::preconditioner_new::{
-    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, SymmetricGaussSeidel as Sgs,
-    L1,
+use amg_match::preconditioner::{
+    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, Preconditioner,
+    SymmetricGaussSeidel as Sgs, L1,
 };
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
@@ -18,9 +18,6 @@ use strum_macros::{Display, EnumString};
 
 #[macro_use]
 extern crate log;
-
-//TODO make preconditioner construction and impl parallel
-//     and replace decomp with LAPACK
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -37,7 +34,7 @@ struct Opt {
 
     /// Method to use with the solver. Options are:
     /// l1, sgs, fgs, bgs, ml1, mgs
-    preconditioner: Preconditioner,
+    preconditioner: PreconditionerArg,
 
     /// Solver to use. Options are:
     /// pcg, stationary
@@ -54,7 +51,7 @@ struct Opt {
 
 #[derive(Debug, Display, EnumString)]
 #[strum(ascii_case_insensitive)]
-enum Preconditioner {
+enum PreconditionerArg {
     L1,
     Fgs,
     Bgs,
@@ -87,51 +84,50 @@ fn main() {
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
     let b = &mat * &x;
 
-    let mut preconditioner: Box<dyn amg_match::preconditioner_new::Preconditioner> =
-        match opt.preconditioner {
-            Preconditioner::L1 => Box::new(L1::new(&mat)),
-            Preconditioner::Fgs => Box::new(Fgs::new(&mat)),
-            Preconditioner::Bgs => Box::new(Bgs::new(&mat)),
-            Preconditioner::Sgs => Box::new(Sgs::new(&mat)),
-            Preconditioner::Adaptive => Box::new(Adaptive::new(&mat)),
-            _ => {
-                let iterations_for_near_null = 10;
-                info!(
-                    "calculating near null component... {} iterations using stationary L1",
-                    iterations_for_near_null
-                );
+    let mut preconditioner: Box<dyn Preconditioner> = match opt.preconditioner {
+        PreconditionerArg::L1 => Box::new(L1::new(&mat)),
+        PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
+        PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
+        PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
+        PreconditionerArg::Adaptive => Box::new(Adaptive::new(&mat)),
+        _ => {
+            let iterations_for_near_null = 10;
+            info!(
+                "calculating near null component... {} iterations using stationary L1",
+                iterations_for_near_null
+            );
 
-                /*
-                let test = &mat * &ones;
-                info!("{:?}", test);
-                */
+            /*
+            let test = &mat * &ones;
+            info!("{:?}", test);
+            */
 
-                let (near_null, _) = stationary(
-                    &mat,
-                    &zeros,
-                    &x,
-                    iterations_for_near_null,
-                    10.0_f64.powi(-6),
-                    &mut L1::new(&mat),
-                );
+            let (near_null, _) = stationary(
+                &mat,
+                &zeros,
+                &x,
+                iterations_for_near_null,
+                10.0_f64.powi(-6),
+                &mut L1::new(&mat),
+            );
 
-                let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
-                info!(
-                    "Number of levels in hierarchy: {}",
-                    hierarchy.get_matrices().len(),
-                );
-                info!(
-                    "Size of coarsest: {}",
-                    hierarchy.get_matrices().last().unwrap().nrows()
-                );
+            let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+            info!(
+                "Number of levels in hierarchy: {}",
+                hierarchy.get_matrices().len(),
+            );
+            info!(
+                "Size of coarsest: {}",
+                hierarchy.get_matrices().last().unwrap().nrows()
+            );
 
-                match opt.preconditioner {
-                    Preconditioner::Ml1 => Box::new(Multilevel::<L1>::new(hierarchy)),
-                    Preconditioner::Mgs => unimplemented!(),
-                    _ => unreachable!(),
-                }
+            match opt.preconditioner {
+                PreconditionerArg::Ml1 => Box::new(Multilevel::<L1>::new(hierarchy)),
+                PreconditionerArg::Mgs => unimplemented!(),
+                _ => unreachable!(),
             }
-        };
+        }
+    };
 
     info!("solving");
     let _rhs = match opt.solver {
