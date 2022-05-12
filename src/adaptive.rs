@@ -34,7 +34,7 @@ pub fn adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>) + 
             solvers.len(),
             convergence_rate
         );
-        if convergence_rate < 0.50 || solvers.len() == 5 {
+        if convergence_rate < 0.50 || solvers.len() == 20 {
             return build_adaptive_preconditioner(mat, solvers);
         }
     }
@@ -62,10 +62,42 @@ fn stationary_composite<F>(
     }
 }
 
-fn find_near_null<F>(mat: &CsrMatrix<f64>, composite_preconditioner: &Vec<F>) -> DVector<f64>
-where
+pub fn pcg_composite<'a, F>(
+    mat: &'a CsrMatrix<f64>,
+    x: &'a mut DVector<f64>,
+    iterations: usize,
+    preconditioner: F,
+) where
     F: Fn(&mut DVector<f64>),
 {
+    let mut r = -1.0 * (mat * &*x);
+    let mut r_bar = r.clone();
+    preconditioner(&mut r_bar);
+    let d0 = r.dot(&r_bar);
+    let mut d = d0;
+    let mut p = r_bar.clone();
+
+    for _i in 0..iterations {
+        let mut g = mat * &p;
+        let alpha = d / p.dot(&g);
+        g *= alpha;
+        *x += &(alpha * &p);
+        r -= &g;
+        r_bar = r.clone();
+        preconditioner(&mut r_bar);
+        let d_old = d;
+        d = r.dot(&r_bar);
+
+        let beta = d / d_old;
+        p *= beta;
+        p += &r_bar;
+    }
+}
+
+fn find_near_null<'a>(
+    mat: &'a CsrMatrix<f64>,
+    composite_preconditioner: &'a Vec<Box<dyn Fn(&mut DVector<f64>)>>,
+) -> DVector<f64> {
     trace!("searching for near null");
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
@@ -74,7 +106,23 @@ where
     let mut iter = 0;
 
     let initial_iters = 5;
-    stationary_composite(mat, &mut iterate, initial_iters, composite_preconditioner);
+    //stationary_composite(mat, &mut iterate, initial_iters, composite_preconditioner);
+
+    let preconditioner = |r: &mut DVector<f64>| {
+        let mut x = DVector::from(vec![0.0; r.len()]);
+
+        for component in composite_preconditioner
+            .iter()
+            .chain(composite_preconditioner.iter().rev())
+        {
+            let mut y = r.clone();
+            component(&mut y);
+            x += &y;
+            *r -= mat * &y;
+        }
+        *r = x;
+    };
+    pcg_composite(mat, &mut iterate, initial_iters, &preconditioner);
 
     let mut error_norm_old = f64::MAX;
 
@@ -93,12 +141,13 @@ where
             );
         }
 
-        if error_norm_new / error_norm_old > 0.97 {
-            info!("convergence has stopped");
+        if error_norm_new / error_norm_old > 0.99 {
+            info!("convergence has stopped. Error: {:+e}", error_norm_new);
             return iterate;
         }
 
-        stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
+        //stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
+        pcg_composite(mat, &mut iterate, 1, &preconditioner);
         error_norm_old = error_norm_new;
         iter += 1;
     }
@@ -112,7 +161,7 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
     let positive = rand::distributions::Uniform::new(threshold, epsilon);
 
     for x in near_null.iter_mut().filter(|x| x.abs() < threshold) {
-        //warn!("perturbed element");
+        warn!("perturbed element");
         if rng.gen() {
             *x = negative.sample(&mut rng)
         } else {
@@ -143,7 +192,7 @@ where
     F: Fn(&mut DVector<f64>),
 {
     trace!("testing convergence...");
-    let test_runs = 1;
+    let test_runs = 3;
     let mut avg = 0.0;
     let dim = mat.nrows();
     // 1 / (2.0 * however many steps done after test)
@@ -152,8 +201,16 @@ where
     let mut rng = thread_rng();
 
     for _ in 0..test_runs {
-        let mut iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
-        stationary_composite(mat, &mut iterate, steps, composite_preconditioner);
+        let iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+        //stationary_composite(mat, &mut iterate, steps, composite_preconditioner);
+        let (mut iterate, _) = crate::solver::pcg(
+            mat,
+            &DVector::zeros(dim),
+            &iterate,
+            4,
+            1e-16,
+            &crate::preconditioner::sgs(mat),
+        );
         let starting_error_norm = iterate.dot(&(mat * &iterate));
         stationary_composite(mat, &mut iterate, 3, composite_preconditioner);
         if starting_error_norm < 1e-16 {

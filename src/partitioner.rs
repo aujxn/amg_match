@@ -215,23 +215,30 @@ pub fn modularity_matching(
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);
-    let mut partition_mat = None;
+    let mut partition_mat: Option<CsrMatrix<f64>> = None;
     let mut starting_vertex_count = modularity_mat.nrows() as f64;
 
     loop {
         let vertex_count = modularity_mat.nrows();
 
-        match find_pairs(&modularity_mat, 10) {
+        match find_pairs(&modularity_mat, 30) {
             None => {
+                if let Some(p) = partition_mat {
+                    trace!("added level! num vertices coarse: {}", p.ncols());
+                    hierarchy.push(p);
+                }
+
                 info!("Levels: {}", hierarchy.len());
                 return hierarchy;
             }
             Some(pairs) => {
+                /*
                 let pairs_count = pairs.len();
                 if pairs_count < 3 {
                     info!("Levels: {}", hierarchy.len());
                     return hierarchy;
                 }
+                */
                 //trace!("num edges merged: {pairs_count}");
                 let new_partition = build_partition_from_pairs(&pairs, vertex_count);
                 let coarse_vertex_count = new_partition.ncols() as f64;
@@ -254,6 +261,10 @@ pub fn modularity_matching(
                         new_partition.ncols()
                     );
                     hierarchy.push(partition_mat.unwrap());
+                    if coarse_vertex_count < 16.0 {
+                        info!("Levels: {}", hierarchy.len());
+                        return hierarchy;
+                    }
                     partition_mat = None;
                     starting_vertex_count = coarse_vertex_count;
                 }
@@ -283,13 +294,11 @@ fn build_weighted_matrix(
 
     for (i, sum) in row_sums.iter_mut().enumerate() {
         if *sum < 0.0 {
-            /*
             warn!(
                 "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}. Setting to 0.0",
                 mat.get_entry(i, i).unwrap().into_value() * near_null[i] * near_null[i],
                 near_null[i]
             );
-            */
             *sum = 0.0
         }
     }
@@ -317,9 +326,9 @@ fn build_sparse_modularity_matrix(
     // for pairs to merge which could save copying the entire matrix
     for (i, j, weight_ij) in mat.triplet_iter() {
         let modularity_ij = weight_ij - inverse_total * row_sums[i] * row_sums[j];
-        if modularity_ij > 0.0 {
-            modularity_mat.push(i, j, modularity_ij);
-        }
+        //if modularity_ij > 0.0 {
+        modularity_mat.push(i, j, modularity_ij);
+        //}
     }
 
     CsrMatrix::from(&modularity_mat)
