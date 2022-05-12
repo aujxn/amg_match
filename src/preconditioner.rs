@@ -102,6 +102,17 @@ pub fn multilevelgs(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
     })
 }
 
+/*
+struct MultilevelL1 {
+    x_ks: Vec<DVector<f64>>,
+    b_ks: Vec<DVector<f64>>,
+    hierarchy: Hierarchy,
+    //smoothers: Vec<L1>,
+    smoothing_steps: usize,
+    //coarse_decomp: nalgebra_lapack::LU<
+}
+*/
+
 pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
     let mat_coarse = nalgebra::DMatrix::from(hierarchy.get_matrices().last().unwrap());
     trace!("decomposing coarse problem");
@@ -125,7 +136,7 @@ pub fn multilevell1(hierarchy: Hierarchy) -> Box<dyn Fn(&mut DVector<f64>)> {
         let mut b_ks = x_ks.clone();
         let p_ks = hierarchy.get_partitions();
         let mat_ks = hierarchy.get_matrices();
-        b_ks[0] = r.clone();
+        b_ks[0].copy_from(&r);
 
         for level in 0..levels {
             for _ in 0..smoothing_steps {

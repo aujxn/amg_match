@@ -1,3 +1,4 @@
+/*
 use amg_match::{
     adaptive::adaptive,
     //mat_to_image,
@@ -5,6 +6,12 @@ use amg_match::{
     preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
+*/
+
+use amg_match::preconditioner_new::{
+    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, SymmetricGaussSeidel as Sgs, L1,
+};
+use amg_match::solver::stationary;
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
 use rand::{distributions::Uniform, thread_rng};
@@ -82,50 +89,54 @@ fn main() {
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
     let b = &mat * &x;
 
-    let preconditioner = match opt.preconditioner {
-        Preconditioner::L1 => l1(&mat),
-        Preconditioner::Fgs => fgs(&mat),
-        Preconditioner::Bgs => bgs(&mat),
-        Preconditioner::Sgs => sgs(&mat),
-        Preconditioner::Adaptive => adaptive(&mat),
-        _ => {
-            let iterations_for_near_null = 10;
-            info!(
-                "calculating near null component... {} iterations using stationary L1",
-                iterations_for_near_null
-            );
-
+    let preconditioner: Box<dyn amg_match::preconditioner_new::Preconditioner> =
+        match opt.preconditioner {
+            Preconditioner::L1 => Box::new(L1::new(&mat)),
+            Preconditioner::Fgs => Box::new(Fgs::new(&mat)),
+            Preconditioner::Bgs => Box::new(Bgs::new(&mat)),
+            Preconditioner::Sgs => Box::new(Sgs::new(&mat)),
+            _ => unimplemented!(),
             /*
-            let test = &mat * &ones;
-            info!("{:?}", test);
+                Preconditioner::Adaptive => adaptive(&mat),
+                _ => {
+                    let iterations_for_near_null = 10;
+                    info!(
+                        "calculating near null component... {} iterations using stationary L1",
+                        iterations_for_near_null
+                    );
+
+                    /*
+                    let test = &mat * &ones;
+                    info!("{:?}", test);
+                    */
+
+                    let (near_null, _) = stationary(
+                        &mat,
+                        &zeros,
+                        &x,
+                        iterations_for_near_null,
+                        10.0_f64.powi(-6),
+                        &l1(&mat),
+                    );
+
+                    let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+                    info!(
+                        "Number of levels in hierarchy: {}",
+                        hierarchy.get_matrices().len(),
+                    );
+                    info!(
+                        "Size of coarsest: {}",
+                        hierarchy.get_matrices().last().unwrap().nrows()
+                    );
+
+                    match opt.preconditioner {
+                        Preconditioner::Ml1 => multilevell1(hierarchy),
+                        Preconditioner::Mgs => multilevelgs(hierarchy),
+                        _ => unimplemented!(),
+                    }
+                }
             */
-
-            let (near_null, _) = stationary(
-                &mat,
-                &zeros,
-                &x,
-                iterations_for_near_null,
-                10.0_f64.powi(-6),
-                &l1(&mat),
-            );
-
-            let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
-            info!(
-                "Number of levels in hierarchy: {}",
-                hierarchy.get_matrices().len(),
-            );
-            info!(
-                "Size of coarsest: {}",
-                hierarchy.get_matrices().last().unwrap().nrows()
-            );
-
-            match opt.preconditioner {
-                Preconditioner::Ml1 => multilevell1(hierarchy),
-                Preconditioner::Mgs => multilevelgs(hierarchy),
-                _ => unimplemented!(),
-            }
-        }
-    };
+        };
 
     info!("solving");
     let _rhs = match opt.solver {
@@ -135,8 +146,10 @@ fn main() {
             &zeros,
             opt.max_iter,
             opt.tolerance,
-            &preconditioner,
+            &*preconditioner,
         ),
+        _ => unimplemented!(),
+        /*
         Solver::Pcg => pcg(
             &mat,
             &b,
@@ -145,5 +158,6 @@ fn main() {
             opt.tolerance,
             &preconditioner,
         ),
+        */
     };
 }

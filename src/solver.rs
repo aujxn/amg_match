@@ -1,3 +1,4 @@
+use crate::preconditioner_new::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 
@@ -37,17 +38,14 @@ pub fn lsolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
 /// system Ax = b for x where 'mat' is A and 'rhs' is b. Common preconditioners
 /// include L1 smoother, forward/backward/symmetric Gauss-Seidel, and
 /// multilevel methods.
-pub fn stationary<F>(
+pub fn stationary(
     mat: &CsrMatrix<f64>,
     rhs: &DVector<f64>,
     initial_iterate: &DVector<f64>,
     max_iter: usize,
     epsilon: f64,
-    preconditioner: &F,
-) -> (DVector<f64>, bool)
-where
-    F: Fn(&mut DVector<f64>),
-{
+    preconditioner: &dyn Preconditioner,
+) -> (DVector<f64>, bool) {
     let mut x = initial_iterate.clone();
     let mut r = rhs - &(mat * &x);
     let r0_norm = r.dot(&r);
@@ -66,7 +64,7 @@ where
             return (x, true);
         }
 
-        preconditioner(&mut r);
+        preconditioner.apply(&mut r);
         x += &r;
     }
 

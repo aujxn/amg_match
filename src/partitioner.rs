@@ -1,11 +1,10 @@
 use indexmap::IndexSet;
-use std::collections::VecDeque;
-
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
 use rand::prelude::*;
 use rand::{distributions::Uniform, thread_rng};
 use rayon::prelude::*;
+use std::collections::VecDeque;
 
 //TODO check pos rowsums in tests
 
