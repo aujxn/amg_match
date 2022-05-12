@@ -74,21 +74,18 @@ pub fn stationary(
 /// 'mat' is A and 'rhs' is b. The preconditioner is a function that takes
 /// a residual (vector) and returns the action of the inverse preconditioner
 /// on that residual.
-pub fn pcg<F>(
+pub fn pcg(
     mat: &CsrMatrix<f64>,
     rhs: &DVector<f64>,
     initial_iterate: &DVector<f64>,
     max_iter: usize,
     epsilon: f64,
-    preconditioner: &F,
-) -> (DVector<f64>, bool)
-where
-    F: Fn(&mut DVector<f64>),
-{
+    preconditioner: &mut dyn Preconditioner,
+) -> (DVector<f64>, bool) {
     let mut x = initial_iterate.clone();
     let mut r = rhs - mat * &x;
     let mut r_bar = r.clone();
-    preconditioner(&mut r_bar);
+    preconditioner.apply(&mut r_bar);
     let d0 = r.dot(&r_bar);
     let mut d = d0;
     let mut p = r_bar.clone();
@@ -100,7 +97,7 @@ where
         x += &(alpha * &p);
         r -= &g;
         r_bar = r.clone();
-        preconditioner(&mut r_bar);
+        preconditioner.apply(&mut r_bar);
         let d_old = d;
         d = r.dot(&r_bar);
 

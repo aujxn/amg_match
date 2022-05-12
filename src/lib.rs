@@ -1,4 +1,4 @@
-//pub mod adaptive;
+pub mod adaptive;
 pub mod partitioner;
 //pub mod preconditioner;
 pub mod preconditioner_new;

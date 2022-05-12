@@ -1,103 +1,111 @@
 use crate::partitioner::modularity_matching;
-use crate::preconditioner::{l1, multilevell1};
+use crate::preconditioner_new::{Multilevel, Preconditioner, L1};
+use crate::solver::pcg;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 use rand::prelude::*;
 use rand::{distributions::Uniform, thread_rng};
 
-pub fn adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
-    let mut solvers = vec![l1(mat)];
-    let steps = 10;
+pub struct Adaptive<'a> {
+    mat: &'a CsrMatrix<f64>,
+    components: Vec<Multilevel<L1>>,
+}
 
-    loop {
-        let mut near_null = find_near_null(mat, &solvers);
-        no_zeroes(&mut near_null);
-        near_null /= near_null.norm();
+impl<'a> Preconditioner for Adaptive<'a> {
+    fn apply(&mut self, r: &mut DVector<f64>) {
+        let mut x = DVector::from(vec![0.0; r.len()]);
 
-        /*
-        let hierarchy = modularity_matching_no_copies(
-            mat.clone(),
-            near_null.clone(),
-            row_sums.clone(),
-            inverse_total,
-            2.0,
-            12.0,
+        for component in self.components.iter_mut() {
+            let mut y = r.clone();
+            component.apply(&mut y);
+            x += &y;
+            *r -= self.mat * &y;
+        }
+        for component in self.components.iter_mut().rev() {
+            let mut y = r.clone();
+            component.apply(&mut y);
+            x += &y;
+            *r -= self.mat * &y;
+        }
+        *r = x;
+    }
+}
+
+impl<'a> Adaptive<'a> {
+    pub fn new(mat: &'a CsrMatrix<f64>) -> Self {
+        let dim = mat.nrows();
+        let iterations_for_near_null = 50;
+        let zeros = DVector::from(vec![0.0; mat.nrows()]);
+        let mut rng = thread_rng();
+        let distribution = Uniform::new(-2.0_f64, 2.0_f64);
+        let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+
+        let (near_null, _) = pcg(
+            mat,
+            &zeros,
+            &x,
+            iterations_for_near_null,
+            10.0_f64.powi(-6),
+            &mut L1::new(&mat),
         );
-        */
-        let hierarchy = modularity_matching(mat.clone(), &near_null, 1.8);
-        let ml1 = multilevell1(hierarchy);
-        solvers.push(ml1);
 
-        let convergence_rate = composite_tester(mat, steps, &solvers);
-        info!(
-            "components: {} convergence_rate: {}",
-            solvers.len(),
-            convergence_rate
-        );
-        if convergence_rate < 0.50 || solvers.len() == 20 {
-            return build_adaptive_preconditioner(mat, solvers);
+        let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+        let mut components = vec![Multilevel::<L1>::new(hierarchy)];
+
+        let steps = 10;
+        loop {
+            match find_near_null(mat, &mut components) {
+                Some(mut near_null) => {
+                    no_zeroes(&mut near_null);
+                    near_null /= near_null.norm();
+
+                    let hierarchy = modularity_matching(mat.clone(), &near_null, 1.8);
+                    let ml1 = Multilevel::<L1>::new(hierarchy);
+                    components.push(ml1);
+
+                    let convergence_rate = composite_tester(mat, steps, &mut components);
+                    info!(
+                        "components: {} convergence_rate: {}",
+                        components.len(),
+                        convergence_rate
+                    );
+                    if convergence_rate < 0.50 || components.len() == 20 {
+                        return Self { mat, components };
+                    }
+                }
+                None => return Self { mat, components },
+            }
         }
     }
 }
 
-fn stationary_composite<F>(
+fn stationary_composite(
     mat: &CsrMatrix<f64>,
     iterate: &mut DVector<f64>,
     iterations: usize,
-    composite_preconditioner: &Vec<F>,
-) where
-    F: Fn(&mut DVector<f64>),
-{
+    composite_preconditioner: &mut Vec<Multilevel<L1>>,
+) {
     let mut residual = -1.0 * (mat * &*iterate);
     for _ in 0..iterations {
-        for component in composite_preconditioner
-            .iter()
-            .chain(composite_preconditioner.iter().rev())
-        {
+        for component in composite_preconditioner.iter_mut() {
             let mut y = residual.clone();
-            component(&mut y);
+            component.apply(&mut y);
+            *iterate += &y;
+            residual -= mat * &y;
+        }
+        for component in composite_preconditioner.iter_mut().rev() {
+            let mut y = residual.clone();
+            component.apply(&mut y);
             *iterate += &y;
             residual -= mat * &y;
         }
     }
 }
 
-pub fn pcg_composite<'a, F>(
-    mat: &'a CsrMatrix<f64>,
-    x: &'a mut DVector<f64>,
-    iterations: usize,
-    preconditioner: F,
-) where
-    F: Fn(&mut DVector<f64>),
-{
-    let mut r = -1.0 * (mat * &*x);
-    let mut r_bar = r.clone();
-    preconditioner(&mut r_bar);
-    let d0 = r.dot(&r_bar);
-    let mut d = d0;
-    let mut p = r_bar.clone();
-
-    for _i in 0..iterations {
-        let mut g = mat * &p;
-        let alpha = d / p.dot(&g);
-        g *= alpha;
-        *x += &(alpha * &p);
-        r -= &g;
-        r_bar = r.clone();
-        preconditioner(&mut r_bar);
-        let d_old = d;
-        d = r.dot(&r_bar);
-
-        let beta = d / d_old;
-        p *= beta;
-        p += &r_bar;
-    }
-}
-
 fn find_near_null<'a>(
     mat: &'a CsrMatrix<f64>,
-    composite_preconditioner: &'a Vec<Box<dyn Fn(&mut DVector<f64>)>>,
-) -> DVector<f64> {
+    composite_preconditioner: &mut Vec<Multilevel<L1>>,
+) -> Option<DVector<f64>> {
     trace!("searching for near null");
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
@@ -106,23 +114,7 @@ fn find_near_null<'a>(
     let mut iter = 0;
 
     let initial_iters = 5;
-    //stationary_composite(mat, &mut iterate, initial_iters, composite_preconditioner);
-
-    let preconditioner = |r: &mut DVector<f64>| {
-        let mut x = DVector::from(vec![0.0; r.len()]);
-
-        for component in composite_preconditioner
-            .iter()
-            .chain(composite_preconditioner.iter().rev())
-        {
-            let mut y = r.clone();
-            component(&mut y);
-            x += &y;
-            *r -= mat * &y;
-        }
-        *r = x;
-    };
-    pcg_composite(mat, &mut iterate, initial_iters, &preconditioner);
+    stationary_composite(mat, &mut iterate, initial_iters, composite_preconditioner);
 
     let mut error_norm_old = f64::MAX;
 
@@ -131,7 +123,7 @@ fn find_near_null<'a>(
 
         if error_norm_new < 1e-12 {
             warn!("find_near_null converged during search");
-            return iterate;
+            return None;
         }
 
         if iter % 10 == 0 && iter != 0 {
@@ -141,13 +133,12 @@ fn find_near_null<'a>(
             );
         }
 
-        if error_norm_new / error_norm_old > 0.99 {
+        if error_norm_new / error_norm_old > 0.97 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
-            return iterate;
+            return Some(iterate);
         }
 
-        //stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
-        pcg_composite(mat, &mut iterate, 1, &preconditioner);
+        stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
         error_norm_old = error_norm_new;
         iter += 1;
     }
@@ -187,10 +178,11 @@ pub fn build_adaptive_preconditioner<'a>(
     })
 }
 
-fn composite_tester<F>(mat: &CsrMatrix<f64>, steps: usize, composite_preconditioner: &Vec<F>) -> f64
-where
-    F: Fn(&mut DVector<f64>),
-{
+fn composite_tester(
+    mat: &CsrMatrix<f64>,
+    steps: usize,
+    composite_preconditioner: &mut Vec<Multilevel<L1>>,
+) -> f64 {
     trace!("testing convergence...");
     let test_runs = 3;
     let mut avg = 0.0;
@@ -209,7 +201,7 @@ where
             &iterate,
             4,
             1e-16,
-            &crate::preconditioner::sgs(mat),
+            &mut crate::preconditioner_new::SymmetricGaussSeidel::new(mat),
         );
         let starting_error_norm = iterate.dot(&(mat * &iterate));
         stationary_composite(mat, &mut iterate, 3, composite_preconditioner);

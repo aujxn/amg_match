@@ -1,5 +1,5 @@
 use amg_match::{
-    //adaptive::adaptive,
+    adaptive::Adaptive,
     //mat_to_image,
     partitioner::{modularity_matching, modularity_matching_no_copies},
     //preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
@@ -93,7 +93,7 @@ fn main() {
             Preconditioner::Fgs => Box::new(Fgs::new(&mat)),
             Preconditioner::Bgs => Box::new(Bgs::new(&mat)),
             Preconditioner::Sgs => Box::new(Sgs::new(&mat)),
-            Preconditioner::Adaptive => unimplemented!(),
+            Preconditioner::Adaptive => Box::new(Adaptive::new(&mat)),
             _ => {
                 let iterations_for_near_null = 10;
                 info!(
@@ -143,16 +143,13 @@ fn main() {
             opt.tolerance,
             &mut *preconditioner,
         ),
-        _ => unimplemented!(),
-        /*
         Solver::Pcg => pcg(
             &mat,
             &b,
             &zeros,
             opt.max_iter,
             opt.tolerance,
-            &preconditioner,
+            &mut *preconditioner,
         ),
-        */
     };
 }

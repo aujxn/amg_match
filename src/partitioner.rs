@@ -293,11 +293,13 @@ fn build_weighted_matrix(
 
     for (i, sum) in row_sums.iter_mut().enumerate() {
         if *sum < 0.0 {
+            /*
             warn!(
                 "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}. Setting to 0.0",
                 mat.get_entry(i, i).unwrap().into_value() * near_null[i] * near_null[i],
                 near_null[i]
             );
+            */
             *sum = 0.0
         }
     }
