@@ -44,7 +44,7 @@ pub fn stationary(
     initial_iterate: &DVector<f64>,
     max_iter: usize,
     epsilon: f64,
-    preconditioner: &dyn Preconditioner,
+    preconditioner: &mut dyn Preconditioner,
 ) -> (DVector<f64>, bool) {
     let mut x = initial_iterate.clone();
     let mut r = rhs - &(mat * &x);

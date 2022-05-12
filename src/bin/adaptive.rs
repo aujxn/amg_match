@@ -1,17 +1,15 @@
-/*
 use amg_match::{
-    adaptive::adaptive,
+    //adaptive::adaptive,
     //mat_to_image,
     partitioner::{modularity_matching, modularity_matching_no_copies},
-    preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
+    //preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
-*/
 
 use amg_match::preconditioner_new::{
-    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, SymmetricGaussSeidel as Sgs, L1,
+    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, SymmetricGaussSeidel as Sgs,
+    L1,
 };
-use amg_match::solver::stationary;
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
 use rand::{distributions::Uniform, thread_rng};
@@ -89,53 +87,50 @@ fn main() {
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
     let b = &mat * &x;
 
-    let preconditioner: Box<dyn amg_match::preconditioner_new::Preconditioner> =
+    let mut preconditioner: Box<dyn amg_match::preconditioner_new::Preconditioner> =
         match opt.preconditioner {
             Preconditioner::L1 => Box::new(L1::new(&mat)),
             Preconditioner::Fgs => Box::new(Fgs::new(&mat)),
             Preconditioner::Bgs => Box::new(Bgs::new(&mat)),
             Preconditioner::Sgs => Box::new(Sgs::new(&mat)),
-            _ => unimplemented!(),
-            /*
-                Preconditioner::Adaptive => adaptive(&mat),
-                _ => {
-                    let iterations_for_near_null = 10;
-                    info!(
-                        "calculating near null component... {} iterations using stationary L1",
-                        iterations_for_near_null
-                    );
+            Preconditioner::Adaptive => unimplemented!(),
+            _ => {
+                let iterations_for_near_null = 10;
+                info!(
+                    "calculating near null component... {} iterations using stationary L1",
+                    iterations_for_near_null
+                );
 
-                    /*
-                    let test = &mat * &ones;
-                    info!("{:?}", test);
-                    */
+                /*
+                let test = &mat * &ones;
+                info!("{:?}", test);
+                */
 
-                    let (near_null, _) = stationary(
-                        &mat,
-                        &zeros,
-                        &x,
-                        iterations_for_near_null,
-                        10.0_f64.powi(-6),
-                        &l1(&mat),
-                    );
+                let (near_null, _) = stationary(
+                    &mat,
+                    &zeros,
+                    &x,
+                    iterations_for_near_null,
+                    10.0_f64.powi(-6),
+                    &mut L1::new(&mat),
+                );
 
-                    let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
-                    info!(
-                        "Number of levels in hierarchy: {}",
-                        hierarchy.get_matrices().len(),
-                    );
-                    info!(
-                        "Size of coarsest: {}",
-                        hierarchy.get_matrices().last().unwrap().nrows()
-                    );
+                let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+                info!(
+                    "Number of levels in hierarchy: {}",
+                    hierarchy.get_matrices().len(),
+                );
+                info!(
+                    "Size of coarsest: {}",
+                    hierarchy.get_matrices().last().unwrap().nrows()
+                );
 
-                    match opt.preconditioner {
-                        Preconditioner::Ml1 => multilevell1(hierarchy),
-                        Preconditioner::Mgs => multilevelgs(hierarchy),
-                        _ => unimplemented!(),
-                    }
+                match opt.preconditioner {
+                    Preconditioner::Ml1 => Box::new(Multilevel::<L1>::new(hierarchy)),
+                    Preconditioner::Mgs => unimplemented!(),
+                    _ => unreachable!(),
                 }
-            */
+            }
         };
 
     info!("solving");
@@ -146,7 +141,7 @@ fn main() {
             &zeros,
             opt.max_iter,
             opt.tolerance,
-            &*preconditioner,
+            &mut *preconditioner,
         ),
         _ => unimplemented!(),
         /*

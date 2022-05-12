@@ -423,35 +423,3 @@ fn build_partition_from_pairs(pairs: &Vec<(usize, usize)>, vertex_count: usize) 
 
     CsrMatrix::from(&partition_mat)
 }
-
-#[cfg(test)]
-extern crate test_generator;
-
-#[cfg(test)]
-mod tests {
-    use crate::{partitioner::modularity_matching, preconditioner::l1, solver::stationary};
-    use nalgebra::base::DVector;
-    use nalgebra_sparse::csr::CsrMatrix;
-    use test_generator::test_resources;
-
-    #[test_resources("test_matrices/*")]
-    fn partition_times_ones_is_ones(mat_path: &str) {
-        let mat = CsrMatrix::from(
-            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
-        );
-
-        let ones = DVector::from(vec![1.0; mat.nrows()]);
-        let zeros = DVector::from(vec![0.0; mat.nrows()]);
-
-        let (mut near_null, _) = stationary(&mat, &zeros, &ones, 5, 10.0_f64.powi(-6), &l1(&mat));
-
-        let hierarchy = modularity_matching(mat.clone(), &mut near_null, 2.0);
-
-        for p in hierarchy.get_partitions().iter() {
-            let ones = DVector::from(vec![1.0; p.ncols()]);
-            let result = p * ones;
-            let inner_product = result.dot(&result);
-            assert!((inner_product - result.len() as f64).abs() < 10e-6)
-        }
-    }
-}
