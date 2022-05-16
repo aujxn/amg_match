@@ -70,6 +70,8 @@ pub fn stationary(
 
     (x, false)
 }
+
+// TODO just mutate initial_iterate
 /// Preconditioned conjugate gradient. Solves the system Ax = b for x where
 /// 'mat' is A and 'rhs' is b. The preconditioner is a function that takes
 /// a residual (vector) and returns the action of the inverse preconditioner
@@ -108,6 +110,48 @@ pub fn pcg(
 
         if d < epsilon * epsilon * d0 {
             info!("converged in {i} iterations\n");
+            return (x, true);
+        }
+
+        let beta = d / d_old;
+        p *= beta;
+        p += &r_bar;
+    }
+
+    (x, false)
+}
+pub fn pcg_no_log(
+    mat: &CsrMatrix<f64>,
+    rhs: &DVector<f64>,
+    initial_iterate: &DVector<f64>,
+    max_iter: usize,
+    epsilon: f64,
+    preconditioner: &mut dyn Preconditioner,
+) -> (DVector<f64>, bool) {
+    let mut x = initial_iterate.clone();
+    let mut r = rhs - mat * &x;
+    let mut r_bar = r.clone();
+    preconditioner.apply(&mut r_bar);
+    let d0 = r.dot(&r_bar);
+    let mut d = d0;
+    let mut p = r_bar.clone();
+
+    for i in 0..max_iter {
+        let mut g = mat * &p;
+        let alpha = d / p.dot(&g);
+        g *= alpha;
+        x += &(alpha * &p);
+        r -= &g;
+        r_bar = r.clone();
+        preconditioner.apply(&mut r_bar);
+        let d_old = d;
+        d = r.dot(&r_bar);
+
+        if i % 50 == 0 {
+            r = rhs - mat * &x;
+        }
+
+        if d < epsilon * epsilon * d0 {
             return (x, true);
         }
 

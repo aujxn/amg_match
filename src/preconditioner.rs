@@ -1,5 +1,5 @@
 use crate::partitioner::Hierarchy;
-use crate::solver::{lsolve, usolve};
+use crate::solver::{lsolve, pcg_no_log, usolve};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
 
@@ -99,6 +99,9 @@ impl SymmetricGaussSeidel {
 
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
+//      - use pcg for coarse problem (10^-2 for epsilon)
+//      - go back to only posative modulatrity
+//      - test spd of precon again
 pub struct Multilevel<T> {
     x_ks: Vec<DVector<f64>>,
     b_ks: Vec<DVector<f64>>,
@@ -106,7 +109,6 @@ pub struct Multilevel<T> {
     forward_smoothers: Vec<T>,
     backward_smoothers: Vec<T>,
     smoothing_steps: usize,
-    decomp: nalgebra_lapack::LU<f64, nalgebra::Dynamic, nalgebra::Dynamic>,
 }
 
 impl Preconditioner for Multilevel<L1> {
@@ -127,7 +129,18 @@ impl Preconditioner for Multilevel<L1> {
             self.b_ks[level + 1] = &p_t * &r_k;
         }
 
-        self.x_ks[levels] = self.decomp.solve(&self.b_ks[levels]).unwrap();
+        let (coarse_solution, converged) = pcg_no_log(
+            self.hierarchy.get_matrices().last().unwrap(),
+            &self.b_ks[levels],
+            &self.x_ks[levels],
+            1000,
+            1.0e-2,
+            &mut self.forward_smoothers[levels],
+        );
+        if !converged {
+            warn!("coarse solver didn't converge");
+        }
+        self.x_ks[levels].copy_from(&coarse_solution);
 
         for level in (0..levels).rev() {
             let interpolated_x = self.hierarchy.get_partition(level) * &self.x_ks[level + 1];
@@ -150,15 +163,7 @@ impl Preconditioner for Multilevel<L1> {
 impl Multilevel<L1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy) -> Self {
-        let mat_coarse = nalgebra::DMatrix::from(hierarchy.get_matrices().last().unwrap());
-        trace!("decomposing coarse problem");
-        // TODO maybe just do iterative solver instead of decomposing coarse problem
-        // when only merging positive delta Q, resulting matrix can be quite large still
-        // for some systems
-        //
-        //let decomp = mat_coarse.lu();
-        let decomp = nalgebra_lapack::LU::new(mat_coarse);
-        let smoothing_steps = 3;
+        let smoothing_steps = 1;
         trace!("building multilevel smoothers");
         let forward_smoothers = hierarchy
             .get_matrices()
@@ -180,7 +185,6 @@ impl Multilevel<L1> {
             forward_smoothers,
             backward_smoothers,
             smoothing_steps,
-            decomp,
         }
     }
 }

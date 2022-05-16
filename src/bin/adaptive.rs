@@ -72,9 +72,11 @@ fn main() {
     pretty_env_logger::init();
     let opt = Opt::from_args();
 
-    let mat = CsrMatrix::from(
+    let mut mat = CsrMatrix::from(
         &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
     );
+
+    //TODO mat.normalize()
 
     let dim = mat.nrows();
     let ones = DVector::from(vec![1.0; mat.nrows()]);
@@ -84,6 +86,7 @@ fn main() {
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
     let b = &mat * &x;
 
+    let timer = std::time::Instant::now();
     let mut preconditioner: Box<dyn Preconditioner> = match opt.preconditioner {
         PreconditionerArg::L1 => Box::new(L1::new(&mat)),
         PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
@@ -129,7 +132,11 @@ fn main() {
         }
     };
 
-    info!("solving");
+    info!(
+        "Preconitioner built in: {} seconds. solving...",
+        timer.elapsed().as_secs()
+    );
+    let timer = std::time::Instant::now();
     let _rhs = match opt.solver {
         Solver::Stationary => stationary(
             &mat,
@@ -148,4 +155,5 @@ fn main() {
             &mut *preconditioner,
         ),
     };
+    info!("Solved in: {} ms.", timer.elapsed().as_millis());
 }

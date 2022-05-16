@@ -292,8 +292,12 @@ fn build_weighted_matrix(
 
     let mut row_sums: DVector<f64> = &mat_bar * ones;
 
-    for (i, sum) in row_sums.iter_mut().enumerate() {
+    let mut counter = 0;
+    let mut total = 0.0;
+    // TODO maybe just count how many rowsums are negative and by how much
+    for sum in row_sums.iter_mut() {
         if *sum < 0.0 {
+            counter += 1;
             /*
             warn!(
                 "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}. Setting to 0.0",
@@ -301,8 +305,17 @@ fn build_weighted_matrix(
                 near_null[i]
             );
             */
+            total += *sum;
             *sum = 0.0
         }
+    }
+
+    if counter > 0 {
+        warn!(
+            "{} rows had negative rowsums. Average negative: {}",
+            counter,
+            total / (counter as f64)
+        );
     }
 
     let total: f64 = row_sums.iter().sum();
@@ -328,9 +341,9 @@ fn build_sparse_modularity_matrix(
     // for pairs to merge which could save copying the entire matrix
     for (i, j, weight_ij) in mat.triplet_iter() {
         let modularity_ij = weight_ij - inverse_total * row_sums[i] * row_sums[j];
-        //if modularity_ij > 0.0 {
-        modularity_mat.push(i, j, modularity_ij);
-        //}
+        if modularity_ij > 0.0 {
+            modularity_mat.push(i, j, modularity_ij);
+        }
     }
 
     CsrMatrix::from(&modularity_mat)

@@ -14,15 +14,16 @@ pub struct Adaptive<'a> {
 impl<'a> Preconditioner for Adaptive<'a> {
     fn apply(&mut self, r: &mut DVector<f64>) {
         let mut x = DVector::from(vec![0.0; r.len()]);
+        let mut y = DVector::from(vec![0.0; r.len()]);
 
         for component in self.components.iter_mut() {
-            let mut y = r.clone();
+            y.copy_from(r);
             component.apply(&mut y);
             x += &y;
             *r -= self.mat * &y;
         }
         for component in self.components.iter_mut().rev() {
-            let mut y = r.clone();
+            y.copy_from(r);
             component.apply(&mut y);
             x += &y;
             *r -= self.mat * &y;
@@ -69,7 +70,7 @@ impl<'a> Adaptive<'a> {
                         components.len(),
                         convergence_rate
                     );
-                    if convergence_rate < 0.50 || components.len() == 50 {
+                    if convergence_rate < 0.85 || components.len() >= 3 {
                         return Self { mat, components };
                     }
                 }
@@ -80,6 +81,9 @@ impl<'a> Adaptive<'a> {
 }
 
 // TODO on tester make *relative* error be convergence test
+//      additive version x += 1/components (Bk^-1 * r)
+//      one residual per iteration, doesnt change between components
+//      try throwing early components **** dangerous
 fn stationary_composite(
     mat: &CsrMatrix<f64>,
     iterate: &mut DVector<f64>,
@@ -87,15 +91,16 @@ fn stationary_composite(
     composite_preconditioner: &mut Vec<Multilevel<L1>>,
 ) {
     let mut residual = -1.0 * (mat * &*iterate);
+    let mut y = DVector::zeros(mat.nrows());
     for _ in 0..iterations {
         for component in composite_preconditioner.iter_mut() {
-            let mut y = residual.clone();
+            y.copy_from(&residual);
             component.apply(&mut y);
             *iterate += &y;
             residual -= mat * &y;
         }
         for component in composite_preconditioner.iter_mut().rev() {
-            let mut y = residual.clone();
+            y.copy_from(&residual);
             component.apply(&mut y);
             *iterate += &y;
             residual -= mat * &y;
@@ -134,7 +139,8 @@ fn find_near_null<'a>(
             );
         }
 
-        if error_norm_new / error_norm_old > 0.97 {
+        // TODO try difference of difference ratio
+        if error_norm_new / error_norm_old > 0.997 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
             return Some(iterate);
         }
