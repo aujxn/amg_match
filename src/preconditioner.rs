@@ -99,8 +99,6 @@ impl SymmetricGaussSeidel {
 
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
-//      - use pcg for coarse problem (10^-2 for epsilon)
-//      - go back to only posative modulatrity
 //      - test spd of precon again
 pub struct Multilevel<T> {
     x_ks: Vec<DVector<f64>>,

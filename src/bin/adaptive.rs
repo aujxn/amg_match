@@ -76,7 +76,13 @@ fn main() {
         &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
     );
 
-    //TODO mat.normalize()
+    let norm = mat
+        .values()
+        .iter()
+        .fold(0.0_f64, |acc, x| acc + x * x)
+        .sqrt();
+    mat /= norm;
+    let mat = mat;
 
     let dim = mat.nrows();
     let ones = DVector::from(vec![1.0; mat.nrows()]);
