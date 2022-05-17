@@ -8,50 +8,37 @@ use nalgebra_sparse::csr::CsrMatrix;
 use rand::prelude::*;
 use rand::{distributions::Uniform, thread_rng};
 
-pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite {
+pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
     let iterations_for_near_null = 50;
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+    let mut near_null = DVector::zeros(dim);
     let mut preconditioner = Composite::new(mat, Vec::new());
-
-    let (near_null, _) = pcg(
-        mat,
-        &zeros,
-        &x,
-        iterations_for_near_null,
-        10.0_f64.powi(-6),
-        &mut L1::new(&mat),
-    );
-
-    let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
-    preconditioner.push(Box::new(Multilevel::<L1>::new(hierarchy)));
+    preconditioner.push(Box::new(L1::new(mat)));
 
     let steps = 10;
     loop {
-        match find_near_null(mat, &mut preconditioner) {
-            Some(mut near_null) => {
-                no_zeroes(&mut near_null);
-                near_null /= near_null.norm();
-
-                let hierarchy = modularity_matching(mat.clone(), &near_null, 1.8);
-                let ml1 = Multilevel::<L1>::new(hierarchy);
-                preconditioner.push(Box::new(ml1));
-
-                let convergence_rate = composite_tester(mat, steps, &mut preconditioner);
-                info!(
-                    "components: {} convergence_rate: {}",
-                    preconditioner.components().len(),
-                    convergence_rate
-                );
-                if convergence_rate < 0.85 || preconditioner.components().len() >= 3 {
-                    return preconditioner;
-                }
-            }
-            None => return preconditioner,
+        let convergence_rate = composite_tester(mat, steps, &mut preconditioner);
+        info!(
+            "components: {} convergence_rate: {}",
+            preconditioner.components().len(),
+            convergence_rate
+        );
+        if convergence_rate < 0.85 || preconditioner.components().len() >= 3 {
+            return preconditioner;
         }
+        if !find_near_null(mat, &mut preconditioner, &mut near_null) {
+            return preconditioner;
+        }
+        near_null /= near_null.norm();
+        no_zeroes(&mut near_null);
+
+        let hierarchy = modularity_matching(&mat, &near_null, 1.8);
+        let ml1 = Multilevel::<L1>::new(hierarchy);
+        preconditioner.push(Box::new(ml1));
     }
 }
 
@@ -65,49 +52,38 @@ fn stationary_composite(
     iterations: usize,
     composite_preconditioner: &mut Composite,
 ) {
-    let mut residual = -1.0 * (mat * &*iterate);
-    let mut y = DVector::zeros(mat.nrows());
     for _ in 0..iterations {
-        for component in composite_preconditioner.components_mut().iter_mut() {
-            y.copy_from(&residual);
-            component.apply(&mut y);
-            *iterate += &y;
-            residual -= mat * &y;
-        }
-        for component in composite_preconditioner.components_mut().iter_mut().rev() {
-            y.copy_from(&residual);
-            component.apply(&mut y);
-            *iterate += &y;
-            residual -= mat * &y;
-        }
+        let mut residual = -1.0 * (mat * &*iterate);
+        composite_preconditioner.apply(&mut residual);
+        *iterate += &residual;
     }
 }
 
 fn find_near_null<'a>(
     mat: &'a CsrMatrix<f64>,
     composite_preconditioner: &mut Composite,
-) -> Option<DVector<f64>> {
+    near_null: &mut DVector<f64>,
+) -> bool {
     trace!("searching for near null");
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    let mut iterate: DVector<f64> =
-        DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
+    *near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
     let mut iter = 0;
 
     let initial_iters = 5;
-    stationary_composite(mat, &mut iterate, initial_iters, composite_preconditioner);
+    stationary_composite(mat, near_null, initial_iters, composite_preconditioner);
 
     let mut error_norm_old = f64::MAX;
 
     loop {
-        let error_norm_new = iterate.dot(&(mat * &iterate));
+        let error_norm_new = near_null.dot(&(mat * &*near_null));
 
         if error_norm_new < 1e-12 {
             warn!("find_near_null converged during search");
-            return None;
+            return false;
         }
 
-        if iter % 10 == 0 && iter != 0 {
+        if iter % 30 == 0 && iter != 0 {
             trace!(
                 "asymptotic convergence rate: {}",
                 error_norm_new / error_norm_old
@@ -117,10 +93,10 @@ fn find_near_null<'a>(
         // TODO try difference of difference ratio
         if error_norm_new / error_norm_old > 0.997 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
-            return Some(iterate);
+            return true;
         }
 
-        stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
+        stationary_composite(mat, near_null, 1, composite_preconditioner);
         error_norm_old = error_norm_new;
         iter += 1;
     }
@@ -141,23 +117,6 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
             *x = positive.sample(&mut rng)
         }
     }
-}
-
-pub fn build_adaptive_preconditioner<'a>(
-    mat: &'a CsrMatrix<f64>,
-    components: Vec<Box<dyn Fn(&mut DVector<f64>)>>,
-) -> Box<dyn Fn(&mut DVector<f64>) + 'a> {
-    Box::new(move |r: &mut DVector<f64>| {
-        let mut x = DVector::from(vec![0.0; r.len()]);
-
-        for component in components.iter().chain(components.iter().rev()) {
-            let mut y = r.clone();
-            component(&mut y);
-            x += &y;
-            *r -= mat * &y;
-        }
-        *r = x;
-    })
 }
 
 fn composite_tester(

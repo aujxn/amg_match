@@ -120,7 +120,7 @@ fn main() {
                 &mut L1::new(&mat),
             );
 
-            let hierarchy = modularity_matching(mat.clone(), &near_null, 2.0);
+            let hierarchy = modularity_matching(&mat, &near_null, 2.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),

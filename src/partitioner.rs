@@ -12,20 +12,22 @@ use std::collections::VecDeque;
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
 #[derive(Clone)]
-pub struct Hierarchy {
+pub struct Hierarchy<'a> {
+    mat: &'a CsrMatrix<f64>,
     partition_matrices: Vec<CsrMatrix<f64>>,
     matrices: Vec<CsrMatrix<f64>>,
 }
 
-impl Hierarchy {
-    pub fn new(mat: CsrMatrix<f64>) -> Self {
+impl<'a> Hierarchy<'a> {
+    pub fn new(mat: &'a CsrMatrix<f64>) -> Self {
         Self {
-            partition_matrices: vec![],
-            matrices: vec![mat],
+            mat,
+            partition_matrices: Vec::new(),
+            matrices: Vec::new(),
         }
     }
 
-    /// Number of levels in the hierarchy. (Number of P matrices is one less)
+    /// Number of coarse levels in the hierarchy.
     pub fn len(&self) -> usize {
         self.matrices.len()
     }
@@ -37,9 +39,14 @@ impl Hierarchy {
 
     /// Adds a level to the hierarchy.
     pub fn push(&mut self, partition_mat: CsrMatrix<f64>) {
-        let level = self.partition_matrices.len();
+        let fine_mat;
+        if self.matrices.is_empty() {
+            fine_mat = self.mat;
+        } else {
+            fine_mat = self.matrices.last().unwrap();
+        }
         let p_transpose = partition_mat.transpose();
-        let coarse_mat = &p_transpose * &(&self.matrices[level] * &partition_mat);
+        let coarse_mat = &p_transpose * &(fine_mat * &partition_mat);
         self.matrices.push(coarse_mat);
         self.partition_matrices.push(partition_mat);
     }
@@ -65,8 +72,8 @@ impl Hierarchy {
     }
 }
 
-pub fn modularity_matching_no_copies(
-    mat: CsrMatrix<f64>,
+pub fn modularity_matching_no_copies<'a>(
+    mat: &'a CsrMatrix<f64>,
     mut near_null: DVector<f64>,
     mut row_sums: DVector<f64>,
     inverse_total: f64,
@@ -207,11 +214,11 @@ fn try_row_sums(mat: &CsrMatrix<f64>, near_null: &mut DVector<f64>) -> Option<(D
 /// Takes a s.p.d matrix (mat), a vector that is near the nullspace of the matrix,
 /// and a minimum coarsening factor for each level of the aggregation and provides a
 /// hierarchy of partitions of the matrix.
-pub fn modularity_matching(
-    mat: CsrMatrix<f64>, //TODO here don't take ownership anymore
-    near_null: &DVector<f64>,
+pub fn modularity_matching<'a>(
+    mat: &'a CsrMatrix<f64>,
+    near_null: &'_ DVector<f64>,
     coarsening_factor: f64,
-) -> Hierarchy {
+) -> Hierarchy<'a> {
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);

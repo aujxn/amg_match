@@ -100,21 +100,21 @@ impl SymmetricGaussSeidel {
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
 //      - test spd of precon again
-pub struct Multilevel<T> {
+pub struct Multilevel<'a, T> {
     x_ks: Vec<DVector<f64>>,
     b_ks: Vec<DVector<f64>>,
-    hierarchy: Hierarchy,
+    hierarchy: Hierarchy<'a>,
     forward_smoothers: Vec<T>,
     backward_smoothers: Vec<T>,
     smoothing_steps: usize,
 }
 
-impl Preconditioner for Multilevel<L1> {
+impl<'a> Preconditioner for Multilevel<'a, L1> {
     fn apply(&mut self, r: &mut DVector<f64>) {
-        let levels = self.hierarchy.get_partitions().len();
+        let levels = self.hierarchy.len() - 1;
         let p_ks = self.hierarchy.get_partitions();
         let mat_ks = self.hierarchy.get_matrices();
-        self.b_ks[0].copy_from(&*r);
+        self.b_ks[0] = p_ks[0].transpose() * &*r;
 
         for level in 0..levels {
             for _ in 0..self.smoothing_steps {
@@ -122,7 +122,7 @@ impl Preconditioner for Multilevel<L1> {
                 self.forward_smoothers[level].apply(&mut r_k);
                 self.x_ks[level] += &r_k;
             }
-            let p_t = p_ks[level].transpose();
+            let p_t = p_ks[level + 1].transpose();
             let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
             self.b_ks[level + 1] = &p_t * &r_k;
         }
@@ -141,7 +141,7 @@ impl Preconditioner for Multilevel<L1> {
         self.x_ks[levels].copy_from(&coarse_solution);
 
         for level in (0..levels).rev() {
-            let interpolated_x = self.hierarchy.get_partition(level) * &self.x_ks[level + 1];
+            let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
             self.x_ks[level] += &interpolated_x;
             for _ in 0..self.smoothing_steps {
                 let mut r_k =
@@ -150,7 +150,7 @@ impl Preconditioner for Multilevel<L1> {
                 self.x_ks[level] += &r_k;
             }
         }
-        r.copy_from(&self.x_ks[0]);
+        *r = &p_ks[0] * &self.x_ks[0];
         for (xk, bk) in self.x_ks.iter_mut().zip(self.b_ks.iter_mut()) {
             xk.fill(0.0);
             bk.fill(0.0);
@@ -158,9 +158,9 @@ impl Preconditioner for Multilevel<L1> {
     }
 }
 
-impl Multilevel<L1> {
+impl<'a> Multilevel<'a, L1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
-    pub fn new(hierarchy: Hierarchy) -> Self {
+    pub fn new(hierarchy: Hierarchy<'a>) -> Self {
         let smoothing_steps = 1;
         trace!("building multilevel smoothers");
         let forward_smoothers = hierarchy
@@ -189,7 +189,7 @@ impl Multilevel<L1> {
 
 pub struct Composite<'a> {
     mat: &'a CsrMatrix<f64>,
-    components: Vec<Box<dyn Preconditioner>>,
+    components: Vec<Box<dyn Preconditioner + 'a>>,
 }
 
 impl<'a> Preconditioner for Composite<'a> {
@@ -218,15 +218,15 @@ impl<'a> Composite<'a> {
         Self { mat, components }
     }
 
-    pub fn push(&mut self, component: Box<dyn Preconditioner>) {
+    pub fn push(&mut self, component: Box<dyn Preconditioner + 'a>) {
         self.components.push(component);
     }
 
-    pub fn components(&self) -> &Vec<Box<dyn Preconditioner>> {
+    pub fn components(&'a self) -> &Vec<Box<dyn Preconditioner + 'a>> {
         &self.components
     }
 
-    pub fn components_mut(&mut self) -> &mut Vec<Box<dyn Preconditioner>> {
+    pub fn components_mut(&'a mut self) -> &mut Vec<Box<dyn Preconditioner + 'a>> {
         &mut self.components
     }
 }
