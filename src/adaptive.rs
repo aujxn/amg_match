@@ -27,7 +27,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             preconditioner.components().len(),
             convergence_rate
         );
-        if convergence_rate < 0.80 || preconditioner.components().len() == 8 {
+        if convergence_rate < 0.70 || preconditioner.components().len() == 8 {
             return preconditioner;
         }
         if !find_near_null(mat, &mut preconditioner, &mut near_null) {
@@ -158,4 +158,55 @@ fn composite_tester(
     avg /= test_runs as f64;
 
     avg
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        adaptive::build_adaptive,
+        preconditioner::{Preconditioner, L1},
+        random_vec,
+    };
+    use nalgebra_sparse::CsrMatrix;
+    use test_generator::test_resources;
+
+    fn test_symmetry(preconditioner: &mut dyn Preconditioner, dim: usize) {
+        for _ in 0..5 {
+            let u = random_vec(dim);
+            let v = random_vec(dim);
+            let mut preconditioned_v = v.clone();
+            let mut preconditioned_u = u.clone();
+            preconditioner.apply(&mut preconditioned_v);
+            preconditioner.apply(&mut preconditioned_u);
+
+            let left: f64 = u.dot(&preconditioned_v);
+            let right: f64 = v.dot(&preconditioned_u);
+            let difference = (left - right).abs() / (left + right).abs();
+            assert!(
+                difference < 1e-6,
+                "\nLeft and right didn't match\nleft: {}\nright: {}\nrelative difference: {:+e}\n",
+                left,
+                right,
+                difference
+            );
+        }
+    }
+
+    #[test_resources("test_matrices/unit_tests/*")]
+    fn test_symmetry_adaptive(mat_path: &str) {
+        let mut mat = CsrMatrix::from(
+            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
+        );
+
+        let norm = mat
+            .values()
+            .iter()
+            .fold(0.0_f64, |acc, x| acc + x * x)
+            .sqrt();
+        mat /= norm;
+        let mat = mat;
+        let dim = mat.nrows();
+        let mut preconditioner = build_adaptive(&mat);
+        test_symmetry(&mut preconditioner, dim);
+    }
 }
