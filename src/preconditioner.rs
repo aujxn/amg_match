@@ -186,3 +186,47 @@ impl Multilevel<L1> {
         }
     }
 }
+
+pub struct Composite<'a> {
+    mat: &'a CsrMatrix<f64>,
+    components: Vec<Box<dyn Preconditioner>>,
+}
+
+impl<'a> Preconditioner for Composite<'a> {
+    fn apply(&mut self, r: &mut DVector<f64>) {
+        let mut x = DVector::from(vec![0.0; r.len()]);
+        let mut y = DVector::from(vec![0.0; r.len()]);
+
+        for component in self.components.iter_mut() {
+            y.copy_from(r);
+            component.apply(&mut y);
+            x += &y;
+            *r -= self.mat * &y;
+        }
+        for component in self.components.iter_mut().rev() {
+            y.copy_from(r);
+            component.apply(&mut y);
+            x += &y;
+            *r -= self.mat * &y;
+        }
+        *r = x;
+    }
+}
+
+impl<'a> Composite<'a> {
+    pub fn new(mat: &'a CsrMatrix<f64>, components: Vec<Box<dyn Preconditioner>>) -> Self {
+        Self { mat, components }
+    }
+
+    pub fn push(&mut self, component: Box<dyn Preconditioner>) {
+        self.components.push(component);
+    }
+
+    pub fn components(&self) -> &Vec<Box<dyn Preconditioner>> {
+        &self.components
+    }
+
+    pub fn components_mut(&mut self) -> &mut Vec<Box<dyn Preconditioner>> {
+        &mut self.components
+    }
+}
