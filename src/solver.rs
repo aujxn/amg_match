@@ -50,13 +50,15 @@ pub fn stationary(
 ) -> bool {
     //let mut r = rhs - &(mat * &x);
     let mut r = DVector::zeros(rhs.nrows());
-    spmm_csr_dense(0.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+    r.copy_from(rhs);
+    spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
     let r0_norm = r.dot(&r);
     let epsilon_squared = epsilon * epsilon;
 
     for iter in 0..max_iter {
         //r = rhs - &(mat * &x);
-        spmm_csr_dense(0.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+        r.copy_from(rhs);
+        spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
         let r_norm = r.dot(&r);
 
         if let Some(log_iter) = log_convergence {

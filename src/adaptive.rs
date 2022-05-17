@@ -27,7 +27,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             preconditioner.components().len(),
             convergence_rate
         );
-        if convergence_rate < 0.85 || preconditioner.components().len() >= 3 {
+        if convergence_rate < 0.80 || preconditioner.components().len() == 8 {
             return preconditioner;
         }
         if !find_near_null(mat, &mut preconditioner, &mut near_null) {
@@ -91,7 +91,7 @@ fn find_near_null<'a>(
         }
 
         // TODO try difference of difference ratio
-        if error_norm_new / error_norm_old > 0.97 {
+        if error_norm_new / error_norm_old > 0.995 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
             return true;
         }
