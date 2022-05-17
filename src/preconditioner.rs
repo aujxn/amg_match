@@ -1,5 +1,5 @@
 use crate::partitioner::Hierarchy;
-use crate::solver::{lsolve, pcg_no_log, usolve};
+use crate::solver::{lsolve, pcg, usolve};
 use nalgebra::base::DVector;
 use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
 use nalgebra_sparse::CsrMatrix;
@@ -172,18 +172,18 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             );
         }
 
-        let (coarse_solution, converged) = pcg_no_log(
+        let converged = pcg(
             self.hierarchy.get_matrices().last().unwrap(),
             &self.b_ks[levels],
-            &self.x_ks[levels],
+            &mut self.x_ks[levels],
             1000,
             1.0e-2,
             &mut self.forward_smoothers[levels],
+            None,
         );
         if !converged {
             warn!("coarse solver didn't converge");
         }
-        self.x_ks[levels].copy_from(&coarse_solution);
 
         for level in (0..levels).rev() {
             //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];

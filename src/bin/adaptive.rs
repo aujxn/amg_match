@@ -86,7 +86,7 @@ fn main() {
 
     let dim = mat.nrows();
     let ones = DVector::from(vec![1.0; mat.nrows()]);
-    let zeros = DVector::from(vec![0.0; mat.nrows()]);
+    let mut zeros = DVector::from(vec![0.0; mat.nrows()]);
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
     let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
@@ -111,16 +111,18 @@ fn main() {
             info!("{:?}", test);
             */
 
-            let (near_null, _) = stationary(
+            let mut x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+            let _converged = stationary(
                 &mat,
                 &zeros,
-                &x,
+                &mut x,
                 iterations_for_near_null,
                 10.0_f64.powi(-6),
                 &mut L1::new(&mat),
+                None,
             );
 
-            let hierarchy = modularity_matching(&mat, &near_null, 2.0);
+            let hierarchy = modularity_matching(&mat, &x, 2.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),
@@ -147,18 +149,20 @@ fn main() {
         Solver::Stationary => stationary(
             &mat,
             &b,
-            &zeros,
+            &mut zeros,
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,
+            Some(50),
         ),
         Solver::Pcg => pcg(
             &mat,
             &b,
-            &zeros,
+            &mut zeros,
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,
+            Some(50),
         ),
     };
     info!("Solved in: {} ms.", timer.elapsed().as_millis());

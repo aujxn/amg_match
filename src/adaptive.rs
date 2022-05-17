@@ -134,15 +134,16 @@ fn composite_tester(
     let mut rng = thread_rng();
 
     for _ in 0..test_runs {
-        let iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+        let mut iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
         //stationary_composite(mat, &mut iterate, steps, composite_preconditioner);
-        let (mut iterate, _) = crate::solver::pcg(
+        let _ = crate::solver::pcg(
             mat,
             &DVector::zeros(dim),
-            &iterate,
+            &mut iterate,
             4,
             1e-16,
             &mut Sgs::new(mat),
+            None,
         );
         let starting_error_norm = iterate.dot(&(mat * &iterate));
         stationary_composite(mat, &mut iterate, 3, composite_preconditioner);
