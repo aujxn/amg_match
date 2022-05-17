@@ -1,6 +1,7 @@
 use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg_no_log, usolve};
 use nalgebra::base::DVector;
+use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
 use nalgebra_sparse::CsrMatrix;
 
 // TODO make a composite preconditioner and clean up the adaptive module to use this.
@@ -103,6 +104,7 @@ impl SymmetricGaussSeidel {
 pub struct Multilevel<'a, T> {
     x_ks: Vec<DVector<f64>>,
     b_ks: Vec<DVector<f64>>,
+    r_ks: Vec<DVector<f64>>,
     hierarchy: Hierarchy<'a>,
     forward_smoothers: Vec<T>,
     backward_smoothers: Vec<T>,
@@ -114,17 +116,60 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
         let levels = self.hierarchy.len() - 1;
         let p_ks = self.hierarchy.get_partitions();
         let mat_ks = self.hierarchy.get_matrices();
-        self.b_ks[0] = p_ks[0].transpose() * &*r;
+
+        // reset the workspaces
+        for ((xk, bk), rk) in self
+            .x_ks
+            .iter_mut()
+            .zip(self.b_ks.iter_mut())
+            .zip(self.r_ks.iter_mut())
+        {
+            xk.fill(0.0);
+            bk.fill(0.0);
+            rk.fill(0.0);
+        }
+
+        //self.b_ks[0] = p_ks[0].transpose() * &*r;
+        spmm_csr_dense(
+            0.0,
+            &mut self.b_ks[0],
+            1.0,
+            Op::Transpose(&p_ks[0]),
+            Op::NoOp(&*r),
+        );
 
         for level in 0..levels {
             for _ in 0..self.smoothing_steps {
-                let mut r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
-                self.forward_smoothers[level].apply(&mut r_k);
-                self.x_ks[level] += &r_k;
+                self.r_ks[level].copy_from(&self.b_ks[level]);
+                spmm_csr_dense(
+                    1.0,
+                    &mut self.r_ks[level],
+                    -1.0,
+                    Op::NoOp(&mat_ks[level]),
+                    Op::NoOp(&self.x_ks[level]),
+                );
+
+                self.forward_smoothers[level].apply(&mut self.r_ks[level]);
+                self.x_ks[level] += &self.r_ks[level];
             }
-            let p_t = p_ks[level + 1].transpose();
-            let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
-            self.b_ks[level + 1] = &p_t * &r_k;
+            //let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
+            self.r_ks[level].copy_from(&self.b_ks[level]);
+            spmm_csr_dense(
+                1.0,
+                &mut self.r_ks[level],
+                -1.0,
+                Op::NoOp(&mat_ks[level]),
+                Op::NoOp(&self.x_ks[level]),
+            );
+            //let p_t = p_ks[level + 1].transpose();
+            //self.b_ks[level + 1] = &p_t * &r_k;
+            spmm_csr_dense(
+                0.0,
+                &mut self.b_ks[level + 1],
+                1.0,
+                Op::Transpose(&p_ks[level + 1]),
+                Op::NoOp(&self.r_ks[level]),
+            );
         }
 
         let (coarse_solution, converged) = pcg_no_log(
@@ -141,27 +186,41 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
         self.x_ks[levels].copy_from(&coarse_solution);
 
         for level in (0..levels).rev() {
-            let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
-            self.x_ks[level] += &interpolated_x;
+            //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
+            //self.x_ks[level] += &interpolated_x;
+            spmm_csr_dense(
+                0.0,
+                &mut self.r_ks[level],
+                1.0,
+                Op::NoOp(&p_ks[level + 1]),
+                Op::NoOp(&self.x_ks[level + 1]),
+            );
+            self.x_ks[level] += &self.r_ks[level];
+
             for _ in 0..self.smoothing_steps {
-                let mut r_k =
-                    &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
-                self.forward_smoothers[level].apply(&mut r_k);
-                self.x_ks[level] += &r_k;
+                //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
+                self.r_ks[level].copy_from(&self.b_ks[level]);
+                spmm_csr_dense(
+                    1.0,
+                    &mut self.r_ks[level],
+                    -1.0,
+                    Op::NoOp(&mat_ks[level]),
+                    Op::NoOp(&self.x_ks[level]),
+                );
+
+                self.forward_smoothers[level].apply(&mut self.r_ks[level]);
+                self.x_ks[level] += &self.r_ks[level];
             }
         }
-        *r = &p_ks[0] * &self.x_ks[0];
-        for (xk, bk) in self.x_ks.iter_mut().zip(self.b_ks.iter_mut()) {
-            xk.fill(0.0);
-            bk.fill(0.0);
-        }
+        //*r = &p_ks[0] * &self.x_ks[0];
+        spmm_csr_dense(0.0, r, 1.0, Op::NoOp(&p_ks[0]), Op::NoOp(&self.x_ks[0]));
     }
 }
 
 impl<'a> Multilevel<'a, L1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy<'a>) -> Self {
-        let smoothing_steps = 1;
+        let smoothing_steps = 3;
         trace!("building multilevel smoothers");
         let forward_smoothers = hierarchy
             .get_matrices()
@@ -175,10 +234,12 @@ impl<'a> Multilevel<'a, L1> {
             .map(|p| DVector::zeros(p.nrows()))
             .collect();
         let b_ks = x_ks.clone();
+        let r_ks = x_ks.clone();
 
         Self {
             x_ks,
             b_ks,
+            r_ks,
             hierarchy,
             forward_smoothers,
             backward_smoothers,
@@ -190,32 +251,59 @@ impl<'a> Multilevel<'a, L1> {
 pub struct Composite<'a> {
     mat: &'a CsrMatrix<f64>,
     components: Vec<Box<dyn Preconditioner + 'a>>,
+    x: DVector<f64>,
+    y: DVector<f64>,
+    r_work: DVector<f64>,
 }
 
 impl<'a> Preconditioner for Composite<'a> {
     fn apply(&mut self, r: &mut DVector<f64>) {
-        let mut x = DVector::from(vec![0.0; r.len()]);
-        let mut y = DVector::from(vec![0.0; r.len()]);
+        self.x.fill(0.0);
+        self.r_work.copy_from(r);
 
         for component in self.components.iter_mut() {
-            y.copy_from(r);
-            component.apply(&mut y);
-            x += &y;
-            *r -= self.mat * &y;
+            self.y.copy_from(&self.r_work);
+            component.apply(&mut self.y);
+            self.x += &self.y;
+            //*r -= self.mat * &y;
+            spmm_csr_dense(
+                1.0,
+                &mut self.r_work,
+                -1.0,
+                Op::NoOp(&self.mat),
+                Op::NoOp(&self.y),
+            );
         }
         for component in self.components.iter_mut().rev() {
-            y.copy_from(r);
-            component.apply(&mut y);
-            x += &y;
-            *r -= self.mat * &y;
+            self.y.copy_from(&self.r_work);
+            component.apply(&mut self.y);
+            self.x += &self.y;
+            //*r -= self.mat * &y;
+            spmm_csr_dense(
+                1.0,
+                &mut self.r_work,
+                -1.0,
+                Op::NoOp(&self.mat),
+                Op::NoOp(&self.y),
+            );
         }
-        *r = x;
+        r.copy_from(&self.x);
     }
 }
 
 impl<'a> Composite<'a> {
     pub fn new(mat: &'a CsrMatrix<f64>, components: Vec<Box<dyn Preconditioner>>) -> Self {
-        Self { mat, components }
+        let dim = mat.nrows();
+        let x = DVector::zeros(dim);
+        let y = DVector::zeros(dim);
+        let r_work = DVector::zeros(dim);
+        Self {
+            mat,
+            components,
+            x,
+            y,
+            r_work,
+        }
     }
 
     pub fn push(&mut self, component: Box<dyn Preconditioner + 'a>) {

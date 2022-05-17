@@ -91,7 +91,7 @@ fn find_near_null<'a>(
         }
 
         // TODO try difference of difference ratio
-        if error_norm_new / error_norm_old > 0.997 {
+        if error_norm_new / error_norm_old > 0.97 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
             return true;
         }
