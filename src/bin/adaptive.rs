@@ -76,13 +76,20 @@ fn main() {
         &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
     );
 
+    /*
     let norm = mat
         .values()
         .iter()
         .fold(0.0_f64, |acc, x| acc + x * x)
         .sqrt();
-    mat /= norm;
-    let mat = mat;
+    mat = norm;
+    */
+    let mut diag: CsrMatrix<f64> = mat.diagonal_as_csr();
+    diag.triplet_iter_mut()
+        .for_each(|(_, _, val)| *val = 1.0 / val.sqrt());
+    let mat = &diag * &mat * &diag;
+
+    error!("{}", mat.get_entry(30, 30).unwrap().into_value());
 
     let dim = mat.nrows();
     let ones = DVector::from(vec![1.0; mat.nrows()]);
@@ -162,7 +169,7 @@ fn main() {
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,
-            Some(50),
+            Some(25),
         ),
     };
     info!("Solved in: {} ms.", timer.elapsed().as_millis());

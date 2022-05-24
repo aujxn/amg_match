@@ -7,6 +7,7 @@ use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 use rand::prelude::*;
 use rand::{distributions::Uniform, thread_rng};
+use std::time::{Duration, Instant};
 
 pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
@@ -27,7 +28,8 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             preconditioner.components().len(),
             convergence_rate
         );
-        if convergence_rate < 0.70 || preconditioner.components().len() == 8 {
+        if convergence_rate < 0.65 {
+            //|| preconditioner.components().len() > 14 {
             return preconditioner;
         }
         if !find_near_null(mat, &mut preconditioner, &mut near_null) {
@@ -36,9 +38,17 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
         near_null /= near_null.norm();
         no_zeroes(&mut near_null);
 
-        let hierarchy = modularity_matching(&mat, &near_null, 1.8);
+        let hierarchy = modularity_matching(&mat, &near_null, 3.5);
         let ml1 = Multilevel::<L1>::new(hierarchy);
         preconditioner.push(Box::new(ml1));
+        //preconditioner.push(Box::new(L1::new(mat)));
+        /*
+        let num_components = preconditioner.components().len();
+
+        if num_components > 10 {
+            preconditioner.rm_oldest();
+        }
+        */
     }
 }
 
@@ -91,7 +101,7 @@ fn find_near_null<'a>(
         }
 
         // TODO try difference of difference ratio
-        if error_norm_new / error_norm_old > 0.995 {
+        if error_norm_new / error_norm_old > 0.90 {
             info!("convergence has stopped. Error: {:+e}", error_norm_new);
             return true;
         }
@@ -125,11 +135,11 @@ fn composite_tester(
     composite_preconditioner: &mut Composite,
 ) -> f64 {
     trace!("testing convergence...");
-    let test_runs = 3;
+    let test_runs = 2;
     let mut avg = 0.0;
     let dim = mat.nrows();
     // 1 / (2.0 * however many steps done after test)
-    let root = 1.0 / (2.0 * 3.0);
+    let root = 1.0 / 5.0; //(2.0 * 3.0);
     let distribution = Uniform::new(-1e-3_f64, 1e-3_f64);
     let mut rng = thread_rng();
 
@@ -140,13 +150,17 @@ fn composite_tester(
             mat,
             &DVector::zeros(dim),
             &mut iterate,
-            4,
+            10,
             1e-16,
             &mut Sgs::new(mat),
             None,
         );
+        let start = Instant::now();
+        let time = Duration::from_secs(5);
         let starting_error_norm = iterate.dot(&(mat * &iterate));
-        stationary_composite(mat, &mut iterate, 3, composite_preconditioner);
+        while start.elapsed() < time {
+            stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
+        }
         if starting_error_norm < 1e-16 {
             warn!("tester converged in less than number of tests ({steps})");
             return 0.0;
@@ -183,7 +197,7 @@ mod tests {
             let right: f64 = v.dot(&preconditioned_u);
             let difference = (left - right).abs() / (left + right).abs();
             assert!(
-                difference < 1e-6,
+                difference < 1e-3,
                 "\nLeft and right didn't match\nleft: {}\nright: {}\nrelative difference: {:+e}\n",
                 left,
                 right,

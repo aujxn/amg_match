@@ -55,6 +55,9 @@ pub fn stationary(
     let r0_norm = r.dot(&r);
     let epsilon_squared = epsilon * epsilon;
 
+    preconditioner.apply(&mut r);
+    *x += &r;
+
     for iter in 0..max_iter {
         //r = rhs - &(mat * &x);
         r.copy_from(rhs);
@@ -124,8 +127,13 @@ pub fn pcg(
 
         if let Some(log_iter) = log_convergence {
             if i % log_iter == 0 {
+                r.copy_from(rhs);
+                spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+                r_bar.copy_from(&r);
+                preconditioner.apply(&mut r_bar);
+                d = r.dot(&r_bar);
                 trace!("squared norm iter {i}: {d}");
-                //r = rhs - mat * &x;
+                // TODO do this if many iterations
             }
         }
 

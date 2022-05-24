@@ -38,13 +38,18 @@ impl<'a> Hierarchy<'a> {
     }
 
     /// Adds a level to the hierarchy.
-    pub fn push(&mut self, partition_mat: CsrMatrix<f64>) {
+    pub fn push(&mut self, partition_mat: CsrMatrix<f64>, near_null: &DVector<f64>) {
         let fine_mat;
+        let mut partition_mat = partition_mat.clone();
         if self.matrices.is_empty() {
             fine_mat = self.mat;
+            partition_mat
+                .triplet_iter_mut()
+                .for_each(|(i, _, w)| *w *= near_null[i]);
         } else {
             fine_mat = self.matrices.last().unwrap();
         }
+
         let p_transpose = partition_mat.transpose();
         let coarse_mat = &p_transpose * &(fine_mat * &partition_mat);
         self.matrices.push(coarse_mat);
@@ -180,7 +185,7 @@ pub fn modularity_matching_no_copies<'a>(
                 "added level! num vertices coarse: {}",
                 new_partition.ncols()
             );
-            hierarchy.push(partition_mat.unwrap());
+            hierarchy.push(partition_mat.unwrap(), &near_null);
             partition_mat = None;
             level_starting_vertex_count = coarse_vertex_count;
             if starting_vertex_count / coarse_vertex_count > total_coarsening_factor {
@@ -228,12 +233,18 @@ pub fn modularity_matching<'a>(
     loop {
         let vertex_count = modularity_mat.nrows();
 
-        match find_pairs(&modularity_mat, 30) {
+        match find_pairs(&modularity_mat, 3) {
             None => {
+                /*
                 if let Some(p) = partition_mat {
-                    trace!("added level! num vertices coarse: {}", p.ncols());
                     hierarchy.push(p);
+                    trace!(
+                        "added level! num vertices coarse: {} nnz: {}",
+                        hierarchy.get_partitions().last().unwrap().ncols(),
+                        hierarchy.get_matrices().last().unwrap().nnz()
+                    );
                 }
+                */
 
                 info!("Levels: {}", hierarchy.len());
                 return hierarchy;
@@ -263,12 +274,13 @@ pub fn modularity_matching<'a>(
                 modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
+                    hierarchy.push(partition_mat.unwrap(), near_null);
                     trace!(
-                        "added level! num vertices coarse: {}",
-                        new_partition.ncols()
+                        "added level! num vertices coarse: {} nnz: {}",
+                        hierarchy.get_partitions().last().unwrap().ncols(),
+                        hierarchy.get_matrices().last().unwrap().nnz()
                     );
-                    hierarchy.push(partition_mat.unwrap());
-                    if coarse_vertex_count < 16.0 {
+                    if coarse_vertex_count < 150.0 {
                         info!("Levels: {}", hierarchy.len());
                         return hierarchy;
                     }

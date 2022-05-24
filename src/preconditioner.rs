@@ -173,11 +173,11 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
         }
 
         let converged = pcg(
-            self.hierarchy.get_matrices().last().unwrap(),
+            &mat_ks[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
             1000,
-            1.0e-2,
+            1.0e-4,
             &mut self.forward_smoothers[levels],
             None,
         );
@@ -266,12 +266,13 @@ impl<'a> Preconditioner for Composite<'a> {
             component.apply(&mut self.y);
             self.x += &self.y;
             //*r -= self.mat * &y;
+            self.r_work.copy_from(r);
             spmm_csr_dense(
                 1.0,
                 &mut self.r_work,
                 -1.0,
                 Op::NoOp(&self.mat),
-                Op::NoOp(&self.y),
+                Op::NoOp(&self.x),
             );
         }
         for component in self.components.iter_mut().rev() {
@@ -279,12 +280,13 @@ impl<'a> Preconditioner for Composite<'a> {
             component.apply(&mut self.y);
             self.x += &self.y;
             //*r -= self.mat * &y;
+            self.r_work.copy_from(r);
             spmm_csr_dense(
                 1.0,
                 &mut self.r_work,
                 -1.0,
                 Op::NoOp(&self.mat),
-                Op::NoOp(&self.y),
+                Op::NoOp(&self.x),
             );
         }
         r.copy_from(&self.x);
@@ -308,6 +310,10 @@ impl<'a> Composite<'a> {
 
     pub fn push(&mut self, component: Box<dyn Preconditioner + 'a>) {
         self.components.push(component);
+    }
+
+    pub fn rm_oldest(&mut self) {
+        self.components.remove(1);
     }
 
     pub fn components(&'a self) -> &Vec<Box<dyn Preconditioner + 'a>> {
