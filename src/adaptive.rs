@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
-    let iterations_for_near_null = 50;
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
     let mut rng = thread_rng();
     let distribution = Uniform::new(-2.0_f64, 2.0_f64);
@@ -19,36 +18,36 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let mut near_null = DVector::zeros(dim);
     let mut preconditioner = Composite::new(mat, Vec::new());
     preconditioner.push(Box::new(L1::new(mat)));
+    let mut sgs = Sgs::new(mat);
 
     let steps = 10;
     loop {
-        let convergence_rate = composite_tester(mat, steps, &mut preconditioner);
-        info!(
-            "components: {} convergence_rate: {}",
-            preconditioner.components().len(),
-            convergence_rate
+        let mut rng = thread_rng();
+        let distribution = Uniform::new(-2.0_f64, 2.0_f64);
+        near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
+        let _ = crate::solver::pcg(
+            mat,
+            &DVector::zeros(dim),
+            &mut near_null,
+            10,
+            1e-16,
+            &mut sgs,
+            None,
         );
-        if convergence_rate < 0.65 {
-            //|| preconditioner.components().len() > 14 {
+
+        if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
+            near_null /= near_null.norm();
+            no_zeroes(&mut near_null);
+
+            let hierarchy = modularity_matching(&mat, &near_null, 3.5);
+            let ml1 = Multilevel::<L1>::new(hierarchy);
+            preconditioner.push(Box::new(ml1));
+            if convergence_rate < 0.6 || preconditioner.components().len() == 2 {
+                return preconditioner;
+            }
+        } else {
             return preconditioner;
         }
-        if !find_near_null(mat, &mut preconditioner, &mut near_null) {
-            return preconditioner;
-        }
-        near_null /= near_null.norm();
-        no_zeroes(&mut near_null);
-
-        let hierarchy = modularity_matching(&mat, &near_null, 3.5);
-        let ml1 = Multilevel::<L1>::new(hierarchy);
-        preconditioner.push(Box::new(ml1));
-        //preconditioner.push(Box::new(L1::new(mat)));
-        /*
-        let num_components = preconditioner.components().len();
-
-        if num_components > 10 {
-            preconditioner.rm_oldest();
-        }
-        */
     }
 }
 
@@ -73,42 +72,61 @@ fn find_near_null<'a>(
     mat: &'a CsrMatrix<f64>,
     composite_preconditioner: &mut Composite,
     near_null: &mut DVector<f64>,
-) -> bool {
+) -> Option<f64> {
     trace!("searching for near null");
-    let mut rng = thread_rng();
-    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    *near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
     let mut iter = 0;
+    let start = Instant::now();
+    let mut last_log = start;
+    let log_interval = Duration::from_secs(2);
+    let starting_error = near_null.dot(&(mat * &*near_null));
 
-    let initial_iters = 5;
-    stationary_composite(mat, near_null, initial_iters, composite_preconditioner);
+    let mut old_convergence_rate_per_second = f64::MAX;
+    let mut convergence_rate_per_second;
+    let mut convergence_rate_per_iter;
 
-    let mut error_norm_old = f64::MAX;
+    let mut stabilizer_counter = 0;
 
     loop {
-        let error_norm_new = near_null.dot(&(mat * &*near_null));
-
-        if error_norm_new < 1e-12 {
-            warn!("find_near_null converged during search");
-            return false;
-        }
-
-        if iter % 30 == 0 && iter != 0 {
-            trace!(
-                "asymptotic convergence rate: {}",
-                error_norm_new / error_norm_old
-            );
-        }
-
-        // TODO try difference of difference ratio
-        if error_norm_new / error_norm_old > 0.90 {
-            info!("convergence has stopped. Error: {:+e}", error_norm_new);
-            return true;
-        }
-
         stationary_composite(mat, near_null, 1, composite_preconditioner);
-        error_norm_old = error_norm_new;
         iter += 1;
+        let current_error = near_null.dot(&(mat * &*near_null));
+        if current_error < 1e-16 {
+            warn!("find_near_null converged during search");
+            return None;
+        }
+
+        let now = Instant::now();
+        let elapsed = (now - start).as_millis();
+        let convergence = current_error / starting_error;
+        convergence_rate_per_second = convergence.powf(1.0 / ((elapsed as f64 / 1000.0) * 2.0));
+        convergence_rate_per_iter = convergence.powf(1.0 / (iter as f64 * 2.0));
+
+        if now - last_log > log_interval {
+            trace!(
+                "iteration: {} search time: {}s convergence: per second: {} per iteration: {}",
+                iter,
+                (now - start).as_millis() as f64 / 1000.0,
+                convergence_rate_per_second,
+                convergence_rate_per_iter
+            );
+            last_log = now;
+        }
+
+        if (convergence_rate_per_second - old_convergence_rate_per_second).abs() < 0.01 {
+            stabilizer_counter += 1;
+        } else {
+            stabilizer_counter = 0;
+        }
+
+        if stabilizer_counter == 3 {
+            info!(
+                "{} components. convergence stabilized at {} on iteration {} after {} seconds. squared error: {:+e}",
+                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error
+            );
+            return Some(convergence_rate_per_iter);
+        }
+
+        old_convergence_rate_per_second = convergence_rate_per_second;
     }
 }
 
@@ -129,6 +147,7 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
     }
 }
 
+/*
 fn composite_tester(
     mat: &CsrMatrix<f64>,
     steps: usize,
@@ -136,10 +155,11 @@ fn composite_tester(
 ) -> f64 {
     trace!("testing convergence...");
     let test_runs = 2;
-    let mut avg = 0.0;
+    let mut avg_per_second = 0.0;
+    let mut avg_per_iter = 0.0;
     let dim = mat.nrows();
     // 1 / (2.0 * however many steps done after test)
-    let root = 1.0 / 5.0; //(2.0 * 3.0);
+    let test_seconds = 5;
     let distribution = Uniform::new(-1e-3_f64, 1e-3_f64);
     let mut rng = thread_rng();
 
@@ -158,21 +178,27 @@ fn composite_tester(
         let start = Instant::now();
         let time = Duration::from_secs(5);
         let starting_error_norm = iterate.dot(&(mat * &iterate));
+        let mut completed_iterations = 0;
         while start.elapsed() < time {
             stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
+            completed_iterations += 1;
         }
         if starting_error_norm < 1e-16 {
             warn!("tester converged in less than number of tests ({steps})");
             return 0.0;
         }
         let final_error_norm = iterate.dot(&(mat * &iterate));
-        let convergence_rate = (final_error_norm / starting_error_norm).powf(root);
-        avg += convergence_rate;
+        let convergence = final_error_norm / starting_error_norm;
+        let convergence_rate_per_second = convergence.powf(1.0 / (test_seconds as f64 * 2.0));
+        let convergence_rate_per_iter = convergence.powf(1.0 / (completed_iterations as f64 * 2.0));
+        avg_per_second += convergence_rate_per_second;
+        avg_per_iter += convergence_rate_per_iter;
     }
     avg /= test_runs as f64;
 
     avg
 }
+*/
 
 #[cfg(test)]
 mod tests {

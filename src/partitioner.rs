@@ -27,9 +27,9 @@ impl<'a> Hierarchy<'a> {
         }
     }
 
-    /// Number of coarse levels in the hierarchy.
-    pub fn len(&self) -> usize {
-        self.matrices.len()
+    /// Number of levels in the hierarchy.
+    pub fn levels(&self) -> usize {
+        self.matrices.len() + 1
     }
 
     /// Check if the hierarchy has any levels
@@ -56,24 +56,31 @@ impl<'a> Hierarchy<'a> {
         self.partition_matrices.push(partition_mat);
     }
 
-    /// Get a single matrix from the hierarchy.
-    pub fn get_matrix(&self, level: usize) -> &CsrMatrix<f64> {
-        &self.matrices[level]
-    }
-
     /// Get a single P matrix from the hierarchy.
     pub fn get_partition(&self, level: usize) -> &CsrMatrix<f64> {
         &self.partition_matrices[level]
     }
 
     /// Get a reference to the matrices Vec.
-    pub fn get_matrices(&self) -> &Vec<CsrMatrix<f64>> {
+    pub fn get_matrices(&self) -> &[CsrMatrix<f64>] {
         &self.matrices
     }
 
     /// Get a reference to the P matrices Vec.
     pub fn get_partitions(&self) -> &Vec<CsrMatrix<f64>> {
         &self.partition_matrices
+    }
+}
+
+impl<'a> std::ops::Index<usize> for Hierarchy<'a> {
+    type Output = CsrMatrix<f64>;
+
+    fn index(&self, level: usize) -> &Self::Output {
+        if level == 0 {
+            self.mat
+        } else {
+            &self.matrices[level - 1]
+        }
     }
 }
 
@@ -246,7 +253,7 @@ pub fn modularity_matching<'a>(
                 }
                 */
 
-                info!("Levels: {}", hierarchy.len());
+                info!("Levels: {}", hierarchy.levels());
                 return hierarchy;
             }
             Some(pairs) => {
@@ -280,8 +287,8 @@ pub fn modularity_matching<'a>(
                         hierarchy.get_partitions().last().unwrap().ncols(),
                         hierarchy.get_matrices().last().unwrap().nnz()
                     );
-                    if coarse_vertex_count < 150.0 {
-                        info!("Levels: {}", hierarchy.len());
+                    if coarse_vertex_count < 1000.0 {
+                        info!("Levels: {}", hierarchy.levels());
                         return hierarchy;
                     }
                     partition_mat = None;

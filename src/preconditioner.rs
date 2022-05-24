@@ -113,9 +113,8 @@ pub struct Multilevel<'a, T> {
 
 impl<'a> Preconditioner for Multilevel<'a, L1> {
     fn apply(&mut self, r: &mut DVector<f64>) {
-        let levels = self.hierarchy.len() - 1;
+        let levels = self.hierarchy.levels() - 1;
         let p_ks = self.hierarchy.get_partitions();
-        let mat_ks = self.hierarchy.get_matrices();
 
         // reset the workspaces
         for ((xk, bk), rk) in self
@@ -129,14 +128,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             rk.fill(0.0);
         }
 
-        //self.b_ks[0] = p_ks[0].transpose() * &*r;
-        spmm_csr_dense(
-            0.0,
-            &mut self.b_ks[0],
-            1.0,
-            Op::Transpose(&p_ks[0]),
-            Op::NoOp(&*r),
-        );
+        self.b_ks[0].copy_from(&*r);
 
         for level in 0..levels {
             for _ in 0..self.smoothing_steps {
@@ -145,7 +137,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                     1.0,
                     &mut self.r_ks[level],
                     -1.0,
-                    Op::NoOp(&mat_ks[level]),
+                    Op::NoOp(&self.hierarchy[level]),
                     Op::NoOp(&self.x_ks[level]),
                 );
 
@@ -158,7 +150,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                 1.0,
                 &mut self.r_ks[level],
                 -1.0,
-                Op::NoOp(&mat_ks[level]),
+                Op::NoOp(&self.hierarchy[level]),
                 Op::NoOp(&self.x_ks[level]),
             );
             //let p_t = p_ks[level + 1].transpose();
@@ -167,16 +159,16 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                 0.0,
                 &mut self.b_ks[level + 1],
                 1.0,
-                Op::Transpose(&p_ks[level + 1]),
+                Op::Transpose(&p_ks[level]),
                 Op::NoOp(&self.r_ks[level]),
             );
         }
 
         let converged = pcg(
-            &mat_ks[levels],
+            &self.hierarchy[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
-            1000,
+            500,
             1.0e-4,
             &mut self.forward_smoothers[levels],
             None,
@@ -192,7 +184,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                 0.0,
                 &mut self.r_ks[level],
                 1.0,
-                Op::NoOp(&p_ks[level + 1]),
+                Op::NoOp(&p_ks[level]),
                 Op::NoOp(&self.x_ks[level + 1]),
             );
             self.x_ks[level] += &self.r_ks[level];
@@ -204,7 +196,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                     1.0,
                     &mut self.r_ks[level],
                     -1.0,
-                    Op::NoOp(&mat_ks[level]),
+                    Op::NoOp(&self.hierarchy[level]),
                     Op::NoOp(&self.x_ks[level]),
                 );
 
@@ -212,8 +204,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
                 self.x_ks[level] += &self.r_ks[level];
             }
         }
-        //*r = &p_ks[0] * &self.x_ks[0];
-        spmm_csr_dense(0.0, r, 1.0, Op::NoOp(&p_ks[0]), Op::NoOp(&self.x_ks[0]));
+        r.copy_from(&self.x_ks[0]);
     }
 }
 
@@ -222,17 +213,24 @@ impl<'a> Multilevel<'a, L1> {
     pub fn new(hierarchy: Hierarchy<'a>) -> Self {
         let smoothing_steps = 3;
         trace!("building multilevel smoothers");
-        let forward_smoothers = hierarchy
-            .get_matrices()
-            .iter()
-            .map(|mat| L1::new(mat))
-            .collect::<Vec<_>>();
+        let mut forward_smoothers = vec![L1::new(&hierarchy[0])];
+        forward_smoothers.extend(
+            hierarchy
+                .get_matrices()
+                .iter()
+                .map(|mat| L1::new(mat))
+                .collect::<Vec<_>>(),
+        );
+
         let backward_smoothers = vec![];
-        let x_ks: Vec<DVector<f64>> = hierarchy
-            .get_matrices()
-            .iter()
-            .map(|p| DVector::zeros(p.nrows()))
-            .collect();
+        let mut x_ks: Vec<DVector<f64>> = vec![DVector::zeros(hierarchy[0].nrows())];
+        x_ks.extend(
+            hierarchy
+                .get_matrices()
+                .iter()
+                .map(|p| DVector::zeros(p.nrows()))
+                .collect::<Vec<_>>(),
+        );
         let b_ks = x_ks.clone();
         let r_ks = x_ks.clone();
 

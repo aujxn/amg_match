@@ -120,6 +120,13 @@ pub fn pcg(
             .for_each(|(x_i, p_i)| *x_i += *p_i * alpha);
 
         r -= &g;
+
+        // recenter every now and then
+        if i % 10 == 0 {
+            r.copy_from(rhs);
+            spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+        }
+
         r_bar.copy_from(&r);
         preconditioner.apply(&mut r_bar);
         let d_old = d;
@@ -127,13 +134,7 @@ pub fn pcg(
 
         if let Some(log_iter) = log_convergence {
             if i % log_iter == 0 {
-                r.copy_from(rhs);
-                spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
-                r_bar.copy_from(&r);
-                preconditioner.apply(&mut r_bar);
-                d = r.dot(&r_bar);
                 trace!("squared norm iter {i}: {d}");
-                // TODO do this if many iterations
             }
         }
 
