@@ -2,6 +2,12 @@ use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
+use std::time::{Duration, Instant};
+
+enum LogInterval {
+    Iterations(usize),
+    Time(Duration),
+}
 
 /// Upper triangular solve for sparse matrices and dense rhs
 pub fn usolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
@@ -109,6 +115,8 @@ pub fn pcg(
     let mut d = r.dot(&r_bar);
     let mut p = r_bar.clone();
 
+    let mut last_log = Instant::now();
+
     for i in 0..max_iter {
         //let mut g = mat * &p;
         spmm_csr_dense(0.0, &mut g, 1.0, Op::NoOp(mat), Op::NoOp(&p));
@@ -133,8 +141,10 @@ pub fn pcg(
         d = r.dot(&r_bar);
 
         if let Some(log_iter) = log_convergence {
-            if i % log_iter == 0 {
+            let now = Instant::now();
+            if (now - last_log).as_secs() > log_iter as u64 {
                 trace!("squared norm iter {i}: {d}");
+                last_log = now;
             }
         }
 

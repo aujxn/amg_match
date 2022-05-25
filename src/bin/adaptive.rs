@@ -42,7 +42,7 @@ struct Opt {
 
     /// Stop iterations after scaled residual is less
     /// than tolerance squared
-    #[structopt(default_value = "1e-6")]
+    #[structopt(default_value = "1e-5")]
     tolerance: f64,
     //#[structopt(short, long)]
     //picture: Option<String>,
@@ -120,12 +120,14 @@ fn main() {
                 &zeros,
                 &mut x,
                 iterations_for_near_null,
-                10.0_f64.powi(-6),
+                1e-16,
                 &mut L1::new(&mat),
                 None,
             );
 
-            let hierarchy = modularity_matching(&mat, &x, 2.0);
+            //x /= x.norm();
+            x.normalize_mut();
+            let hierarchy = modularity_matching(&mat, &x, 2.5);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),
@@ -165,7 +167,7 @@ fn main() {
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,
-            Some(1),
+            Some(3),
         ),
     };
     info!("Solved in: {} ms.", timer.elapsed().as_millis());

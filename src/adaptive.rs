@@ -12,23 +12,30 @@ use std::time::{Duration, Instant};
 pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut near_null;
+    let mut near_null = random_vec(dim);
     let mut preconditioner = Composite::new(mat, Vec::new());
-    preconditioner.push(Box::new(L1::new(mat)));
-    let mut sgs = Sgs::new(mat);
+    let mut l1 = L1::new(mat);
+    let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
+    //near_null /= near_null.norm();
+    near_null.normalize_mut();
+    no_zeroes(&mut near_null);
+    let hierarchy = modularity_matching(&mat, &near_null, 2.5);
+    let ml1 = Multilevel::<L1>::new(hierarchy);
+    preconditioner.push(Box::new(ml1));
 
     loop {
         near_null = random_vec(dim);
-        let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut sgs, None);
+        let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
 
         if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
-            near_null /= near_null.norm();
+            //near_null /= near_null.norm();
+            near_null.normalize_mut();
             no_zeroes(&mut near_null);
 
-            let hierarchy = modularity_matching(&mat, &near_null, 3.5);
+            let hierarchy = modularity_matching(&mat, &near_null, 2.5);
             let ml1 = Multilevel::<L1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.6 || preconditioner.components().len() == 15 {
+            if convergence_rate < 0.6 || preconditioner.components().len() == 2 {
                 return preconditioner;
             }
         } else {
@@ -98,7 +105,7 @@ fn find_near_null<'a>(
             last_log = now;
         }
 
-        if (convergence_rate_per_second - old_convergence_rate_per_second).abs() < 0.01 {
+        if (convergence_rate_per_second - old_convergence_rate_per_second).abs() < 0.05 {
             stabilizer_counter += 1;
         } else {
             stabilizer_counter = 0;

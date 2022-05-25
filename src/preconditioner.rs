@@ -164,18 +164,20 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             );
         }
 
-        let converged = pcg(
+        let _converged = pcg(
             &self.hierarchy[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
-            2000,
+            5,
             1.0e-4,
             &mut self.forward_smoothers[levels],
             None,
         );
+        /*
         if !converged {
             warn!("coarse solver didn't converge");
         }
+        */
 
         for level in (0..levels).rev() {
             //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
@@ -211,7 +213,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
 impl<'a> Multilevel<'a, L1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy<'a>) -> Self {
-        let smoothing_steps = 3;
+        let smoothing_steps = 1;
         trace!("building multilevel smoothers");
         let mut forward_smoothers = vec![L1::new(&hierarchy[0])];
         forward_smoothers.extend(
