@@ -1,9 +1,7 @@
 use indexmap::IndexSet;
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
-use rand::prelude::*;
-use rand::{distributions::Uniform, thread_rng};
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use std::collections::VecDeque;
 
 //TODO bring back tests you deleted when preconditioner refactor happened
@@ -83,7 +81,7 @@ impl<'a> std::ops::Index<usize> for Hierarchy<'a> {
         }
     }
 }
-
+/*
 pub fn modularity_matching_no_copies<'a>(
     mat: &'a CsrMatrix<f64>,
     mut near_null: DVector<f64>,
@@ -222,6 +220,7 @@ fn try_row_sums(mat: &CsrMatrix<f64>, near_null: &mut DVector<f64>) -> Option<(D
 
     Some((row_sums, inverse_total))
 }
+*/
 
 /// Takes a s.p.d matrix (mat), a vector that is near the nullspace of the matrix,
 /// and a minimum coarsening factor for each level of the aggregation and provides a

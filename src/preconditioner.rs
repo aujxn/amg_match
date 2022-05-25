@@ -107,7 +107,7 @@ pub struct Multilevel<'a, T> {
     r_ks: Vec<DVector<f64>>,
     hierarchy: Hierarchy<'a>,
     forward_smoothers: Vec<T>,
-    backward_smoothers: Vec<T>,
+    _backward_smoothers: Vec<T>,
     smoothing_steps: usize,
 }
 
@@ -168,7 +168,7 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             &self.hierarchy[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
-            500,
+            2000,
             1.0e-4,
             &mut self.forward_smoothers[levels],
             None,
@@ -222,13 +222,13 @@ impl<'a> Multilevel<'a, L1> {
                 .collect::<Vec<_>>(),
         );
 
-        let backward_smoothers = vec![];
-        let mut x_ks: Vec<DVector<f64>> = vec![DVector::zeros(hierarchy[0].nrows())];
+        let _backward_smoothers = vec![];
+        let mut x_ks: Vec<DVector<f64>> = vec![DVector::from(vec![0.0; hierarchy[0].nrows()])];
         x_ks.extend(
             hierarchy
                 .get_matrices()
                 .iter()
-                .map(|p| DVector::zeros(p.nrows()))
+                .map(|p| DVector::from(vec![0.0; p.nrows()]))
                 .collect::<Vec<_>>(),
         );
         let b_ks = x_ks.clone();
@@ -240,7 +240,7 @@ impl<'a> Multilevel<'a, L1> {
             r_ks,
             hierarchy,
             forward_smoothers,
-            backward_smoothers,
+            _backward_smoothers,
             smoothing_steps,
         }
     }
@@ -294,9 +294,9 @@ impl<'a> Preconditioner for Composite<'a> {
 impl<'a> Composite<'a> {
     pub fn new(mat: &'a CsrMatrix<f64>, components: Vec<Box<dyn Preconditioner>>) -> Self {
         let dim = mat.nrows();
-        let x = DVector::zeros(dim);
-        let y = DVector::zeros(dim);
-        let r_work = DVector::zeros(dim);
+        let x = DVector::from(vec![0.0; dim]);
+        let y = x.clone();
+        let r_work = x.clone();
         Self {
             mat,
             components,

@@ -49,7 +49,7 @@ pub fn stationary(
     log_convergence: Option<usize>,
 ) -> bool {
     //let mut r = rhs - &(mat * &x);
-    let mut r = DVector::zeros(rhs.nrows());
+    let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     r.copy_from(rhs);
     spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
     let r0_norm = r.dot(&r);
@@ -97,16 +97,16 @@ pub fn pcg(
     preconditioner: &mut dyn Preconditioner,
     log_convergence: Option<usize>,
 ) -> bool {
-    let mut r = DVector::zeros(rhs.nrows());
+    let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     let mut g = r.clone();
 
     //let mut r = rhs - mat * &x;
     r.copy_from(rhs);
     spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+    let d0 = r.dot(&r);
     let mut r_bar = r.clone();
     preconditioner.apply(&mut r_bar);
-    let d0 = r.dot(&r_bar);
-    let mut d = d0;
+    let mut d = r.dot(&r_bar);
     let mut p = r_bar.clone();
 
     for i in 0..max_iter {

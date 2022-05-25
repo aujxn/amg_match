@@ -1,7 +1,8 @@
 use amg_match::{
     adaptive::build_adaptive,
     //mat_to_image,
-    partitioner::{modularity_matching, modularity_matching_no_copies},
+    partitioner::modularity_matching,
+    random_vec,
     //preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
 };
@@ -12,7 +13,6 @@ use amg_match::preconditioner::{
 };
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
-use rand::{distributions::Uniform, thread_rng};
 use structopt::StructOpt;
 use strum_macros::{Display, EnumString};
 
@@ -90,11 +90,9 @@ fn main() {
     let mat = &diag * &mat * &diag;
 
     let dim = mat.nrows();
-    let ones = DVector::from(vec![1.0; mat.nrows()]);
+    let _ones = DVector::from(vec![1.0; mat.nrows()]);
     let mut zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut rng = thread_rng();
-    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+    let x: DVector<f64> = random_vec(dim);
     let b = &mat * &x;
 
     let timer = std::time::Instant::now();
@@ -116,7 +114,7 @@ fn main() {
             info!("{:?}", test);
             */
 
-            let mut x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
+            let mut x: DVector<f64> = random_vec(dim);
             let _converged = stationary(
                 &mat,
                 &zeros,

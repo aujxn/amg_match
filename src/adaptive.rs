@@ -2,38 +2,24 @@ use crate::partitioner::modularity_matching;
 use crate::preconditioner::{
     Composite, Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1,
 };
+use crate::random_vec;
 use crate::solver::pcg;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 use rand::prelude::*;
-use rand::{distributions::Uniform, thread_rng};
 use std::time::{Duration, Instant};
 
 pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut rng = thread_rng();
-    let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-    let x: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
-    let mut near_null = DVector::zeros(dim);
+    let mut near_null;
     let mut preconditioner = Composite::new(mat, Vec::new());
     preconditioner.push(Box::new(L1::new(mat)));
     let mut sgs = Sgs::new(mat);
 
-    let steps = 10;
     loop {
-        let mut rng = thread_rng();
-        let distribution = Uniform::new(-2.0_f64, 2.0_f64);
-        near_null = DVector::from_distribution(mat.nrows(), &distribution, &mut rng);
-        let _ = crate::solver::pcg(
-            mat,
-            &DVector::zeros(dim),
-            &mut near_null,
-            10,
-            1e-16,
-            &mut sgs,
-            None,
-        );
+        near_null = random_vec(dim);
+        let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut sgs, None);
 
         if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
             near_null /= near_null.norm();
@@ -42,7 +28,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             let hierarchy = modularity_matching(&mat, &near_null, 3.5);
             let ml1 = Multilevel::<L1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.6 || preconditioner.components().len() == 2 {
+            if convergence_rate < 0.6 || preconditioner.components().len() == 15 {
                 return preconditioner;
             }
         } else {
@@ -137,13 +123,17 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
     let negative = rand::distributions::Uniform::new(-epsilon, -threshold);
     let positive = rand::distributions::Uniform::new(threshold, epsilon);
 
+    let mut counter = 0;
     for x in near_null.iter_mut().filter(|x| x.abs() < threshold) {
-        warn!("perturbed element");
         if rng.gen() {
             *x = negative.sample(&mut rng)
         } else {
             *x = positive.sample(&mut rng)
         }
+        counter += 1
+    }
+    if counter > 0 {
+        warn!("perturbed {counter} elements");
     }
 }
 
@@ -202,11 +192,7 @@ fn composite_tester(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        adaptive::build_adaptive,
-        preconditioner::{Preconditioner, L1},
-        random_vec,
-    };
+    use crate::{adaptive::build_adaptive, preconditioner::Preconditioner, random_vec};
     use nalgebra_sparse::CsrMatrix;
     use test_generator::test_resources;
 
