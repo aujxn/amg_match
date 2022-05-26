@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 pub struct Hierarchy<'a> {
     mat: &'a CsrMatrix<f64>,
     partition_matrices: Vec<CsrMatrix<f64>>,
+    interpolation_matrices: Vec<CsrMatrix<f64>>,
     matrices: Vec<CsrMatrix<f64>>,
 }
 
@@ -21,6 +22,7 @@ impl<'a> Hierarchy<'a> {
         Self {
             mat,
             partition_matrices: Vec::new(),
+            interpolation_matrices: Vec::new(),
             matrices: Vec::new(),
         }
     }
@@ -52,6 +54,7 @@ impl<'a> Hierarchy<'a> {
         let coarse_mat = &p_transpose * &(fine_mat * &partition_mat);
         self.matrices.push(coarse_mat);
         self.partition_matrices.push(partition_mat);
+        self.interpolation_matrices.push(p_transpose);
     }
 
     /// Get a single P matrix from the hierarchy.
@@ -67,6 +70,11 @@ impl<'a> Hierarchy<'a> {
     /// Get a reference to the P matrices Vec.
     pub fn get_partitions(&self) -> &Vec<CsrMatrix<f64>> {
         &self.partition_matrices
+    }
+
+    /// Get a reference to the P matrices Vec.
+    pub fn get_interpolations(&self) -> &Vec<CsrMatrix<f64>> {
+        &self.interpolation_matrices
     }
 }
 
@@ -239,7 +247,7 @@ pub fn modularity_matching<'a>(
     loop {
         let vertex_count = modularity_mat.nrows();
 
-        match find_pairs(&modularity_mat, 3) {
+        match find_pairs(&modularity_mat, 1) {
             None => {
                 /*
                 if let Some(p) = partition_mat {
@@ -411,7 +419,6 @@ fn find_pairs(modularity_mat: &CsrMatrix<f64>, k_passes: usize) -> Option<Vec<(u
                 continue;
             }
             if wants_to_merge[i].is_empty() {
-                alive[i] = false;
                 continue;
             }
 

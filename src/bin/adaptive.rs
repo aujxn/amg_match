@@ -115,7 +115,7 @@ fn main() {
             */
 
             let mut x: DVector<f64> = random_vec(dim);
-            let _converged = stationary(
+            let _converged = pcg(
                 &mat,
                 &zeros,
                 &mut x,

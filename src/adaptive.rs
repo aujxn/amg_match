@@ -22,6 +22,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let hierarchy = modularity_matching(&mat, &near_null, 2.5);
     let ml1 = Multilevel::<L1>::new(hierarchy);
     preconditioner.push(Box::new(ml1));
+    return preconditioner;
 
     loop {
         near_null = random_vec(dim);

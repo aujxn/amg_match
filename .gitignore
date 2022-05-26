@@ -2,3 +2,5 @@
 *.png
 /notes
 test_matrices
+*.svg
+perf*

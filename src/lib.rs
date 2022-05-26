@@ -1,4 +1,5 @@
 pub mod adaptive;
+pub mod parallel_ops;
 pub mod partitioner;
 pub mod preconditioner;
 pub mod solver;

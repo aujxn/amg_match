@@ -1,7 +1,8 @@
 use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
-use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
+//use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
+use crate::parallel_ops::spmm_csr_dense;
 use std::time::{Duration, Instant};
 
 enum LogInterval {
@@ -57,7 +58,7 @@ pub fn stationary(
     //let mut r = rhs - &(mat * &x);
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     r.copy_from(rhs);
-    spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+    spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let r0_norm = r.dot(&r);
     let epsilon_squared = epsilon * epsilon;
 
@@ -67,7 +68,7 @@ pub fn stationary(
     for iter in 0..max_iter {
         //r = rhs - &(mat * &x);
         r.copy_from(rhs);
-        spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+        spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
         let r_norm = r.dot(&r);
 
         if let Some(log_iter) = log_convergence {
@@ -108,7 +109,7 @@ pub fn pcg(
 
     //let mut r = rhs - mat * &x;
     r.copy_from(rhs);
-    spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+    spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let d0 = r.dot(&r);
     let mut r_bar = r.clone();
     preconditioner.apply(&mut r_bar);
@@ -119,7 +120,7 @@ pub fn pcg(
 
     for i in 0..max_iter {
         //let mut g = mat * &p;
-        spmm_csr_dense(0.0, &mut g, 1.0, Op::NoOp(mat), Op::NoOp(&p));
+        spmm_csr_dense(0.0, &mut g, 1.0, mat, &p);
         let alpha = d / p.dot(&g);
         g *= alpha;
         //x += &(alpha * &p);
@@ -132,7 +133,7 @@ pub fn pcg(
         // recenter every now and then
         if i % 10 == 0 {
             r.copy_from(rhs);
-            spmm_csr_dense(1.0, &mut r, -1.0, Op::NoOp(mat), Op::NoOp(&*x));
+            spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
         }
 
         r_bar.copy_from(&r);
