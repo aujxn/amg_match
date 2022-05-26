@@ -1,4 +1,4 @@
-use crate::partitioner::modularity_matching;
+use crate::partitioner::{modularity_matching, parallel_modularity_matching};
 use crate::preconditioner::{
     Composite, Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1,
 };
@@ -19,10 +19,9 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     //near_null /= near_null.norm();
     near_null.normalize_mut();
     no_zeroes(&mut near_null);
-    let hierarchy = modularity_matching(&mat, &near_null, 2.5);
+    let hierarchy = parallel_modularity_matching(&mat, &near_null, 2.5);
     let ml1 = Multilevel::<L1>::new(hierarchy);
     preconditioner.push(Box::new(ml1));
-    return preconditioner;
 
     loop {
         near_null = random_vec(dim);
@@ -33,10 +32,10 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             near_null.normalize_mut();
             no_zeroes(&mut near_null);
 
-            let hierarchy = modularity_matching(&mat, &near_null, 2.5);
+            let hierarchy = parallel_modularity_matching(&mat, &near_null, 2.5);
             let ml1 = Multilevel::<L1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.6 || preconditioner.components().len() == 2 {
+            if convergence_rate < 0.6 || preconditioner.components().len() == 8 {
                 return preconditioner;
             }
         } else {

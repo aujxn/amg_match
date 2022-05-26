@@ -24,6 +24,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alga"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f823d037a7ec6ea2197046bafd4ae150e6bc36f9ca347404f46a46823fa84f2"
+dependencies = [
+ "approx 0.3.2",
+ "num-complex 0.2.4",
+ "num-traits",
+]
+
+[[package]]
 name = "amg_match"
 version = "0.1.0"
 dependencies = [
@@ -39,6 +50,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "soup",
+ "sprs",
  "structopt",
  "strum",
  "strum_macros",
@@ -54,6 +66,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "approx"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0e60b75072ecd4168020818c0107f2857bb6c4e64252d8d3983f6263b40a5c3"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -784,7 +805,7 @@ checksum = "ad676a6b4df7e76a9fd80a0c50c619a3948d6105b62a0ab135f064d99c51d207"
 dependencies = [
  "lapack-sys",
  "libc",
- "num-complex",
+ "num-complex 0.4.0",
 ]
 
 [[package]]
@@ -938,10 +959,10 @@ version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18a89248335f688e4bd994e6d030fd7e185eb41769b8c435395075425e100ac6"
 dependencies = [
- "approx",
+ "approx 0.5.1",
  "matrixmultiply",
  "nalgebra-macros",
- "num-complex",
+ "num-complex 0.4.0",
  "num-rational",
  "num-traits",
  "rand 0.8.5",
@@ -959,7 +980,7 @@ dependencies = [
  "lapack",
  "lapack-src",
  "nalgebra",
- "num-complex",
+ "num-complex 0.4.0",
  "num-traits",
  "simba",
 ]
@@ -1015,6 +1036,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray"
+version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec23e6762830658d2b3d385a75aa212af2f67a4586d4442907144f3bb6a1ca8"
+dependencies = [
+ "matrixmultiply",
+ "num-complex 0.4.0",
+ "num-integer",
+ "num-traits",
+ "rawpointer",
+]
+
+[[package]]
 name = "netlib-src"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,6 +1062,16 @@ name = "new_debug_unreachable"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
+
+[[package]]
+name = "num-complex"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b19411a9719e753aff12e5187b74d60d3dc449ec3f4dc21e3989c3f554bc95"
+dependencies = [
+ "autocfg 1.1.0",
+ "num-traits",
+]
 
 [[package]]
 name = "num-complex"
@@ -1792,8 +1836,8 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a2609e876d4f77f6ab7ff5254fc39b4f1927ba8e6db3d18be7c32534d3725e"
 dependencies = [
- "approx",
- "num-complex",
+ "approx 0.5.1",
+ "num-complex 0.4.0",
  "num-traits",
  "paste",
  "wide",
@@ -1844,6 +1888,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "511254be0c5bcf062b019a6c89c01a664aa359ded62f78aa72c6fc137c0590e5"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "sprs"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea71e48b3eab4c4b153e8e35dcaeac132720809ef68359097b8cb54a18edd70"
+dependencies = [
+ "alga",
+ "ndarray",
+ "num-complex 0.4.0",
+ "num-traits",
+ "num_cpus",
+ "rayon",
+ "smallvec",
 ]
 
 [[package]]
