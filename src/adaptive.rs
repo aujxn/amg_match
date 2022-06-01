@@ -1,6 +1,6 @@
 use crate::partitioner::{modularity_matching, parallel_modularity_matching};
 use crate::preconditioner::{
-    Composite, Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1,
+    Composite, CompositeType, Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1,
 };
 use crate::random_vec;
 use crate::solver::pcg;
@@ -13,7 +13,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let dim = mat.nrows();
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
     let mut near_null = random_vec(dim);
-    let mut preconditioner = Composite::new(mat, Vec::new());
+    let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
     let mut l1 = L1::new(mat);
     let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
     //near_null /= near_null.norm();

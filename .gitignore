@@ -4,3 +4,5 @@
 test_matrices
 *.svg
 perf*
+*.gexf
+venv/

@@ -250,6 +250,12 @@ pub struct Composite<'a> {
     x: DVector<f64>,
     y: DVector<f64>,
     r_work: DVector<f64>,
+    application: CompositeType,
+}
+
+pub enum CompositeType {
+    Additive,
+    Sequential,
 }
 
 impl<'a> Preconditioner for Composite<'a> {
@@ -257,6 +263,34 @@ impl<'a> Preconditioner for Composite<'a> {
         self.x.fill(0.0);
         self.r_work.copy_from(r);
 
+        match self.application {
+            CompositeType::Sequential => self.apply_sequential(r),
+            CompositeType::Additive => self.apply_additive(r),
+        }
+    }
+}
+
+impl<'a> Composite<'a> {
+    pub fn new(
+        mat: &'a CsrMatrix<f64>,
+        components: Vec<Box<dyn Preconditioner>>,
+        application: CompositeType,
+    ) -> Self {
+        let dim = mat.nrows();
+        let x = DVector::from(vec![0.0; dim]);
+        let y = x.clone();
+        let r_work = x.clone();
+        Self {
+            mat,
+            components,
+            x,
+            y,
+            r_work,
+            application,
+        }
+    }
+
+    fn apply_sequential(&mut self, r: &mut DVector<f64>) {
         for component in self.components.iter_mut() {
             self.y.copy_from(&self.r_work);
             component.apply(&mut self.y);
@@ -275,21 +309,16 @@ impl<'a> Preconditioner for Composite<'a> {
         }
         r.copy_from(&self.x);
     }
-}
 
-impl<'a> Composite<'a> {
-    pub fn new(mat: &'a CsrMatrix<f64>, components: Vec<Box<dyn Preconditioner>>) -> Self {
-        let dim = mat.nrows();
-        let x = DVector::from(vec![0.0; dim]);
-        let y = x.clone();
-        let r_work = x.clone();
-        Self {
-            mat,
-            components,
-            x,
-            y,
-            r_work,
+    fn apply_additive(&mut self, r: &mut DVector<f64>) {
+        let num_components = self.components.len() as f64;
+        for component in self.components.iter_mut() {
+            self.y.copy_from(&self.r_work);
+            component.apply(&mut self.y);
+            self.x += &self.y;
         }
+        self.x /= num_components;
+        r.copy_from(&self.x);
     }
 
     pub fn push(&mut self, component: Box<dyn Preconditioner + 'a>) {

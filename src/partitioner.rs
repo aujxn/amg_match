@@ -47,6 +47,13 @@ impl<'a> Hierarchy<'a> {
             partition_mat
                 .triplet_iter_mut()
                 .for_each(|(i, _, w)| *w *= near_null[i]);
+
+            // TODO test product of all Ps with coarse ones to get w
+            let ones = DVector::from(vec![1.0; partition_mat.ncols()]);
+            let maybe_w = &partition_mat * &ones;
+            for (w_i, maybe_w_i) in near_null.iter().zip(maybe_w.iter()) {
+                assert!((maybe_w_i - w_i).abs() < 1e-10);
+            }
         } else {
             fine_mat = self.matrices.last().unwrap();
         }
@@ -302,17 +309,6 @@ pub fn modularity_matching<'a>(
 
         match find_pairs(&modularity_mat, 1) {
             None => {
-                /*
-                if let Some(p) = partition_mat {
-                    hierarchy.push(p);
-                    trace!(
-                        "added level! num vertices coarse: {} nnz: {}",
-                        hierarchy.get_partitions().last().unwrap().ncols(),
-                        hierarchy.get_matrices().last().unwrap().nnz()
-                    );
-                }
-                */
-
                 info!("Levels: {}", hierarchy.levels());
                 return hierarchy;
             }
