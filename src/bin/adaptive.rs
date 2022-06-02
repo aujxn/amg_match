@@ -1,5 +1,5 @@
 use amg_match::{
-    adaptive::build_adaptive,
+    adaptive::{build_adaptive, build_adaptive_new},
     //mat_to_image,
     partitioner::modularity_matching,
     random_vec,
@@ -42,7 +42,7 @@ struct Opt {
 
     /// Stop iterations after scaled residual is less
     /// than tolerance squared
-    #[structopt(default_value = "1e-5")]
+    #[structopt(default_value = "1e-6")]
     tolerance: f64,
     //#[structopt(short, long)]
     //picture: Option<String>,
@@ -84,13 +84,15 @@ fn main() {
         .sqrt();
     mat = norm;
     */
+    /*
     let mut diag: CsrMatrix<f64> = mat.diagonal_as_csr();
     diag.triplet_iter_mut()
         .for_each(|(_, _, val)| *val = 1.0 / val.sqrt());
     let mat = &diag * &mat * &diag;
+    */
 
     let dim = mat.nrows();
-    let _ones = DVector::from(vec![1.0; mat.nrows()]);
+    let ones = DVector::from(vec![1.0; mat.nrows()]);
     let mut zeros = DVector::from(vec![0.0; mat.nrows()]);
     let x: DVector<f64> = random_vec(dim);
     let b = &mat * &x;
@@ -101,7 +103,7 @@ fn main() {
         PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
         PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
         PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
-        PreconditionerArg::Adaptive => Box::new(build_adaptive(&mat)),
+        PreconditionerArg::Adaptive => Box::new(build_adaptive_new(&mat, 4.0)),
         _ => {
             let iterations_for_near_null = 10;
             info!(
@@ -109,10 +111,8 @@ fn main() {
                 iterations_for_near_null
             );
 
-            /*
             let test = &mat * &ones;
-            info!("{:?}", test);
-            */
+            warn!("{:?}", test.norm());
 
             let mut x: DVector<f64> = random_vec(dim);
             let _converged = pcg(
@@ -127,7 +127,7 @@ fn main() {
 
             //x /= x.norm();
             x.normalize_mut();
-            let hierarchy = modularity_matching(&mat, &x, 2.5);
+            let hierarchy = modularity_matching(&mat, &x, 4.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),
@@ -153,7 +153,7 @@ fn main() {
     let _rhs = match opt.solver {
         Solver::Stationary => stationary(
             &mat,
-            &b,
+            &ones,
             &mut zeros,
             opt.max_iter,
             opt.tolerance,
@@ -162,8 +162,8 @@ fn main() {
         ),
         Solver::Pcg => pcg(
             &mat,
-            &b,
-            &mut zeros,
+            &ones,      //rhs
+            &mut zeros, //initial
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,

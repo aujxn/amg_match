@@ -170,8 +170,8 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             &self.hierarchy[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
-            5,
-            1.0e-2,
+            1000,
+            1.0e-6,
             &mut self.forward_smoothers[levels],
             None,
         );

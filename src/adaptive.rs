@@ -1,7 +1,5 @@
-use crate::partitioner::{modularity_matching, parallel_modularity_matching};
-use crate::preconditioner::{
-    Composite, CompositeType, Multilevel, Preconditioner, SymmetricGaussSeidel as Sgs, L1,
-};
+use crate::partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy}; //, parallel_modularity_matching};
+use crate::preconditioner::{Composite, CompositeType, Multilevel, Preconditioner, L1};
 use crate::random_vec;
 use crate::solver::pcg;
 use nalgebra::base::DVector;
@@ -19,7 +17,8 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     //near_null /= near_null.norm();
     near_null.normalize_mut();
     no_zeroes(&mut near_null);
-    let hierarchy = parallel_modularity_matching(&mat, &near_null, 2.5);
+    let coarsening_factor = 4.0;
+    let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
     let ml1 = Multilevel::<L1>::new(hierarchy);
     preconditioner.push(Box::new(ml1));
 
@@ -32,10 +31,61 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
             near_null.normalize_mut();
             no_zeroes(&mut near_null);
 
-            let hierarchy = parallel_modularity_matching(&mat, &near_null, 2.5);
+            let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
             let ml1 = Multilevel::<L1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.6 || preconditioner.components().len() == 8 {
+            if convergence_rate < 0.6 || preconditioner.components().len() == 3 {
+                return preconditioner;
+            }
+        } else {
+            return preconditioner;
+        }
+    }
+}
+
+pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
+    let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
+
+    let dim = mat.nrows();
+    let mut l1 = L1::new(mat);
+    let zeros = DVector::from(vec![0.0; dim]);
+    let mut near_null = random_vec(dim);
+    let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
+
+    loop {
+        let mut hierarchy = Hierarchy::new(mat);
+        near_null.normalize_mut();
+        no_zeroes(&mut near_null);
+
+        while modularity_matching_add_level(&near_null, coarsening_factor, &mut hierarchy) {
+            near_null = {
+                let current_a = hierarchy.get_matrices().last().unwrap_or(&hierarchy[0]);
+                let dim = current_a.nrows();
+                l1 = L1::new(&current_a);
+                let zeros = DVector::from(vec![0.0; dim]);
+                let mut near_null = DVector::from(vec![1.0; dim]);
+                // TODO: maybe go untill stall instead
+                let _ = crate::solver::stationary(
+                    &current_a,
+                    &zeros,
+                    &mut near_null,
+                    20,
+                    1e-2,
+                    &mut l1,
+                    None,
+                );
+                near_null
+            };
+            near_null.normalize_mut();
+            no_zeroes(&mut near_null);
+        }
+
+        let ml1 = Multilevel::<L1>::new(hierarchy);
+        preconditioner.push(Box::new(ml1));
+
+        near_null = random_vec(dim);
+        if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
+            if convergence_rate < 0.6 || preconditioner.components().len() == 1 {
                 return preconditioner;
             }
         } else {
@@ -74,6 +124,7 @@ fn find_near_null<'a>(
     let starting_error = near_null.dot(&(mat * &*near_null));
 
     let mut old_convergence_rate_per_second = f64::MAX;
+    let mut old_convergence_rate_per_iter = f64::MAX;
     let mut convergence_rate_per_second;
     let mut convergence_rate_per_iter;
 
@@ -90,22 +141,23 @@ fn find_near_null<'a>(
 
         let now = Instant::now();
         let elapsed = (now - start).as_millis();
+        let elapsed_secs = elapsed as f64 / 1000.0;
         let convergence = current_error / starting_error;
-        convergence_rate_per_second = convergence.powf(1.0 / ((elapsed as f64 / 1000.0) * 2.0));
+        convergence_rate_per_second = convergence.powf(1.0 / (elapsed_secs * 2.0));
         convergence_rate_per_iter = convergence.powf(1.0 / (iter as f64 * 2.0));
 
         if now - last_log > log_interval {
             trace!(
                 "iteration: {} search time: {}s convergence: per second: {} per iteration: {}",
                 iter,
-                (now - start).as_millis() as f64 / 1000.0,
+                elapsed_secs,
                 convergence_rate_per_second,
                 convergence_rate_per_iter
             );
             last_log = now;
         }
 
-        if (convergence_rate_per_second - old_convergence_rate_per_second).abs() < 0.05 {
+        if (convergence_rate_per_iter - old_convergence_rate_per_iter).abs() < 0.01 {
             stabilizer_counter += 1;
         } else {
             stabilizer_counter = 0;
@@ -120,22 +172,23 @@ fn find_near_null<'a>(
         }
 
         old_convergence_rate_per_second = convergence_rate_per_second;
+        old_convergence_rate_per_iter = convergence_rate_per_iter;
     }
 }
 
 fn no_zeroes(near_null: &mut DVector<f64>) {
     let mut rng = thread_rng();
-    let epsilon = 1.0e-10_f64;
-    let threshold = 1.0e-12_f64;
-    let negative = rand::distributions::Uniform::new(-epsilon, -threshold);
-    let positive = rand::distributions::Uniform::new(threshold, epsilon);
+    let epsilon = 1.0 / (near_null.nrows() as f64);
+    let threshold = 1.0e-10_f64;
+    let range = rand::distributions::Uniform::new(threshold, epsilon);
 
     let mut counter = 0;
     for x in near_null.iter_mut().filter(|x| x.abs() < threshold) {
+        let val = range.sample(&mut rng);
         if rng.gen() {
-            *x = negative.sample(&mut rng)
+            *x = val;
         } else {
-            *x = positive.sample(&mut rng)
+            *x = -val;
         }
         counter += 1
     }

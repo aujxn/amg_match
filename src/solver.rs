@@ -111,9 +111,15 @@ pub fn pcg(
     r.copy_from(rhs);
     spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let d0 = r.dot(&r);
+    if log_convergence.is_some() {
+        trace!("initial residual: {d0}")
+    }
     let mut r_bar = r.clone();
     preconditioner.apply(&mut r_bar);
     let mut d = r.dot(&r_bar);
+    if log_convergence.is_some() {
+        trace!("initial d (r * r_bar): {d}");
+    }
     let mut p = r_bar.clone();
 
     let mut last_log = Instant::now();
@@ -122,6 +128,9 @@ pub fn pcg(
         //let mut g = mat * &p;
         spmm_csr_dense(0.0, &mut g, 1.0, mat, &p);
         let alpha = d / p.dot(&g);
+        if alpha < 0.0 {
+            error!("alpha is negative: {alpha}");
+        }
         g *= alpha;
         //x += &(alpha * &p);
         x.iter_mut()
@@ -131,25 +140,31 @@ pub fn pcg(
         r -= &g;
 
         // recenter every now and then
+        /*
         if i % 10 == 0 {
             r.copy_from(rhs);
             spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
         }
+        */
 
         r_bar.copy_from(&r);
         preconditioner.apply(&mut r_bar);
         let d_old = d;
         d = r.dot(&r_bar);
+        if d < 0.0 {
+            error!("preconditioner is not spd: {d}");
+        }
+        let d_report = r.dot(&r);
 
         if let Some(log_iter) = log_convergence {
             let now = Instant::now();
             if (now - last_log).as_secs() > log_iter as u64 {
-                trace!("squared norm iter {i}: {d}");
+                trace!("squared norm iter {i}: {d_report}");
                 last_log = now;
             }
         }
 
-        if d < epsilon * epsilon * d0 {
+        if d_report < epsilon * epsilon * d0 {
             if log_convergence.is_some() {
                 info!("converged in {i} iterations\n");
             }
