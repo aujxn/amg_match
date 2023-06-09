@@ -15,18 +15,18 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
+pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
+    let mut plot = Plot::new();
     let dim = mat.nrows();
+
     let zeros = DVector::from(vec![0.0; mat.nrows()]);
     let mut near_null = random_vec(dim);
     let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
     let mut l1 = L1::new(mat);
-    let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
-    //near_null /= near_null.norm();
-    //near_null.normalize_mut();
-    //no_zeroes(&mut near_null);
+    let _ = pcg(mat, &zeros, &mut near_null, 30, 1e-16, &mut l1, None);
+    no_zeroes(&mut near_null);
     normalize(&mut near_null, mat);
-    let coarsening_factor = 4.0;
+
     let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
     let ml1 = Multilevel::<PcgL1>::new(hierarchy);
     preconditioner.push(Box::new(ml1));
@@ -35,18 +35,17 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
         near_null = random_vec(dim);
         let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
 
-        if let Some((convergence_rate, _)) =
+        if let Some((convergence_rate, convergence_history)) =
             find_near_null(mat, &mut preconditioner, &mut near_null)
         {
-            //near_null /= near_null.norm();
-            //near_null.normalize_mut();
-            //no_zeroes(&mut near_null);
+            add_trace(&mut plot, convergence_history);
+            no_zeroes(&mut near_null);
             normalize(&mut near_null, mat);
 
             let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
             let ml1 = Multilevel::<PcgL1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.6 || preconditioner.components().len() == 3 {
+            if convergence_rate < 0.15 || preconditioner.components().len() == 8 {
                 return preconditioner;
             }
         } else {
@@ -55,23 +54,28 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     }
 }
 
+/// Alternate implementation of construction of the PC where a near null component is
+/// found for every level in the hierarchy and projected into the interpolation matrix.
 pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
     let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
     let dim = mat.nrows();
+    let mut near_null_history = Vec::<DVector<f64>>::new();
+
+    // Find initial near null to get the iterations started
     let mut l1 = L1::new(mat);
     let zeros = DVector::from(vec![0.0; dim]);
     let mut near_null = random_vec(dim);
-    let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
-    let mut near_null_history = Vec::<DVector<f64>>::new();
+    let _ = pcg(mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
 
     loop {
         let mut hierarchy = Hierarchy::new(mat);
-        //near_null.normalize_mut();
         no_zeroes(&mut near_null);
         normalize(&mut near_null, mat);
 
+        // Sanity check that each near null is orthogonal to the last.
+        // Could move into test suite down the line.
         let ortho_check: Vec<f64> = near_null_history
             .iter()
             .map(|old| old.dot(&near_null))
@@ -100,8 +104,6 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
                 normalize(&mut near_null, &current_a);
                 near_null
             };
-            //near_null.normalize_mut();
-            //no_zeroes(&mut near_null);
         }
 
         let ml1 = Multilevel::<PcgL1>::new(hierarchy);
@@ -111,22 +113,7 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
         if let Some((convergence_rate, convergence_history)) =
             find_near_null(mat, &mut preconditioner, &mut near_null)
         {
-            let trace = Scatter::new(
-                (1..=convergence_history.len()).collect(),
-                convergence_history,
-            );
-            plot.add_trace(trace);
-            let layout = Layout::new()
-                .title("Preconditioner Testing".into())
-                .y_axis(
-                    Axis::new()
-                        .title("Relative Error in A-norm".into())
-                        .type_(AxisType::Log),
-                )
-                .x_axis(Axis::new().title("Iteration".into()));
-            plot.set_layout(layout);
-            // TODO: add some metadata to output with unique name
-            plot.write_html("data/output/out.html");
+            add_trace(&mut plot, convergence_history);
             if convergence_rate < 0.15 || preconditioner.components().len() == 25 {
                 return preconditioner;
             }
@@ -136,21 +123,23 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
     }
 }
 
-// TODO on tester make *relative* error be convergence test
-//      additive version x += 1/components (Bk^-1 * r)
-//      one residual per iteration, doesnt change between components
-//      try throwing early components **** dangerous
-fn stationary_composite(
-    mat: &CsrMatrix<f64>,
-    iterate: &mut DVector<f64>,
-    iterations: usize,
-    composite_preconditioner: &mut Composite,
-) {
-    for _ in 0..iterations {
-        let mut residual = -1.0 * (mat * &*iterate);
-        composite_preconditioner.apply(&mut residual);
-        *iterate += &residual;
-    }
+fn add_trace(plot: &mut Plot, data: Vec<f64>) {
+    let trace = Scatter::new(
+        (1..=data.len()).collect(),
+        data,
+    );
+    plot.add_trace(trace);
+    let layout = Layout::new()
+        .title("Preconditioner Testing".into())
+        .y_axis(
+            Axis::new()
+                .title("Relative Error in A-norm".into())
+                .type_(AxisType::Log),
+        )
+        .x_axis(Axis::new().title("Iteration".into()));
+    plot.set_layout(layout);
+    // TODO: add some metadata to output with unique name
+    plot.write_html("data/out/out.html");
 }
 
 fn find_near_null<'a>(
@@ -171,7 +160,6 @@ fn find_near_null<'a>(
     let zeros = DVector::from(vec![0.0; near_null.nrows()]);
 
     loop {
-        //stationary_composite(mat, near_null, 1, composite_preconditioner);
         pcg(
             &mat,
             &zeros,     //rhs
@@ -224,6 +212,7 @@ fn find_near_null<'a>(
 
 fn no_zeroes(near_null: &mut DVector<f64>) {
     let mut rng = thread_rng();
+    // TODO these values could probably be tuned. idk what they should be
     let epsilon = 1.0 / (near_null.nrows() as f64);
     let threshold = 1.0e-10_f64;
     let range = rand::distributions::Uniform::new(threshold, epsilon);
@@ -242,59 +231,6 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
         warn!("perturbed {} of {} elements", counter, near_null.nrows());
     }
 }
-
-/*
-fn composite_tester(
-    mat: &CsrMatrix<f64>,
-    steps: usize,
-    composite_preconditioner: &mut Composite,
-) -> f64 {
-    trace!("testing convergence...");
-    let test_runs = 2;
-    let mut avg_per_second = 0.0;
-    let mut avg_per_iter = 0.0;
-    let dim = mat.nrows();
-    // 1 / (2.0 * however many steps done after test)
-    let test_seconds = 5;
-    let distribution = Uniform::new(-1e-3_f64, 1e-3_f64);
-    let mut rng = thread_rng();
-
-    for _ in 0..test_runs {
-        let mut iterate: DVector<f64> = DVector::from_distribution(dim, &distribution, &mut rng);
-        //stationary_composite(mat, &mut iterate, steps, composite_preconditioner);
-        let _ = crate::solver::pcg(
-            mat,
-            &DVector::zeros(dim),
-            &mut iterate,
-            10,
-            1e-16,
-            &mut Sgs::new(mat),
-            None,
-        );
-        let start = Instant::now();
-        let time = Duration::from_secs(5);
-        let starting_error_norm = iterate.dot(&(mat * &iterate));
-        let mut completed_iterations = 0;
-        while start.elapsed() < time {
-            stationary_composite(mat, &mut iterate, 1, composite_preconditioner);
-            completed_iterations += 1;
-        }
-        if starting_error_norm < 1e-16 {
-            warn!("tester converged in less than number of tests ({steps})");
-            return 0.0;
-        }
-        let final_error_norm = iterate.dot(&(mat * &iterate));
-        let convergence = final_error_norm / starting_error_norm;
-        let convergence_rate_per_second = convergence.powf(1.0 / (test_seconds as f64 * 2.0));
-        let convergence_rate_per_iter = convergence.powf(1.0 / (completed_iterations as f64 * 2.0));
-        avg_per_second += convergence_rate_per_second;
-        avg_per_iter += convergence_rate_per_iter;
-    }
-    avg /= test_runs as f64;
-
-    avg
-}
-*/
 
 #[cfg(test)]
 mod tests {

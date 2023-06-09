@@ -116,7 +116,7 @@ fn main() {
         PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
         PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
         PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
-        PreconditionerArg::Adaptive => Box::new(build_adaptive_new(&mat, 3.0)),
+        PreconditionerArg::Adaptive => Box::new(build_adaptive(&mat, 3.0)),
         _ => {
             let iterations_for_near_null = 10;
             info!(
