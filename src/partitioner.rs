@@ -1,3 +1,7 @@
+//! This module contains methods that partitions the matrix into hierarchies.
+//! This could potentially be moved to a seperate crate, since I have copied
+//! this code into other projects as well.
+
 use indexmap::IndexSet;
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
@@ -270,8 +274,9 @@ fn build_weighted_matrix(
 
     if counter > 0 {
         warn!(
-            "{} rows had negative rowsums. Average negative: {}",
+            "{} of {} rows had negative rowsums. Average negative: {:.3e}",
             counter,
+            row_sums.nrows(),
             total / (counter as f64)
         );
     }

@@ -1,8 +1,10 @@
+//! Implementation of various sparse matrix solvers for the
+//! system `Ax=b`.
+
+use crate::parallel_ops::spmm_csr_dense;
 use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
-//use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
-use crate::parallel_ops::spmm_csr_dense;
 use std::time::{Duration, Instant};
 
 enum LogInterval {
@@ -60,6 +62,11 @@ pub fn stationary(
     r.copy_from(rhs);
     spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let r0_norm = r.dot(&r);
+
+    if log_convergence.is_some() {
+        trace!("r0 norm : {r0_norm:.3e}");
+    }
+
     let epsilon_squared = epsilon * epsilon;
 
     preconditioner.apply(&mut r);
@@ -73,13 +80,14 @@ pub fn stationary(
 
         if let Some(log_iter) = log_convergence {
             if iter % log_iter == 0 {
-                trace!("squared norm iter {iter}: {r_norm}");
+                let ratio = (r_norm / r0_norm).sqrt();
+                trace!("squared norm iter {iter}: {r_norm:.3e} relative error: {ratio:.3e}");
             }
         }
 
         if r_norm < epsilon_squared * r0_norm {
             if log_convergence.is_some() {
-                info!("converged in {iter} iterations\n");
+                trace!("converged in {iter} iterations\n");
             }
             return true;
         }
@@ -103,7 +111,7 @@ pub fn pcg(
     epsilon: f64,
     preconditioner: &mut dyn Preconditioner,
     log_convergence: Option<usize>,
-) -> bool {
+) -> (bool, f64) {
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     let mut g = r.clone();
 
@@ -112,13 +120,14 @@ pub fn pcg(
     spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let d0 = r.dot(&r);
     if log_convergence.is_some() {
-        trace!("initial residual: {d0}")
+        trace!("initial residual: {d0:.3e}")
     }
+
     let mut r_bar = r.clone();
     preconditioner.apply(&mut r_bar);
     let mut d = r.dot(&r_bar);
     if log_convergence.is_some() {
-        trace!("initial d (r * r_bar): {d}");
+        trace!("initial d (r * r_bar): {d:.3e}");
     }
     let mut p = r_bar.clone();
 
@@ -139,14 +148,6 @@ pub fn pcg(
 
         r -= &g;
 
-        // recenter every now and then
-        /*
-        if i % 10 == 0 {
-            r.copy_from(rhs);
-            spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
-        }
-        */
-
         r_bar.copy_from(&r);
         preconditioner.apply(&mut r_bar);
         let d_old = d;
@@ -154,21 +155,25 @@ pub fn pcg(
         if d < 0.0 {
             error!("preconditioner is not spd: {d}");
         }
-        let d_report = r.dot(&r);
+        let mut d_report = r.dot(&r);
 
         if let Some(log_iter) = log_convergence {
             let now = Instant::now();
             if (now - last_log).as_secs() > log_iter as u64 {
-                trace!("squared norm iter {i}: {d_report}");
+                r.copy_from(rhs);
+                spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+                d_report = r.dot(&r);
+                let ratio = (d_report / d0).sqrt();
+                trace!("squared norm iter {i}: {d_report:.3e} relative error: {ratio:.3e}");
                 last_log = now;
             }
         }
 
         if d_report < epsilon * epsilon * d0 {
             if log_convergence.is_some() {
-                info!("converged in {i} iterations\n");
+                trace!("converged in {i} iterations\n");
             }
-            return true;
+            return (true, (d_report / d0).sqrt());
         }
 
         let beta = d / d_old;
@@ -176,5 +181,9 @@ pub fn pcg(
         p += &r_bar;
     }
 
-    false
+    let mut r_final = DVector::from(vec![0.0; rhs.nrows()]);
+    r_final.copy_from(rhs);
+    spmm_csr_dense(1.0, &mut r_final, -1.0, mat, &*x);
+    let ratio = (r_final.dot(&r_final) / d0).sqrt();
+    (false, ratio)
 }

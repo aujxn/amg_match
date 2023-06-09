@@ -1,8 +1,9 @@
 /target
-*.png
 /notes
-test_matrices
+/data
+/venv
+*.html
 *.svg
+*.png
 perf*
 *.gexf
-venv/

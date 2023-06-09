@@ -1,3 +1,6 @@
+//! Downloader tool to get all the s.p.d. matrices from TAMU's
+//! suitesparse collection
+
 use flate2::read::GzDecoder;
 use soup::prelude::*;
 use std::io::Read;
@@ -27,7 +30,7 @@ pub async fn download_all() -> Result<(), Box<dyn std::error::Error>> {
         let mut out = Vec::new();
         gz.read_to_end(&mut out)?;
         let mut archive = tar::Archive::new(&out[..]);
-        archive.unpack("test_matrices")?;
+        archive.unpack("data/suitesparse")?;
     }
     Ok(())
 }

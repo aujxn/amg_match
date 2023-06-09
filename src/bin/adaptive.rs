@@ -1,14 +1,13 @@
 use amg_match::{
     adaptive::{build_adaptive, build_adaptive_new},
-    //mat_to_image,
     partitioner::modularity_matching,
-    random_vec,
     //preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
     solver::{pcg, stationary},
+    utils::{delete_boundary, load_boundary_dofs, load_vec, random_vec},
 };
 
 use amg_match::preconditioner::{
-    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, Preconditioner,
+    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, PcgL1, Preconditioner,
     SymmetricGaussSeidel as Sgs, L1,
 };
 use nalgebra::DVector;
@@ -76,6 +75,11 @@ fn main() {
         &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
     );
 
+    let b = load_vec("scripts/spe10_0.rhs");
+    //let dofs = load_boundary_dofs("scripts/spe10_0.bdy");
+
+    //let (mat, b) = delete_boundary(dofs, mat, b);
+
     /*
     let norm = mat
         .values()
@@ -93,9 +97,18 @@ fn main() {
 
     let dim = mat.nrows();
     let ones = DVector::from(vec![1.0; mat.nrows()]);
-    let mut zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let x: DVector<f64> = random_vec(dim);
-    let b = &mat * &x;
+    let zeros = DVector::from(vec![0.0; mat.nrows()]);
+    let mut x = random_vec(dim);
+
+    let test: DVector<f64> = &mat * &ones;
+    let zero_counter = test.into_iter().filter(|val| (**val).abs() < 1e-6).count();
+    if zero_counter > 0 {
+        warn!("zero rows in mat: {}", zero_counter);
+    }
+    let zero_counter = b.into_iter().filter(|val| (**val).abs() < 1e-6).count();
+    if zero_counter > 0 {
+        warn!("zero rows in rhs: {}", zero_counter);
+    }
 
     let timer = std::time::Instant::now();
     let mut preconditioner: Box<dyn Preconditioner> = match opt.preconditioner {
@@ -103,7 +116,7 @@ fn main() {
         PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
         PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
         PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
-        PreconditionerArg::Adaptive => Box::new(build_adaptive_new(&mat, 4.0)),
+        PreconditionerArg::Adaptive => Box::new(build_adaptive_new(&mat, 3.0)),
         _ => {
             let iterations_for_near_null = 10;
             info!(
@@ -138,7 +151,7 @@ fn main() {
             );
 
             match opt.preconditioner {
-                PreconditionerArg::Ml1 => Box::new(Multilevel::<L1>::new(hierarchy)),
+                PreconditionerArg::Ml1 => Box::new(Multilevel::<PcgL1>::new(hierarchy)),
                 PreconditionerArg::Mgs => unimplemented!(),
                 _ => unreachable!(),
             }
@@ -153,22 +166,25 @@ fn main() {
     let _rhs = match opt.solver {
         Solver::Stationary => stationary(
             &mat,
-            &ones,
-            &mut zeros,
-            opt.max_iter,
-            opt.tolerance,
-            &mut *preconditioner,
-            Some(50),
-        ),
-        Solver::Pcg => pcg(
-            &mat,
-            &ones,      //rhs
-            &mut zeros, //initial
+            &zeros,
+            &mut x,
             opt.max_iter,
             opt.tolerance,
             &mut *preconditioner,
             Some(3),
         ),
+        Solver::Pcg => {
+            pcg(
+                &mat,
+                &b,     //rhs
+                &mut x, //initial
+                opt.max_iter,
+                opt.tolerance,
+                &mut *preconditioner,
+                Some(3),
+            )
+            .0
+        }
     };
     info!("Solved in: {} ms.", timer.elapsed().as_millis());
 }

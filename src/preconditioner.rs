@@ -1,9 +1,12 @@
+//! Definition of the `Preconditioner` trait as well as implementors
+//! of said trait.
+
+use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg, usolve};
 use nalgebra::base::DVector;
-//use nalgebra_sparse::ops::{serial::spmm_csr_dense, Op};
-use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use nalgebra_sparse::CsrMatrix;
+use std::path::Path;
 
 // TODO make a composite preconditioner and clean up the adaptive module to use this.
 // composite pc will have a Vec<Box<dyn Preconditioner>>
@@ -33,6 +36,39 @@ impl L1 {
             .collect();
         let l1_inverse: DVector<f64> = DVector::from(l1_inverse);
         Self { l1_inverse }
+    }
+}
+
+pub struct PcgL1 {
+    mat: CsrMatrix<f64>,
+    steps: usize,
+    smoother: L1,
+}
+
+impl PcgL1 {
+    pub fn new(mat: CsrMatrix<f64>, steps: usize) -> Self {
+        let smoother = L1::new(&mat);
+        Self {
+            mat,
+            steps,
+            smoother,
+        }
+    }
+}
+
+impl Preconditioner for PcgL1 {
+    fn apply(&mut self, r: &mut DVector<f64>) {
+        let mut x = DVector::from(vec![0.0; r.nrows()]);
+        let _ = pcg(
+            &self.mat,
+            r,
+            &mut x,
+            self.steps,
+            1e-12,
+            &mut self.smoother,
+            None,
+        );
+        r.copy_from(&x);
     }
 }
 
@@ -103,16 +139,20 @@ impl SymmetricGaussSeidel {
 // use the same code as L1
 //      - test spd of precon again
 pub struct Multilevel<'a, T> {
+    // TODO could probably greatly improve cache locality if workspaces were shared by
+    // everyone. Would either require to be passed in or be globally available with unsafe.
+    // Another advantage here would be that the apply method on the PC trait wouldn't
+    // have to borrow self as mutable anymore (I think) which simplifies all the
+    // borrowing shenanagins.
     x_ks: Vec<DVector<f64>>,
     b_ks: Vec<DVector<f64>>,
     r_ks: Vec<DVector<f64>>,
     hierarchy: Hierarchy<'a>,
     forward_smoothers: Vec<T>,
-    _backward_smoothers: Vec<T>,
-    smoothing_steps: usize,
+    //_backward_smoothers: Vec<T>,  // Eventually should probably support non-symmetric smoothers
 }
 
-impl<'a> Preconditioner for Multilevel<'a, L1> {
+impl<'a> Preconditioner for Multilevel<'a, PcgL1> {
     fn apply(&mut self, r: &mut DVector<f64>) {
         let levels = self.hierarchy.levels() - 1;
         let p_ks = self.hierarchy.get_partitions();
@@ -133,19 +173,20 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
         self.b_ks[0].copy_from(&*r);
 
         for level in 0..levels {
-            for _ in 0..self.smoothing_steps {
-                self.r_ks[level].copy_from(&self.b_ks[level]);
-                crate::parallel_ops::spmm_csr_dense(
-                    1.0,
-                    &mut self.r_ks[level],
-                    -1.0,
-                    &self.hierarchy[level],
-                    &self.x_ks[level],
-                );
+            //for _ in 0..self.smoothing_steps {
+            self.r_ks[level].copy_from(&self.b_ks[level]);
+            crate::parallel_ops::spmm_csr_dense(
+                1.0,
+                &mut self.r_ks[level],
+                -1.0,
+                &self.hierarchy[level],
+                &self.x_ks[level],
+            );
 
-                self.forward_smoothers[level].apply(&mut self.r_ks[level]);
-                self.x_ks[level] += &self.r_ks[level];
-            }
+            self.forward_smoothers[level].apply(&mut self.r_ks[level]);
+            self.x_ks[level] += &self.r_ks[level];
+            //}
+
             //let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
             self.r_ks[level].copy_from(&self.b_ks[level]);
             spmm_csr_dense(
@@ -166,61 +207,76 @@ impl<'a> Preconditioner for Multilevel<'a, L1> {
             );
         }
 
-        let _converged = pcg(
+        // Solve the coarsest problem almost exactly
+        let (_converged, _ratio) = pcg(
             &self.hierarchy[levels],
             &self.b_ks[levels],
             &mut self.x_ks[levels],
-            1000,
+            150,
             1.0e-6,
             &mut self.forward_smoothers[levels],
-            None,
+            None, //Some(5),
         );
+
         /*
         if !converged {
-            warn!("coarse solver didn't converge");
+            warn!("PCG didn't converge with final ratio: {:3e}", ratio);
         }
+        */
+
+        /*
+        info!(
+            "norm of coarse correction: {}",
+            self.x_ks[levels].dot(&self.x_ks[levels])
+        );
         */
 
         for level in (0..levels).rev() {
             //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
             //self.x_ks[level] += &interpolated_x;
-            interpolate(&mut self.r_ks[level], &self.x_ks[level], &p_ks[level]);
+            interpolate(&mut self.r_ks[level], &self.x_ks[level + 1], &p_ks[level]);
             self.x_ks[level] += &self.r_ks[level];
 
-            for _ in 0..self.smoothing_steps {
-                //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
-                self.r_ks[level].copy_from(&self.b_ks[level]);
-                spmm_csr_dense(
-                    1.0,
-                    &mut self.r_ks[level],
-                    -1.0,
-                    &self.hierarchy[level],
-                    &self.x_ks[level],
-                );
+            //for _ in 0..self.smoothing_steps {
+            //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
+            self.r_ks[level].copy_from(&self.b_ks[level]);
+            spmm_csr_dense(
+                1.0,
+                &mut self.r_ks[level],
+                -1.0,
+                &self.hierarchy[level],
+                &self.x_ks[level],
+            );
 
-                self.forward_smoothers[level].apply(&mut self.r_ks[level]);
-                self.x_ks[level] += &self.r_ks[level];
-            }
+            self.forward_smoothers[level].apply(&mut self.r_ks[level]);
+            self.x_ks[level] += &self.r_ks[level];
+            //}
         }
         r.copy_from(&self.x_ks[0]);
     }
 }
 
-impl<'a> Multilevel<'a, L1> {
+/*
+impl TwoLevel {
+    pub fn new(hierarchy: Hierarchy) -> Self {
+
+    }
+}
+*/
+
+impl<'a> Multilevel<'a, PcgL1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy<'a>) -> Self {
-        let smoothing_steps = 1;
         trace!("building multilevel smoothers");
-        let mut forward_smoothers = vec![L1::new(&hierarchy[0])];
+        let mut forward_smoothers = vec![PcgL1::new(hierarchy[0].clone(), 3)];
         forward_smoothers.extend(
             hierarchy
                 .get_matrices()
                 .iter()
-                .map(|mat| L1::new(mat))
+                .map(|mat| PcgL1::new(mat.clone(), 5))
                 .collect::<Vec<_>>(),
         );
 
-        let _backward_smoothers = vec![];
         let mut x_ks: Vec<DVector<f64>> = vec![DVector::from(vec![0.0; hierarchy[0].nrows()])];
         x_ks.extend(
             hierarchy
@@ -238,8 +294,6 @@ impl<'a> Multilevel<'a, L1> {
             r_ks,
             hierarchy,
             forward_smoothers,
-            _backward_smoothers,
-            smoothing_steps,
         }
     }
 }
@@ -289,6 +343,8 @@ impl<'a> Composite<'a> {
             application,
         }
     }
+
+    pub fn save<P: AsRef<Path>>(&self, p: P) {}
 
     fn apply_sequential(&mut self, r: &mut DVector<f64>) {
         for component in self.components.iter_mut() {

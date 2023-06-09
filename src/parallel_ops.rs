@@ -1,3 +1,6 @@
+//! Some parallel implementations of basic sparse linear algebra methods
+//! that are used heavily in the algorithms. These need to be fast.
+
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
 use rayon::prelude::*;

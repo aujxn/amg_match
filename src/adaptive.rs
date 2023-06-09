@@ -1,9 +1,17 @@
-use crate::partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy}; //, parallel_modularity_matching};
-use crate::preconditioner::{Composite, CompositeType, Multilevel, Preconditioner, L1};
-use crate::random_vec;
-use crate::solver::pcg;
+//! This module contains the code to construct the adaptive preconditioner.
+
+use crate::{
+    utils::{normalize, random_vec},
+    partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy},
+    preconditioner::{Composite, CompositeType, Multilevel, PcgL1, Preconditioner, L1},
+    solver::pcg
+};
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
+use plotly::{
+    layout::{Axis, AxisType, Layout},
+    Plot, Scatter,
+};
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -15,24 +23,28 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
     let mut l1 = L1::new(mat);
     let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
     //near_null /= near_null.norm();
-    near_null.normalize_mut();
-    no_zeroes(&mut near_null);
+    //near_null.normalize_mut();
+    //no_zeroes(&mut near_null);
+    normalize(&mut near_null, mat);
     let coarsening_factor = 4.0;
     let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
-    let ml1 = Multilevel::<L1>::new(hierarchy);
+    let ml1 = Multilevel::<PcgL1>::new(hierarchy);
     preconditioner.push(Box::new(ml1));
 
     loop {
         near_null = random_vec(dim);
         let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
 
-        if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
+        if let Some((convergence_rate, _)) =
+            find_near_null(mat, &mut preconditioner, &mut near_null)
+        {
             //near_null /= near_null.norm();
-            near_null.normalize_mut();
-            no_zeroes(&mut near_null);
+            //near_null.normalize_mut();
+            //no_zeroes(&mut near_null);
+            normalize(&mut near_null, mat);
 
             let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
-            let ml1 = Multilevel::<L1>::new(hierarchy);
+            let ml1 = Multilevel::<PcgL1>::new(hierarchy);
             preconditioner.push(Box::new(ml1));
             if convergence_rate < 0.6 || preconditioner.components().len() == 3 {
                 return preconditioner;
@@ -46,16 +58,26 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>) -> Composite<'a> {
 pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
     let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
 
+    let mut plot = Plot::new();
     let dim = mat.nrows();
     let mut l1 = L1::new(mat);
     let zeros = DVector::from(vec![0.0; dim]);
     let mut near_null = random_vec(dim);
     let _ = crate::solver::stationary(mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
+    let mut near_null_history = Vec::<DVector<f64>>::new();
 
     loop {
         let mut hierarchy = Hierarchy::new(mat);
-        near_null.normalize_mut();
+        //near_null.normalize_mut();
         no_zeroes(&mut near_null);
+        normalize(&mut near_null, mat);
+
+        let ortho_check: Vec<f64> = near_null_history
+            .iter()
+            .map(|old| old.dot(&near_null))
+            .collect();
+        near_null_history.push(near_null.clone());
+        trace!("Near null component inner product with history: {ortho_check:?}");
 
         while modularity_matching_add_level(&near_null, coarsening_factor, &mut hierarchy) {
             near_null = {
@@ -63,29 +85,48 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
                 let dim = current_a.nrows();
                 l1 = L1::new(&current_a);
                 let zeros = DVector::from(vec![0.0; dim]);
-                let mut near_null = DVector::from(vec![1.0; dim]);
+                let mut near_null = random_vec(dim);
                 // TODO: maybe go untill stall instead
-                let _ = crate::solver::stationary(
+                let _ = pcg(
                     &current_a,
                     &zeros,
                     &mut near_null,
-                    20,
-                    1e-2,
+                    40,
+                    1e-8,
                     &mut l1,
                     None,
                 );
+                no_zeroes(&mut near_null);
+                normalize(&mut near_null, &current_a);
                 near_null
             };
-            near_null.normalize_mut();
-            no_zeroes(&mut near_null);
+            //near_null.normalize_mut();
+            //no_zeroes(&mut near_null);
         }
 
-        let ml1 = Multilevel::<L1>::new(hierarchy);
+        let ml1 = Multilevel::<PcgL1>::new(hierarchy);
         preconditioner.push(Box::new(ml1));
 
         near_null = random_vec(dim);
-        if let Some(convergence_rate) = find_near_null(mat, &mut preconditioner, &mut near_null) {
-            if convergence_rate < 0.6 || preconditioner.components().len() == 1 {
+        if let Some((convergence_rate, convergence_history)) =
+            find_near_null(mat, &mut preconditioner, &mut near_null)
+        {
+            let trace = Scatter::new(
+                (1..=convergence_history.len()).collect(),
+                convergence_history,
+            );
+            plot.add_trace(trace);
+            let layout = Layout::new()
+                .title("Preconditioner Testing".into())
+                .y_axis(
+                    Axis::new()
+                        .title("Relative Error in A-norm".into())
+                        .type_(AxisType::Log),
+                )
+                .x_axis(Axis::new().title("Iteration".into()));
+            plot.set_layout(layout);
+            plot.write_html("out.html");
+            if convergence_rate < 0.15 || preconditioner.components().len() == 25 {
                 return preconditioner;
             }
         } else {
@@ -115,64 +156,68 @@ fn find_near_null<'a>(
     mat: &'a CsrMatrix<f64>,
     composite_preconditioner: &mut Composite,
     near_null: &mut DVector<f64>,
-) -> Option<f64> {
+) -> Option<(f64, Vec<f64>)> {
     trace!("searching for near null");
     let mut iter = 0;
     let start = Instant::now();
     let mut last_log = start;
     let log_interval = Duration::from_secs(2);
     let starting_error = near_null.dot(&(mat * &*near_null));
-
-    let mut old_convergence_rate_per_second = f64::MAX;
-    let mut old_convergence_rate_per_iter = f64::MAX;
+    let mut convergence_history: Vec<f64> = Vec::new();
+    let mut old_error_norm = f64::MAX;
     let mut convergence_rate_per_second;
     let mut convergence_rate_per_iter;
-
-    let mut stabilizer_counter = 0;
+    let zeros = DVector::from(vec![0.0; near_null.nrows()]);
 
     loop {
-        stationary_composite(mat, near_null, 1, composite_preconditioner);
+        //stationary_composite(mat, near_null, 1, composite_preconditioner);
+        pcg(
+            &mat,
+            &zeros,     //rhs
+            near_null, //initial
+            1,
+            1e-16,
+            composite_preconditioner,
+            None,
+        );
         iter += 1;
         let current_error = near_null.dot(&(mat * &*near_null));
         if current_error < 1e-16 {
             warn!("find_near_null converged during search");
             return None;
         }
+        let error_ratio = current_error / old_error_norm;
+        old_error_norm = current_error;
 
         let now = Instant::now();
         let elapsed = (now - start).as_millis();
         let elapsed_secs = elapsed as f64 / 1000.0;
         let convergence = current_error / starting_error;
+        let relative_error = convergence.sqrt();
+        convergence_history.push(relative_error);
         convergence_rate_per_second = convergence.powf(1.0 / (elapsed_secs * 2.0));
         convergence_rate_per_iter = convergence.powf(1.0 / (iter as f64 * 2.0));
 
         if now - last_log > log_interval {
             trace!(
-                "iteration: {} search time: {}s convergence: per second: {} per iteration: {}",
+                "iteration {}:\n\ttotal search time: {}s\n\tconvergence per second: {:.3}\n\tconvergence per iteration: {:.3}\n\terror ratio to previous iteration: {:.3}\n\trelative error (A-norm): {:.3e}",
                 iter,
                 elapsed_secs,
                 convergence_rate_per_second,
-                convergence_rate_per_iter
+                convergence_rate_per_iter,
+                error_ratio,
+                relative_error 
             );
             last_log = now;
         }
 
-        if (convergence_rate_per_iter - old_convergence_rate_per_iter).abs() < 0.01 {
-            stabilizer_counter += 1;
-        } else {
-            stabilizer_counter = 0;
-        }
-
-        if stabilizer_counter == 3 {
+        if error_ratio > 0.94 || iter > 20 {
             info!(
-                "{} components. convergence stabilized at {} on iteration {} after {} seconds. squared error: {:+e}",
-                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error
+                "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
+                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)
             );
-            return Some(convergence_rate_per_iter);
+            return Some((convergence_rate_per_iter, convergence_history));
         }
-
-        old_convergence_rate_per_second = convergence_rate_per_second;
-        old_convergence_rate_per_iter = convergence_rate_per_iter;
     }
 }
 
@@ -193,7 +238,7 @@ fn no_zeroes(near_null: &mut DVector<f64>) {
         counter += 1
     }
     if counter > 0 {
-        warn!("perturbed {counter} elements");
+        warn!("perturbed {} of {} elements", counter, near_null.nrows());
     }
 }
 
