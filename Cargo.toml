@@ -20,14 +20,15 @@ soup = "0.5.1"
 flate2 = "1.0.23"
 tar = "0.4.38"
 tokio = { version = "1", features = ["full"] }
-sprs = { version = "0.11.0", features = ["multi_thread"] }
 plotly = "0.8.3"
+# TODO add anyhow and fix all error handling
 
 [dependencies.nalgebra-lapack]
 version = "0.22.0"
 
 [dev-dependencies]
 test-generator = "0.3.0"
+# TODO write lots of tests
 
 [profile.release]
 debug = true

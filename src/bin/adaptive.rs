@@ -75,8 +75,8 @@ fn main() {
         &nalgebra_sparse::io::load_coo_from_matrix_market_file(&opt.input).unwrap(),
     );
 
-    let b = load_vec("scripts/spe10_0.rhs");
-    //let dofs = load_boundary_dofs("scripts/spe10_0.bdy");
+    let b = load_vec("data/spe10/spe10_0.rhs");
+    //let dofs = load_boundary_dofs("data/spe10/spe10_0.bdy");
 
     //let (mat, b) = delete_boundary(dofs, mat, b);
 

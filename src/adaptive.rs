@@ -125,7 +125,8 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
                 )
                 .x_axis(Axis::new().title("Iteration".into()));
             plot.set_layout(layout);
-            plot.write_html("out.html");
+            // TODO: add some metadata to output with unique name
+            plot.write_html("data/output/out.html");
             if convergence_rate < 0.15 || preconditioner.components().len() == 25 {
                 return preconditioner;
             }

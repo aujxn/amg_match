@@ -6,7 +6,6 @@ use indexmap::IndexSet;
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
 use rayon::prelude::*;
-use sprs::CsMat;
 use std::collections::VecDeque;
 
 //TODO bring back tests you deleted when preconditioner refactor happened
@@ -91,13 +90,6 @@ impl<'a> Hierarchy<'a> {
         self.interpolation_matrices.push(p_transpose);
     }
 
-    pub fn push_sprs(&mut self, partition_mat: CsMat<f64>, near_null: &DVector<f64>) {
-        let (n_rows, n_cols) = partition_mat.shape();
-        let (indptr, indices, data) = partition_mat.into_raw_storage();
-        let p = CsrMatrix::try_from_csr_data(n_rows, n_cols, indptr, indices, data).unwrap();
-        self.push(p, near_null);
-    }
-
     /// Get a single P matrix from the hierarchy.
     pub fn get_partition(&self, level: usize) -> &CsrMatrix<f64> {
         &self.partition_matrices[level]
@@ -130,6 +122,7 @@ impl<'a> std::ops::Index<usize> for Hierarchy<'a> {
         }
     }
 }
+
 pub fn modularity_matching_add_level<'a>(
     near_null: &'_ DVector<f64>,
     coarsening_factor: f64,
@@ -398,189 +391,4 @@ fn build_partition_from_pairs(pairs: &Vec<(usize, usize)>, vertex_count: usize) 
     }
 
     CsrMatrix::from(&partition_mat)
-}
-
-pub fn parallel_modularity_matching<'a>(
-    mat: &'a CsrMatrix<f64>,
-    near_null: &'_ DVector<f64>,
-    coarsening_factor: f64,
-) -> Hierarchy<'a> {
-    let dim = mat.nrows();
-    let mut hierarchy = Hierarchy::new(mat);
-    let triplets: Vec<(usize, usize, f64)> = mat
-        .triplet_iter()
-        .filter(|(i, j, _)| i != j)
-        .map(|(i, j, v)| (i, j, *v))
-        .collect();
-
-    let (mut mat_bar, mut row_sums, inverse_total) =
-        parallel_build_weighted_matrix(dim, triplets, &near_null);
-
-    let mut starting_vertex_count = dim as f64;
-    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(dim / 2);
-    let mut partition_mat: CsMat<f64> = CsMat::eye(dim);
-
-    loop {
-        parallel_find_pairs(&mut pairs, &mat_bar, &row_sums, inverse_total);
-        if pairs.is_empty() {
-            info!("Levels: {}", hierarchy.levels());
-            return hierarchy;
-        }
-
-        let new_partition = parallel_build_partition_from_pairs(&pairs, mat_bar.rows());
-        partition_mat = sprs::smmp::mul_csr_csr(partition_mat.view(), new_partition.view());
-
-        let a_p: CsMat<f64> = sprs::smmp::mul_csr_csr(mat_bar.view(), new_partition.view());
-        let p_t = new_partition.transpose_view().to_owned().into_csr();
-        mat_bar = sprs::smmp::mul_csr_csr(p_t.view(), a_p.view());
-        row_sums = par_row_sums(&mat_bar);
-
-        let coarse_vertex_count = partition_mat.cols() as f64;
-        if starting_vertex_count / coarse_vertex_count > coarsening_factor {
-            hierarchy.push_sprs(partition_mat.clone(), &near_null);
-            trace!(
-                "added level! num vertices coarse: {} nnz: {}",
-                hierarchy.get_partitions().last().unwrap().ncols(),
-                hierarchy.get_matrices().last().unwrap().nnz()
-            );
-            if coarse_vertex_count < 1000.0 {
-                info!("Levels: {}", hierarchy.levels());
-                return hierarchy;
-            }
-            partition_mat = CsMat::eye(partition_mat.cols());
-            starting_vertex_count = coarse_vertex_count;
-        }
-    }
-}
-
-fn par_row_sums(mat: &CsMat<f64>) -> DVector<f64> {
-    let dim = mat.rows();
-    let mut row_sums: DVector<f64> = DVector::from(vec![0.0; dim]);
-    row_sums
-        .as_mut_slice()
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, val)| {
-            *val = mat.outer_view(i).unwrap().iter().map(|(_, v)| *v).sum();
-            if *val < 0.0 {
-                *val = 0.0
-            }
-        });
-
-    row_sums
-}
-
-fn parallel_build_partition_from_pairs(
-    pairs: &Vec<(usize, usize)>,
-    vertex_count: usize,
-) -> CsMat<f64> {
-    let mut not_merged_vertices: IndexSet<usize> = (0..vertex_count).collect();
-    let pairs_count = pairs.len();
-    let aggregate_count = vertex_count - pairs_count;
-    //NOTE probably can go straight to csr now
-    let mut partition_mat = sprs::TriMat::new((vertex_count, aggregate_count));
-
-    for (aggregate, (i, j)) in pairs.into_iter().enumerate() {
-        partition_mat.add_triplet(*i, aggregate, 1.0);
-        partition_mat.add_triplet(*j, aggregate, 1.0);
-        assert!(not_merged_vertices.remove(i));
-        assert!(not_merged_vertices.remove(j));
-    }
-
-    for (aggregate, vertex) in not_merged_vertices.into_iter().enumerate() {
-        partition_mat.add_triplet(vertex, aggregate + pairs_count, 1.0);
-    }
-
-    partition_mat.to_csr()
-}
-
-fn parallel_find_pairs(
-    pairs: &mut Vec<(usize, usize)>,
-    mat_bar: &CsMat<f64>,
-    row_sums: &DVector<f64>,
-    inverse_total: f64,
-) {
-    pairs.clear();
-    let dim = mat_bar.rows();
-
-    let wants_to_merge: Vec<Option<usize>> = (0..dim)
-        //.into_par_iter()
-        .map(|i| {
-            mat_bar
-                .outer_view(i)
-                .unwrap()
-                .iter()
-                .filter(|(j, _)| i != *j)
-                .fold(None, |acc, (j, weight_ij)| {
-                    let modularity_ij = weight_ij - inverse_total * row_sums[i] * row_sums[j];
-                    if modularity_ij > 0.0 {
-                        match acc {
-                            None => Some((j, modularity_ij)),
-                            Some((old_j, old_modularity_ij)) => {
-                                if modularity_ij > old_modularity_ij {
-                                    Some((j, modularity_ij))
-                                } else {
-                                    Some((old_j, old_modularity_ij))
-                                }
-                            }
-                        }
-                    } else {
-                        acc
-                    }
-                })
-                .map(|x| x.0)
-        })
-        .collect();
-
-    // TODO maybe make par also
-    for (i, maybe_j) in wants_to_merge.iter().enumerate() {
-        if let Some(j) = *maybe_j {
-            if Some(i) == wants_to_merge[j] && i < j {
-                pairs.push((i, j));
-            }
-        }
-    }
-}
-
-fn parallel_build_weighted_matrix(
-    dim: usize,
-    mut triplets: Vec<(usize, usize, f64)>,
-    near_null: &DVector<f64>,
-) -> (CsMat<f64>, DVector<f64>, f64) {
-    triplets.par_iter_mut().for_each(|(i, j, val)| {
-        *val *= -near_null[*i] * near_null[*j];
-    });
-
-    //TODO this breaks because some rows are empty in FEM matrices
-    let mut mat_bar = sprs::TriMat::new((dim, dim));
-    for (i, j, val) in triplets.into_iter() {
-        mat_bar.add_triplet(i, j, val);
-    }
-
-    let mat_bar: CsMat<f64> = mat_bar.to_csr();
-
-    let mut row_sums: DVector<f64> = DVector::from(vec![0.0; dim]);
-    let counter = std::sync::atomic::AtomicUsize::new(0);
-    use std::sync::atomic::Ordering::Relaxed;
-    row_sums
-        .as_mut_slice()
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, val)| {
-            *val = mat_bar.outer_view(i).unwrap().iter().map(|(_, v)| *v).sum();
-            if *val < 0.0 {
-                counter.fetch_add(1, Relaxed);
-                *val = 0.0;
-            }
-        });
-
-    let counter = counter.into_inner();
-    if counter > 0 {
-        warn!("{} rows had negative rowsums", counter,);
-    }
-
-    let total: f64 = row_sums.as_slice().par_iter().sum();
-    let inverse_total = 1.0 / total;
-
-    (mat_bar, row_sums, inverse_total)
 }
