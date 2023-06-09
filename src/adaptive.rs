@@ -16,47 +16,6 @@ use rand::prelude::*;
 use std::time::{Duration, Instant};
 
 pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
-    let mut plot = Plot::new();
-    let dim = mat.nrows();
-
-    let zeros = DVector::from(vec![0.0; mat.nrows()]);
-    let mut near_null = random_vec(dim);
-    let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
-    let mut l1 = L1::new(mat);
-    let _ = pcg(mat, &zeros, &mut near_null, 30, 1e-16, &mut l1, None);
-    no_zeroes(&mut near_null);
-    normalize(&mut near_null, mat);
-
-    let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
-    let ml1 = Multilevel::<PcgL1>::new(hierarchy);
-    preconditioner.push(Box::new(ml1));
-
-    loop {
-        near_null = random_vec(dim);
-        let _ = pcg(mat, &zeros, &mut near_null, 10, 1e-16, &mut l1, None);
-
-        if let Some((convergence_rate, convergence_history)) =
-            find_near_null(mat, &mut preconditioner, &mut near_null)
-        {
-            add_trace(&mut plot, convergence_history);
-            no_zeroes(&mut near_null);
-            normalize(&mut near_null, mat);
-
-            let hierarchy = modularity_matching(&mat, &near_null, coarsening_factor);
-            let ml1 = Multilevel::<PcgL1>::new(hierarchy);
-            preconditioner.push(Box::new(ml1));
-            if convergence_rate < 0.15 || preconditioner.components().len() == 8 {
-                return preconditioner;
-            }
-        } else {
-            return preconditioner;
-        }
-    }
-}
-
-/// Alternate implementation of construction of the PC where a near null component is
-/// found for every level in the hierarchy and projected into the interpolation matrix.
-pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
     let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
@@ -96,7 +55,7 @@ pub fn build_adaptive_new<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -
                     &zeros,
                     &mut near_null,
                     40,
-                    1e-8,
+                    1e-12,
                     &mut l1,
                     None,
                 );

@@ -1,14 +1,12 @@
 use amg_match::{
-    adaptive::{build_adaptive, build_adaptive_new},
+    adaptive::build_adaptive,
     partitioner::modularity_matching,
-    //preconditioner::{bgs, fgs, l1, multilevelgs, multilevell1, sgs},
+    preconditioner::{
+        BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, PcgL1, Preconditioner,
+        SymmetricGaussSeidel as Sgs, L1,
+    },
     solver::{pcg, stationary},
-    utils::{delete_boundary, load_boundary_dofs, load_vec, random_vec},
-};
-
-use amg_match::preconditioner::{
-    BackwardGaussSeidel as Bgs, ForwardGaussSeidel as Fgs, Multilevel, PcgL1, Preconditioner,
-    SymmetricGaussSeidel as Sgs, L1,
+    utils::{load_vec, random_vec},
 };
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
