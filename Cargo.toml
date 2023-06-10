@@ -4,32 +4,32 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nalgebra = { version = "0.31.0", features = ["rand"] }
-nalgebra-sparse = { version = "0.7.0", features = ["io"] }
-image = "0.24.1"
-indexmap = "1.8.0"
-rand = "0.8.5"
-structopt = "0.3.26"
-pretty_env_logger = "0.4.0"
-log = "0.4.16"
-strum = "0.24"
-strum_macros = "0.24"
-rayon = "1.5.2"
-reqwest = { version = "0.11.10", features = ["stream", "gzip"] }
-soup = "0.5.1"
-flate2 = "1.0.23"
-tar = "0.4.38"
+nalgebra = { version = "0", features = ["rand"] }
+nalgebra-sparse = { version = "0", features = ["io"] }
+image = "0"
+indexmap = "1"
+rand = "0"
+structopt = "0"
+pretty_env_logger = "0"
+log = "0"
+strum = "0"
+strum_macros = "0"
+rayon = "1"
+reqwest = { version = "0", features = ["stream", "gzip"] }
+soup = "0"
+flate2 = "1"
+tar = "0"
 tokio = { version = "1", features = ["full"] }
-plotly = "0.8.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+plotly = "0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # TODO add anyhow and fix all error handling
 
 [dependencies.nalgebra-lapack]
-version = "0.22.0"
+version = "0"
 
 [dev-dependencies]
-test-generator = "0.3.0"
+test-generator = "0"
 # TODO write lots of tests
 
 [profile.release]
