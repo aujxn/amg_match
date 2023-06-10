@@ -54,7 +54,7 @@ pub fn stationary(
     x: &mut DVector<f64>,
     max_iter: usize,
     epsilon: f64,
-    preconditioner: &mut dyn Preconditioner,
+    preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
 ) -> bool {
     //let mut r = rhs - &(mat * &x);
@@ -109,7 +109,7 @@ pub fn pcg(
     x: &mut DVector<f64>,
     max_iter: usize,
     epsilon: f64,
-    preconditioner: &mut dyn Preconditioner,
+    preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
 ) -> (bool, f64) {
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);

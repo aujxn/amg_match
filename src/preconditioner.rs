@@ -6,13 +6,13 @@ use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg, usolve};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
-use std::path::Path;
+use std::{cell::RefCell, path::Path, rc::Rc};
 
 // TODO make a composite preconditioner and clean up the adaptive module to use this.
 // composite pc will have a Vec<Box<dyn Preconditioner>>
 
 pub trait Preconditioner {
-    fn apply(&mut self, r: &mut DVector<f64>);
+    fn apply(&self, r: &mut DVector<f64>);
 }
 
 pub struct L1 {
@@ -20,7 +20,7 @@ pub struct L1 {
 }
 
 impl Preconditioner for L1 {
-    fn apply(&mut self, r: &mut DVector<f64>) {
+    fn apply(&self, r: &mut DVector<f64>) {
         r.component_mul_assign(&self.l1_inverse);
     }
 }
@@ -40,13 +40,13 @@ impl L1 {
 }
 
 pub struct PcgL1 {
-    mat: CsrMatrix<f64>,
+    mat: Rc<CsrMatrix<f64>>,
     steps: usize,
     smoother: L1,
 }
 
 impl PcgL1 {
-    pub fn new(mat: CsrMatrix<f64>, steps: usize) -> Self {
+    pub fn new(mat: Rc<CsrMatrix<f64>>, steps: usize) -> Self {
         let smoother = L1::new(&mat);
         Self {
             mat,
@@ -57,7 +57,7 @@ impl PcgL1 {
 }
 
 impl Preconditioner for PcgL1 {
-    fn apply(&mut self, r: &mut DVector<f64>) {
+    fn apply(&self, r: &mut DVector<f64>) {
         let mut x = DVector::from(vec![0.0; r.nrows()]);
         let _ = pcg(
             &self.mat,
@@ -65,7 +65,7 @@ impl Preconditioner for PcgL1 {
             &mut x,
             self.steps,
             1e-12,
-            &mut self.smoother,
+            &self.smoother,
             None,
         );
         r.copy_from(&x);
@@ -77,7 +77,7 @@ pub struct ForwardGaussSeidel {
 }
 
 impl Preconditioner for ForwardGaussSeidel {
-    fn apply(&mut self, r: &mut DVector<f64>) {
+    fn apply(&self, r: &mut DVector<f64>) {
         lsolve(&self.lower_triangle, r);
     }
 }
@@ -94,7 +94,7 @@ pub struct BackwardGaussSeidel {
 }
 
 impl Preconditioner for BackwardGaussSeidel {
-    fn apply(&mut self, r: &mut DVector<f64>) {
+    fn apply(&self, r: &mut DVector<f64>) {
         usolve(&self.upper_triangle, r);
     }
 }
@@ -113,7 +113,7 @@ pub struct SymmetricGaussSeidel {
 }
 
 impl Preconditioner for SymmetricGaussSeidel {
-    fn apply(&mut self, r: &mut DVector<f64>) {
+    fn apply(&self, r: &mut DVector<f64>) {
         lsolve(&self.lower_triangle, r);
         r.component_mul_assign(&self.diag);
         usolve(&self.upper_triangle, r);
@@ -138,121 +138,160 @@ impl SymmetricGaussSeidel {
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
 //      - test spd of precon again
-pub struct Multilevel<'a, T> {
-    // TODO could probably greatly improve cache locality if workspaces were shared by
-    // everyone. Would either require to be passed in or be globally available with unsafe.
-    // Another advantage here would be that the apply method on the PC trait wouldn't
-    // have to borrow self as mutable anymore (I think) which simplifies all the
-    // borrowing shenanagins.
-    x_ks: Vec<DVector<f64>>,
-    b_ks: Vec<DVector<f64>>,
-    r_ks: Vec<DVector<f64>>,
-    hierarchy: Hierarchy<'a>,
+pub struct Multilevel<T> {
+    hierarchy: Hierarchy,
     forward_smoothers: Vec<T>,
     //_backward_smoothers: Vec<T>,  // Eventually should probably support non-symmetric smoothers
 }
 
-impl<'a> Preconditioner for Multilevel<'a, PcgL1> {
-    fn apply(&mut self, r: &mut DVector<f64>) {
-        let levels = self.hierarchy.levels() - 1;
-        let p_ks = self.hierarchy.get_partitions();
-        let pt_ks = self.hierarchy.get_interpolations();
+struct MultilevelWorkspace {
+    x_ks: Vec<DVector<f64>>,
+    b_ks: Vec<DVector<f64>>,
+    r_ks: Vec<DVector<f64>>,
+}
 
-        // reset the workspaces
-        for ((xk, bk), rk) in self
-            .x_ks
-            .iter_mut()
-            .zip(self.b_ks.iter_mut())
-            .zip(self.r_ks.iter_mut())
-        {
-            xk.fill(0.0);
-            bk.fill(0.0);
-            rk.fill(0.0);
+impl MultilevelWorkspace {
+    fn new() -> Self {
+        Self {
+            x_ks: Vec::new(),
+            b_ks: Vec::new(),
+            r_ks: Vec::new(),
+        }
+    }
+}
+
+// This is bad but since we are singlethreaded from view of the V-Cycle it's fine for now
+thread_local!(static ML_WORKSPACE: RefCell<MultilevelWorkspace> = RefCell::new(MultilevelWorkspace::new()));
+
+fn resize_ml_workspace(hierarchy: &Hierarchy) {
+    ML_WORKSPACE.with(|ws| {
+        let ws = &mut *ws.borrow_mut();
+        if ws.x_ks.len() < hierarchy.levels() {
+            let new_levels = hierarchy.levels() - ws.x_ks.len();
+            for _ in 0..new_levels {
+                ws.x_ks.push(DVector::from(Vec::new()));
+                ws.b_ks.push(DVector::from(Vec::new()));
+                ws.r_ks.push(DVector::from(Vec::new()));
+            }
         }
 
-        self.b_ks[0].copy_from(&*r);
+        let mut sizes: Vec<usize> = vec![hierarchy.get_mat(0).nrows()];
+        sizes.extend(hierarchy.get_matrices().iter().map(|p| p.nrows()));
 
-        for level in 0..levels {
-            //for _ in 0..self.smoothing_steps {
-            self.r_ks[level].copy_from(&self.b_ks[level]);
-            crate::parallel_ops::spmm_csr_dense(
-                1.0,
-                &mut self.r_ks[level],
-                -1.0,
-                &self.hierarchy[level],
-                &self.x_ks[level],
-            );
-
-            self.forward_smoothers[level].apply(&mut self.r_ks[level]);
-            self.x_ks[level] += &self.r_ks[level];
-            //}
-
-            //let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
-            self.r_ks[level].copy_from(&self.b_ks[level]);
-            spmm_csr_dense(
-                1.0,
-                &mut self.r_ks[level],
-                -1.0,
-                &self.hierarchy[level],
-                &self.x_ks[level],
-            );
-            //let p_t = p_ks[level + 1].transpose();
-            //self.b_ks[level + 1] = &p_t * &r_k;
-            spmm_csr_dense(
-                0.0,
-                &mut self.b_ks[level + 1],
-                1.0,
-                &pt_ks[level],
-                &self.r_ks[level],
-            );
+        for (i, size) in sizes.into_iter().enumerate() {
+            ws.x_ks[i].resize_vertically_mut(size, 0.0);
+            ws.r_ks[i].resize_vertically_mut(size, 0.0);
+            ws.b_ks[i].resize_vertically_mut(size, 0.0);
         }
+    });
+}
 
-        // Solve the coarsest problem almost exactly
-        let (_converged, _ratio) = pcg(
-            &self.hierarchy[levels],
-            &self.b_ks[levels],
-            &mut self.x_ks[levels],
-            150,
-            1.0e-6,
-            &mut self.forward_smoothers[levels],
-            None, //Some(5),
-        );
+impl Preconditioner for Multilevel<PcgL1> {
+    fn apply(&self, r: &mut DVector<f64>) {
+        resize_ml_workspace(&self.hierarchy);
+        ML_WORKSPACE.with(|ws| {
+            let ws = &mut *ws.borrow_mut();
 
-        /*
-        if !converged {
-            warn!("PCG didn't converge with final ratio: {:3e}", ratio);
-        }
-        */
+            let levels = self.hierarchy.levels() - 1;
+            let p_ks = self.hierarchy.get_partitions();
+            let pt_ks = self.hierarchy.get_interpolations();
 
-        /*
-        info!(
-            "norm of coarse correction: {}",
-            self.x_ks[levels].dot(&self.x_ks[levels])
-        );
-        */
+            // reset the workspaces
+            for ((xk, bk), rk) in ws
+                .x_ks
+                .iter_mut()
+                .zip(ws.b_ks.iter_mut())
+                .zip(ws.r_ks.iter_mut())
+            {
+                xk.fill(0.0);
+                bk.fill(0.0);
+                rk.fill(0.0);
+            }
 
-        for level in (0..levels).rev() {
-            //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
-            //self.x_ks[level] += &interpolated_x;
-            interpolate(&mut self.r_ks[level], &self.x_ks[level + 1], &p_ks[level]);
-            self.x_ks[level] += &self.r_ks[level];
+            ws.b_ks[0].copy_from(&*r);
 
-            //for _ in 0..self.smoothing_steps {
-            //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
-            self.r_ks[level].copy_from(&self.b_ks[level]);
-            spmm_csr_dense(
-                1.0,
-                &mut self.r_ks[level],
-                -1.0,
-                &self.hierarchy[level],
-                &self.x_ks[level],
+            for level in 0..levels {
+                //for _ in 0..self.smoothing_steps {
+                ws.r_ks[level].copy_from(&ws.b_ks[level]);
+                crate::parallel_ops::spmm_csr_dense(
+                    1.0,
+                    &mut ws.r_ks[level],
+                    -1.0,
+                    &self.hierarchy.get_mat(level),
+                    &ws.x_ks[level],
+                );
+
+                self.forward_smoothers[level].apply(&mut ws.r_ks[level]);
+                ws.x_ks[level] += &ws.r_ks[level];
+                //}
+
+                //let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
+                ws.r_ks[level].copy_from(&ws.b_ks[level]);
+                spmm_csr_dense(
+                    1.0,
+                    &mut ws.r_ks[level],
+                    -1.0,
+                    &self.hierarchy.get_mat(level),
+                    &ws.x_ks[level],
+                );
+                //let p_t = p_ks[level + 1].transpose();
+                //self.b_ks[level + 1] = &p_t * &r_k;
+                spmm_csr_dense(
+                    0.0,
+                    &mut ws.b_ks[level + 1],
+                    1.0,
+                    &pt_ks[level],
+                    &ws.r_ks[level],
+                );
+            }
+
+            // Solve the coarsest problem almost exactly
+            let (_converged, _ratio) = pcg(
+                &self.hierarchy.get_mat(levels),
+                &ws.b_ks[levels],
+                &mut ws.x_ks[levels],
+                150,
+                1.0e-6,
+                &self.forward_smoothers[levels],
+                None, //Some(5),
             );
 
-            self.forward_smoothers[level].apply(&mut self.r_ks[level]);
-            self.x_ks[level] += &self.r_ks[level];
-            //}
-        }
-        r.copy_from(&self.x_ks[0]);
+            /*
+            if !converged {
+                warn!("PCG didn't converge with final ratio: {:3e}", ratio);
+            }
+            */
+
+            /*
+            info!(
+                "norm of coarse correction: {}",
+                self.x_ks[levels].dot(&self.x_ks[levels])
+            );
+            */
+
+            for level in (0..levels).rev() {
+                //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
+                //self.x_ks[level] += &interpolated_x;
+                interpolate(&mut ws.r_ks[level], &ws.x_ks[level + 1], &p_ks[level]);
+                ws.x_ks[level] += &ws.r_ks[level];
+
+                //for _ in 0..self.smoothing_steps {
+                //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
+                ws.r_ks[level].copy_from(&ws.b_ks[level]);
+                spmm_csr_dense(
+                    1.0,
+                    &mut ws.r_ks[level],
+                    -1.0,
+                    &self.hierarchy.get_mat(level),
+                    &ws.x_ks[level],
+                );
+
+                self.forward_smoothers[level].apply(&mut ws.r_ks[level]);
+                ws.x_ks[level] += &ws.r_ks[level];
+                //}
+            }
+            r.copy_from(&ws.x_ks[0]);
+        });
     }
 }
 
@@ -264,11 +303,13 @@ impl TwoLevel {
 }
 */
 
-impl<'a> Multilevel<'a, PcgL1> {
+impl Multilevel<PcgL1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
-    pub fn new(hierarchy: Hierarchy<'a>) -> Self {
+    pub fn new(hierarchy: Hierarchy) -> Self {
         trace!("building multilevel smoothers");
-        let mut forward_smoothers = vec![PcgL1::new(hierarchy[0].clone(), 3)];
+
+        let fine_mat = hierarchy.get_mat(0);
+        let mut forward_smoothers = vec![PcgL1::new(fine_mat, 3)];
         forward_smoothers.extend(
             hierarchy
                 .get_matrices()
@@ -277,33 +318,35 @@ impl<'a> Multilevel<'a, PcgL1> {
                 .collect::<Vec<_>>(),
         );
 
-        let mut x_ks: Vec<DVector<f64>> = vec![DVector::from(vec![0.0; hierarchy[0].nrows()])];
-        x_ks.extend(
-            hierarchy
-                .get_matrices()
-                .iter()
-                .map(|p| DVector::from(vec![0.0; p.nrows()]))
-                .collect::<Vec<_>>(),
-        );
-        let b_ks = x_ks.clone();
-        let r_ks = x_ks.clone();
-
         Self {
-            x_ks,
-            b_ks,
-            r_ks,
             hierarchy,
             forward_smoothers,
         }
     }
 }
 
-pub struct Composite<'a> {
-    mat: &'a CsrMatrix<f64>,
-    components: Vec<Box<dyn Preconditioner + 'a>>,
+struct CompositeWorkspace {
     x: DVector<f64>,
     y: DVector<f64>,
     r_work: DVector<f64>,
+}
+
+impl CompositeWorkspace {
+    fn new() -> Self {
+        Self {
+            x: DVector::from(Vec::new()),
+            y: DVector::from(Vec::new()),
+            r_work: DVector::from(Vec::new()),
+        }
+    }
+}
+
+// This is bad but since we are singlethreaded from view of the V-Cycle it's fine for now
+thread_local!(static COMPOSITE_WORKSPACE: RefCell<CompositeWorkspace> = RefCell::new(CompositeWorkspace::new()));
+
+pub struct Composite {
+    mat: Rc<CsrMatrix<f64>>,
+    components: Vec<Box<dyn Preconditioner>>,
     application: CompositeType,
 }
 
@@ -312,72 +355,79 @@ pub enum CompositeType {
     Sequential,
 }
 
-impl<'a> Preconditioner for Composite<'a> {
-    fn apply(&mut self, r: &mut DVector<f64>) {
-        self.x.fill(0.0);
-        self.r_work.copy_from(r);
+impl Preconditioner for Composite {
+    fn apply(&self, r: &mut DVector<f64>) {
+        COMPOSITE_WORKSPACE.with(|ws| {
+            let ws = &mut *ws.borrow_mut();
+            let dim = r.nrows();
+            ws.x.resize_vertically_mut(dim, 0.0);
+            ws.y.resize_vertically_mut(dim, 0.0);
+            ws.r_work.resize_vertically_mut(dim, 0.0);
+
+            ws.x.fill(0.0);
+            ws.r_work.copy_from(r);
+        });
 
         match self.application {
             CompositeType::Sequential => self.apply_sequential(r),
-            CompositeType::Additive => self.apply_additive(r),
+            CompositeType::Additive => unimplemented!(), //self.apply_additive(r),
         }
     }
 }
 
-impl<'a> Composite<'a> {
+impl Composite {
     pub fn new(
-        mat: &'a CsrMatrix<f64>,
+        mat: Rc<CsrMatrix<f64>>,
         components: Vec<Box<dyn Preconditioner>>,
         application: CompositeType,
     ) -> Self {
-        let dim = mat.nrows();
-        let x = DVector::from(vec![0.0; dim]);
-        let y = x.clone();
-        let r_work = x.clone();
         Self {
             mat,
             components,
-            x,
-            y,
-            r_work,
             application,
         }
     }
 
     pub fn save<P: AsRef<Path>>(&self, p: P) {}
 
-    fn apply_sequential(&mut self, r: &mut DVector<f64>) {
-        for component in self.components.iter_mut() {
-            self.y.copy_from(&self.r_work);
-            component.apply(&mut self.y);
-            self.x += &self.y;
-            //*r -= self.mat * &y;
-            self.r_work.copy_from(r);
-            spmm_csr_dense(1.0, &mut self.r_work, -1.0, &self.mat, &self.x);
-        }
-        for component in self.components.iter_mut().rev() {
-            self.y.copy_from(&self.r_work);
-            component.apply(&mut self.y);
-            self.x += &self.y;
-            //*r -= self.mat * &y;
-            self.r_work.copy_from(r);
-            spmm_csr_dense(1.0, &mut self.r_work, -1.0, &self.mat, &self.x);
-        }
-        r.copy_from(&self.x);
+    fn apply_sequential(&self, r: &mut DVector<f64>) {
+        COMPOSITE_WORKSPACE.with(|ws| {
+            let ws = &mut *ws.borrow_mut();
+
+            for component in self.components.iter() {
+                ws.y.copy_from(&ws.r_work);
+                component.apply(&mut ws.y);
+                ws.x += &ws.y;
+                //*r -= self.mat * &y;
+                ws.r_work.copy_from(r);
+                spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
+            }
+            for component in self.components.iter().rev() {
+                ws.y.copy_from(&ws.r_work);
+                component.apply(&mut ws.y);
+                ws.x += &ws.y;
+                //*r -= self.mat * &y;
+                ws.r_work.copy_from(r);
+                spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
+            }
+            r.copy_from(&ws.x);
+        });
     }
 
-    fn apply_additive(&mut self, r: &mut DVector<f64>) {
+    /*
+    fn apply_additive(&self, r: &mut DVector<f64>) {
         let num_components = self.components.len() as f64;
         for component in self.components.iter_mut() {
             self.y.copy_from(&self.r_work);
-            component.apply(&mut self.y);
+            component.apply(&self.y);
             self.x += &self.y;
         }
         self.x /= num_components;
         r.copy_from(&self.x);
     }
+    */
 
-    pub fn push(&mut self, component: Box<dyn Preconditioner + 'a>) {
+    pub fn push(&mut self, component: Box<dyn Preconditioner>) {
         self.components.push(component);
     }
 
@@ -385,11 +435,11 @@ impl<'a> Composite<'a> {
         self.components.remove(1);
     }
 
-    pub fn components(&'a self) -> &Vec<Box<dyn Preconditioner + 'a>> {
+    pub fn components(&self) -> &Vec<Box<dyn Preconditioner>> {
         &self.components
     }
 
-    pub fn components_mut(&'a mut self) -> &mut Vec<Box<dyn Preconditioner + 'a>> {
+    pub fn components_mut(&mut self) -> &mut Vec<Box<dyn Preconditioner>> {
         &mut self.components
     }
 }

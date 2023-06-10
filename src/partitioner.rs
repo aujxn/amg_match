@@ -5,8 +5,9 @@
 use indexmap::IndexSet;
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
-use rayon::prelude::*;
+use std::borrow::Borrow;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 //TODO bring back tests you deleted when preconditioner refactor happened
 //     also, stop copying the fine mat into the hierarchy
@@ -14,15 +15,15 @@ use std::collections::VecDeque;
 /// Resulting object from running the modularity matching algorithm.
 /// NOTE: Maybe don't store each matrix and just provide the P's.
 #[derive(Clone)]
-pub struct Hierarchy<'a> {
-    mat: &'a CsrMatrix<f64>,
+pub struct Hierarchy {
+    mat: Rc<CsrMatrix<f64>>,
     partition_matrices: Vec<CsrMatrix<f64>>,
     interpolation_matrices: Vec<CsrMatrix<f64>>,
-    matrices: Vec<CsrMatrix<f64>>,
+    matrices: Vec<Rc<CsrMatrix<f64>>>,
 }
 
-impl<'a> Hierarchy<'a> {
-    pub fn new(mat: &'a CsrMatrix<f64>) -> Self {
+impl Hierarchy {
+    pub fn new(mat: Rc<CsrMatrix<f64>>) -> Self {
         Self {
             mat,
             partition_matrices: Vec::new(),
@@ -43,10 +44,10 @@ impl<'a> Hierarchy<'a> {
 
     /// Adds a level to the hierarchy.
     pub fn push(&mut self, partition_mat: CsrMatrix<f64>, near_null: &DVector<f64>) {
-        let fine_mat;
+        let fine_mat: &CsrMatrix<f64>;
         let mut partition_mat = partition_mat.clone();
         if self.matrices.is_empty() {
-            fine_mat = self.mat;
+            fine_mat = self.mat.borrow();
             partition_mat
                 .triplet_iter_mut()
                 .for_each(|(i, _, w)| *w *= near_null[i]);
@@ -58,12 +59,12 @@ impl<'a> Hierarchy<'a> {
                 assert!((maybe_w_i - w_i).abs() < 1e-10);
             }
         } else {
-            fine_mat = self.matrices.last().unwrap();
+            fine_mat = self.matrices.last().unwrap().borrow();
         }
 
         let p_transpose = partition_mat.transpose();
         let coarse_mat = &p_transpose * &(fine_mat * &partition_mat);
-        self.matrices.push(coarse_mat);
+        self.matrices.push(Rc::new(coarse_mat));
         self.partition_matrices.push(partition_mat);
         self.interpolation_matrices.push(p_transpose);
     }
@@ -73,11 +74,11 @@ impl<'a> Hierarchy<'a> {
         mut partition_mat: CsrMatrix<f64>,
         near_null: &DVector<f64>,
     ) {
-        let fine_mat;
+        let fine_mat: &CsrMatrix<f64>;
         if self.matrices.is_empty() {
-            fine_mat = self.mat;
+            fine_mat = self.mat.borrow();
         } else {
-            fine_mat = self.matrices.last().unwrap();
+            fine_mat = self.matrices.last().unwrap().borrow();
         }
         partition_mat
             .triplet_iter_mut()
@@ -85,7 +86,7 @@ impl<'a> Hierarchy<'a> {
 
         let p_transpose = partition_mat.transpose();
         let coarse_mat = &p_transpose * &(fine_mat * &partition_mat);
-        self.matrices.push(coarse_mat);
+        self.matrices.push(Rc::new(coarse_mat));
         self.partition_matrices.push(partition_mat);
         self.interpolation_matrices.push(p_transpose);
     }
@@ -96,7 +97,7 @@ impl<'a> Hierarchy<'a> {
     }
 
     /// Get a reference to the matrices Vec.
-    pub fn get_matrices(&self) -> &[CsrMatrix<f64>] {
+    pub fn get_matrices(&self) -> &[Rc<CsrMatrix<f64>>] {
         &self.matrices
     }
 
@@ -109,26 +110,25 @@ impl<'a> Hierarchy<'a> {
     pub fn get_interpolations(&self) -> &Vec<CsrMatrix<f64>> {
         &self.interpolation_matrices
     }
-}
 
-impl<'a> std::ops::Index<usize> for Hierarchy<'a> {
-    type Output = CsrMatrix<f64>;
-
-    fn index(&self, level: usize) -> &Self::Output {
+    pub fn get_mat(&self, level: usize) -> Rc<CsrMatrix<f64>> {
         if level == 0 {
-            self.mat
+            self.mat.clone()
         } else {
-            &self.matrices[level - 1]
+            self.matrices[level - 1].clone()
         }
     }
 }
 
-pub fn modularity_matching_add_level<'a>(
+pub fn modularity_matching_add_level(
     near_null: &'_ DVector<f64>,
     coarsening_factor: f64,
     hierarchy: &mut Hierarchy,
 ) -> bool {
-    let mat = hierarchy.get_matrices().last().unwrap_or(&hierarchy[0]);
+    let mat = hierarchy
+        .get_matrices()
+        .last()
+        .map_or(hierarchy.get_mat(0), |m| m.clone());
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let dim = mat.nrows();
@@ -174,11 +174,11 @@ pub fn modularity_matching_add_level<'a>(
 /// Takes a s.p.d matrix (mat), a vector that is near the nullspace of the matrix,
 /// and a minimum coarsening factor for each level of the aggregation and provides a
 /// hierarchy of partitions of the matrix.
-pub fn modularity_matching<'a>(
-    mat: &'a CsrMatrix<f64>,
+pub fn modularity_matching(
+    mat: Rc<CsrMatrix<f64>>,
     near_null: &'_ DVector<f64>,
     coarsening_factor: f64,
-) -> Hierarchy<'a> {
+) -> Hierarchy {
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix(&mat, &near_null);
     let mut modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
     let mut hierarchy = Hierarchy::new(mat);

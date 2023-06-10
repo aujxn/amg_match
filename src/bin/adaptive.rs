@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use amg_match::{
     adaptive::build_adaptive,
     partitioner::modularity_matching,
@@ -6,7 +8,7 @@ use amg_match::{
         SymmetricGaussSeidel as Sgs, L1,
     },
     solver::{pcg, stationary},
-    utils::{load_vec, random_vec},
+    utils::{delete_boundary, load_boundary_dofs, load_vec, random_vec},
 };
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
@@ -74,9 +76,9 @@ fn main() {
     );
 
     let b = load_vec("data/spe10/spe10_0.rhs");
-    //let dofs = load_boundary_dofs("data/spe10/spe10_0.bdy");
+    let dofs = load_boundary_dofs("data/spe10/spe10_0.bdy");
 
-    //let (mat, b) = delete_boundary(dofs, mat, b);
+    let (mat, b) = delete_boundary(dofs, mat, b);
 
     /*
     let norm = mat
@@ -108,13 +110,14 @@ fn main() {
         warn!("zero rows in rhs: {}", zero_counter);
     }
 
+    let mat = std::rc::Rc::new(mat);
     let timer = std::time::Instant::now();
     let mut preconditioner: Box<dyn Preconditioner> = match opt.preconditioner {
         PreconditionerArg::L1 => Box::new(L1::new(&mat)),
         PreconditionerArg::Fgs => Box::new(Fgs::new(&mat)),
         PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
         PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
-        PreconditionerArg::Adaptive => Box::new(build_adaptive(&mat, 3.0)),
+        PreconditionerArg::Adaptive => Box::new(build_adaptive(mat.clone(), 3.0)),
         _ => {
             let iterations_for_near_null = 10;
             info!(
@@ -122,7 +125,8 @@ fn main() {
                 iterations_for_near_null
             );
 
-            let test = &mat * &ones;
+            let bmat: &CsrMatrix<f64> = mat.borrow();
+            let test: DVector<f64> = bmat * &ones;
             warn!("{:?}", test.norm());
 
             let mut x: DVector<f64> = random_vec(dim);
@@ -138,7 +142,7 @@ fn main() {
 
             //x /= x.norm();
             x.normalize_mut();
-            let hierarchy = modularity_matching(&mat, &x, 4.0);
+            let hierarchy = modularity_matching(mat.clone(), &x, 4.0);
             info!(
                 "Number of levels in hierarchy: {}",
                 hierarchy.get_matrices().len(),

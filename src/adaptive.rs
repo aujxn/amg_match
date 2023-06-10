@@ -2,8 +2,8 @@
 
 use crate::{
     utils::{normalize, random_vec},
-    partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy},
-    preconditioner::{Composite, CompositeType, Multilevel, PcgL1, Preconditioner, L1},
+    partitioner::{modularity_matching_add_level, Hierarchy},
+    preconditioner::{Composite, CompositeType, Multilevel, PcgL1, L1},
     solver::pcg
 };
 use nalgebra::base::DVector;
@@ -15,23 +15,23 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Composite<'a> {
-    let mut preconditioner = Composite::new(mat, Vec::new(), CompositeType::Sequential);
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) -> Composite {
+    let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
     let dim = mat.nrows();
     let mut near_null_history = Vec::<DVector<f64>>::new();
 
     // Find initial near null to get the iterations started
-    let mut l1 = L1::new(mat);
+    let mut l1 = L1::new(&mat);
     let zeros = DVector::from(vec![0.0; dim]);
     let mut near_null = random_vec(dim);
-    let _ = pcg(mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
+    let _ = pcg(&mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
 
     loop {
-        let mut hierarchy = Hierarchy::new(mat);
+        let mut hierarchy = Hierarchy::new(mat.clone());
         no_zeroes(&mut near_null);
-        normalize(&mut near_null, mat);
+        normalize(&mut near_null, &mat);
 
         // Sanity check that each near null is orthogonal to the last.
         // Could move into test suite down the line.
@@ -44,7 +44,7 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Co
 
         while modularity_matching_add_level(&near_null, coarsening_factor, &mut hierarchy) {
             near_null = {
-                let current_a = hierarchy.get_matrices().last().unwrap_or(&hierarchy[0]);
+                let current_a = hierarchy.get_matrices().last().unwrap_or(&hierarchy.get_mat(0)).clone();
                 let dim = current_a.nrows();
                 l1 = L1::new(&current_a);
                 let zeros = DVector::from(vec![0.0; dim]);
@@ -70,10 +70,10 @@ pub fn build_adaptive<'a>(mat: &'a CsrMatrix<f64>, coarsening_factor: f64) -> Co
 
         near_null = random_vec(dim);
         if let Some((convergence_rate, convergence_history)) =
-            find_near_null(mat, &mut preconditioner, &mut near_null)
+            find_near_null(&mat, &mut preconditioner, &mut near_null)
         {
             add_trace(&mut plot, convergence_history);
-            if convergence_rate < 0.15 || preconditioner.components().len() == 25 {
+            if convergence_rate < 0.15 || preconditioner.components().len() == 50 {
                 return preconditioner;
             }
         } else {
@@ -101,8 +101,8 @@ fn add_trace(plot: &mut Plot, data: Vec<f64>) {
     plot.write_html("data/out/out.html");
 }
 
-fn find_near_null<'a>(
-    mat: &'a CsrMatrix<f64>,
+fn find_near_null(
+    mat: &CsrMatrix<f64>,
     composite_preconditioner: &mut Composite,
     near_null: &mut DVector<f64>,
 ) -> Option<(f64, Vec<f64>)> {
@@ -159,7 +159,7 @@ fn find_near_null<'a>(
             last_log = now;
         }
 
-        if error_ratio > 0.94 || iter > 20 {
+        if error_ratio > 0.93 || iter > 30 {
             info!(
                 "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
                 composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)
