@@ -72,11 +72,8 @@ pub fn delete_boundary(
     let p_mat = CsrMatrix::from(&p_mat);
 
     let p_t = p_mat.transpose();
-    let mut new_mat = &p_t * &(mat * &p_mat);
-    let mut new_vec = &p_t * &vec;
-    //let a_norm = norm(&new_vec, &new_mat);
-    //new_mat /= a_norm;
-    //new_mat /= a_norm;
+    let new_mat = &p_t * &(mat * &p_mat);
+    let new_vec = &p_t * &vec;
     (new_mat, new_vec)
 }
 

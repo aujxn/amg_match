@@ -32,6 +32,35 @@ impl Hierarchy {
         }
     }
 
+    pub fn from_hierarchy(
+        mat: Rc<CsrMatrix<f64>>,
+        partition_matrices: Vec<CsrMatrix<f64>>,
+    ) -> Self {
+        let interpolation_matrices: Vec<CsrMatrix<f64>> =
+            partition_matrices.iter().map(|p| p.transpose()).collect();
+        let mut matrices: Vec<Rc<CsrMatrix<f64>>> = Vec::new();
+
+        for (p, p_t) in partition_matrices.iter().zip(interpolation_matrices.iter()) {
+            if let Some(mat) = matrices.last() {
+                let rc: Rc<CsrMatrix<f64>> = mat.clone();
+                let prev: &CsrMatrix<f64> = rc.borrow();
+                let coarse_mat = p_t * &(prev * p);
+                matrices.push(Rc::new(coarse_mat));
+            } else {
+                let fine_mat: &CsrMatrix<f64> = mat.borrow();
+                let coarse_mat = p_t * &(fine_mat * p);
+                matrices.push(Rc::new(coarse_mat));
+            }
+        }
+
+        Self {
+            mat,
+            partition_matrices,
+            interpolation_matrices,
+            matrices,
+        }
+    }
+
     /// Number of levels in the hierarchy.
     pub fn levels(&self) -> usize {
         self.matrices.len() + 1

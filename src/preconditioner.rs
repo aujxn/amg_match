@@ -1,15 +1,15 @@
 //! Definition of the `Preconditioner` trait as well as implementors
 //! of said trait.
 
+use crate::io::CompositeData;
 use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg, usolve};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::{cell::RefCell, path::Path, rc::Rc};
-
-// TODO make a composite preconditioner and clean up the adaptive module to use this.
-// composite pc will have a Vec<Box<dyn Preconditioner>>
 
 pub trait Preconditioner {
     fn apply(&self, r: &mut DVector<f64>);
@@ -306,8 +306,6 @@ impl TwoLevel {
 impl Multilevel<PcgL1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy) -> Self {
-        trace!("building multilevel smoothers");
-
         let fine_mat = hierarchy.get_mat(0);
         let mut forward_smoothers = vec![PcgL1::new(fine_mat, 3)];
         forward_smoothers.extend(
@@ -322,6 +320,10 @@ impl Multilevel<PcgL1> {
             hierarchy,
             forward_smoothers,
         }
+    }
+
+    pub fn get_hierarchy(&self) -> &Hierarchy {
+        &self.hierarchy
     }
 }
 
@@ -344,9 +346,9 @@ impl CompositeWorkspace {
 // This is bad but since we are singlethreaded from view of the V-Cycle it's fine for now
 thread_local!(static COMPOSITE_WORKSPACE: RefCell<CompositeWorkspace> = RefCell::new(CompositeWorkspace::new()));
 
-pub struct Composite {
+pub struct Composite<T> {
     mat: Rc<CsrMatrix<f64>>,
-    components: Vec<Box<dyn Preconditioner>>,
+    components: Vec<T>,
     application: CompositeType,
 }
 
@@ -355,7 +357,7 @@ pub enum CompositeType {
     Sequential,
 }
 
-impl Preconditioner for Composite {
+impl<T: Preconditioner> Preconditioner for Composite<T> {
     fn apply(&self, r: &mut DVector<f64>) {
         COMPOSITE_WORKSPACE.with(|ws| {
             let ws = &mut *ws.borrow_mut();
@@ -375,20 +377,14 @@ impl Preconditioner for Composite {
     }
 }
 
-impl Composite {
-    pub fn new(
-        mat: Rc<CsrMatrix<f64>>,
-        components: Vec<Box<dyn Preconditioner>>,
-        application: CompositeType,
-    ) -> Self {
+impl<T: Preconditioner> Composite<T> {
+    pub fn new(mat: Rc<CsrMatrix<f64>>, components: Vec<T>, application: CompositeType) -> Self {
         Self {
             mat,
             components,
             application,
         }
     }
-
-    pub fn save<P: AsRef<Path>>(&self, p: P) {}
 
     fn apply_sequential(&self, r: &mut DVector<f64>) {
         COMPOSITE_WORKSPACE.with(|ws| {
@@ -427,7 +423,7 @@ impl Composite {
     }
     */
 
-    pub fn push(&mut self, component: Box<dyn Preconditioner>) {
+    pub fn push(&mut self, component: T) {
         self.components.push(component);
     }
 
@@ -435,11 +431,47 @@ impl Composite {
         self.components.remove(1);
     }
 
-    pub fn components(&self) -> &Vec<Box<dyn Preconditioner>> {
+    pub fn components(&self) -> &Vec<T> {
         &self.components
     }
 
-    pub fn components_mut(&mut self) -> &mut Vec<Box<dyn Preconditioner>> {
+    pub fn components_mut(&mut self) -> &mut Vec<T> {
         &mut self.components
+    }
+}
+
+impl Composite<Multilevel<PcgL1>> {
+    pub fn save<P: AsRef<Path>>(&self, p: P, notes: String) {
+        let intermediate = CompositeData::new(&self, notes);
+        let serialized = serde_json::to_string(&intermediate).unwrap();
+        let mut file = File::create(p).unwrap();
+        file.write_all(&serialized.as_bytes()).unwrap();
+    }
+
+    pub fn load<P: AsRef<Path>>(mat: Rc<CsrMatrix<f64>>, p: P) -> (Self, String) {
+        let application = CompositeType::Sequential;
+        let file = File::open(p).unwrap();
+        let mut buf_reader = BufReader::new(file);
+        let mut serialized = String::new();
+        buf_reader.read_to_string(&mut serialized).unwrap();
+        let deserialized: CompositeData = serde_json::from_str(&serialized).unwrap();
+        let components = Vec::new();
+        let mut pc = Composite {
+            mat: mat.clone(),
+            components,
+            application,
+        };
+
+        for hierarchy in deserialized.hierarchies {
+            let partition_matrices: Vec<CsrMatrix<f64>> = hierarchy
+                .partition_matrices
+                .into_iter()
+                .map(|mat| mat.into())
+                .collect();
+            let hierarchy = Hierarchy::from_hierarchy(mat.clone(), partition_matrices);
+            let comp: Multilevel<PcgL1> = Multilevel::new(hierarchy);
+            pc.push(comp);
+        }
+        (pc, deserialized.notes)
     }
 }

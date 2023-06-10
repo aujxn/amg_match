@@ -5,12 +5,14 @@ use crate::parallel_ops::spmm_csr_dense;
 use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+/*
 enum LogInterval {
     Iterations(usize),
     Time(Duration),
 }
+*/
 
 /// Upper triangular solve for sparse matrices and dense rhs
 pub fn usolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {

@@ -15,7 +15,7 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) -> Composite {
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) -> Composite<Multilevel<PcgL1>> {
     let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
@@ -66,14 +66,14 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) 
         }
 
         let ml1 = Multilevel::<PcgL1>::new(hierarchy);
-        preconditioner.push(Box::new(ml1));
+        preconditioner.push(ml1);
 
         near_null = random_vec(dim);
         if let Some((convergence_rate, convergence_history)) =
-            find_near_null(&mat, &mut preconditioner, &mut near_null)
+            find_near_null(&mat, &preconditioner, &mut near_null)
         {
             add_trace(&mut plot, convergence_history);
-            if convergence_rate < 0.15 || preconditioner.components().len() == 50 {
+            if convergence_rate < 0.15 || preconditioner.components().len() == 20 {
                 return preconditioner;
             }
         } else {
@@ -103,7 +103,7 @@ fn add_trace(plot: &mut Plot, data: Vec<f64>) {
 
 fn find_near_null(
     mat: &CsrMatrix<f64>,
-    composite_preconditioner: &mut Composite,
+    composite_preconditioner: &Composite<Multilevel<PcgL1>>,
     near_null: &mut DVector<f64>,
 ) -> Option<(f64, Vec<f64>)> {
     trace!("searching for near null");
