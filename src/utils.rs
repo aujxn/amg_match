@@ -8,6 +8,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
+    time::Duration,
 };
 
 pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
@@ -90,4 +91,14 @@ pub fn norm(vec: &DVector<f64>, mat: &CsrMatrix<f64>) -> f64 {
 
 pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
     *vec /= norm(&*vec, mat);
+}
+
+pub fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let minutes = minutes % 60;
+    let seconds = seconds % 60;
+
+    format!("{} hours, {} minutes, {} seconds", hours, minutes, seconds)
 }

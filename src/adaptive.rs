@@ -15,7 +15,7 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) -> Composite<Multilevel<PcgL1>> {
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize) -> Composite<Multilevel<PcgL1>> {
     let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
@@ -42,7 +42,12 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) 
         near_null_history.push(near_null.clone());
         trace!("Near null component inner product with history: {ortho_check:?}");
 
+        let mut levels = 1;
         while modularity_matching_add_level(&near_null, coarsening_factor, &mut hierarchy) {
+            levels += 1;
+            if levels == max_level {
+                break;
+            }
             near_null = {
                 let current_a = hierarchy.get_matrices().last().unwrap_or(&hierarchy.get_mat(0)).clone();
                 let dim = current_a.nrows();
@@ -159,7 +164,7 @@ fn find_near_null(
             last_log = now;
         }
 
-        if error_ratio > 0.8 || iter > 10 {
+        if error_ratio > 0.92 || iter > 30 {
             info!(
                 "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
                 composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)

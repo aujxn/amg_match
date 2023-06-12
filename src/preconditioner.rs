@@ -246,28 +246,22 @@ impl Preconditioner for Multilevel<PcgL1> {
             }
 
             // Solve the coarsest problem almost exactly
-            let (_converged, _ratio) = pcg(
+            let (converged, ratio) = pcg(
                 &self.hierarchy.get_mat(levels),
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
-                150,
-                1.0e-6,
+                1500,
+                1.0e-8,
                 &self.forward_smoothers[levels],
                 None, //Some(5),
             );
 
-            /*
             if !converged {
-                warn!("PCG didn't converge with final ratio: {:3e}", ratio);
+                warn!(
+                    "PCG didn't converge on coarsest level with final ratio: {:3e}",
+                    ratio
+                );
             }
-            */
-
-            /*
-            info!(
-                "norm of coarse correction: {}",
-                self.x_ks[levels].dot(&self.x_ks[levels])
-            );
-            */
 
             for level in (0..levels).rev() {
                 //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
@@ -307,12 +301,16 @@ impl Multilevel<PcgL1> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy) -> Self {
         let fine_mat = hierarchy.get_mat(0);
-        let mut forward_smoothers = vec![PcgL1::new(fine_mat, 3)];
+        let base_steps = 1;
+        let mut forward_smoothers = vec![PcgL1::new(fine_mat, base_steps)];
         forward_smoothers.extend(
             hierarchy
                 .get_matrices()
                 .iter()
-                .map(|mat| PcgL1::new(mat.clone(), 5))
+                .enumerate()
+                .map(|(i, mat)| {
+                    PcgL1::new(mat.clone(), base_steps * (2u32.pow(i as u32 + 1) as usize))
+                })
                 .collect::<Vec<_>>(),
         );
 

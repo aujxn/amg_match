@@ -118,7 +118,7 @@ fn main() {
         PreconditionerArg::Bgs => Box::new(Bgs::new(&mat)),
         PreconditionerArg::Sgs => Box::new(Sgs::new(&mat)),
         PreconditionerArg::Adaptive => {
-            let pc = Box::new(build_adaptive(mat.clone(), 3.0));
+            let pc = Box::new(build_adaptive(mat.clone(), 3.0, 10));
             pc.save("data/out/test_pc.json", "first test".into());
             pc
         }
