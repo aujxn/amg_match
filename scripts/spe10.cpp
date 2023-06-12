@@ -10,6 +10,12 @@ int main(int argc, char *argv[]) {
   int order = 1;
   int refinements = 0;
 
+  OptionsParser args(argc, argv);
+  args.AddOption(&order, "-o", "--order", "Finite element polynomial degree");
+  args.AddOption(&refinements, "-r", "--refinements",
+                 "How many times to uniform refine");
+  args.ParseCheck();
+
   Mesh mesh =
       Mesh::MakeCartesian3D(60, 220, 85, Element::HEXAHEDRON, 1200, 2200, 170);
 
@@ -42,15 +48,15 @@ int main(int argc, char *argv[]) {
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
   cout << "Size of linear system: " << A.Height() << endl;
 
-  std::ofstream matfile("spe10_0.mtx", std::ios::out);
+  std::ofstream matfile("data/spe10/spe10_0.mtx", std::ios::out);
   A.PrintMM(matfile);
   matfile.close();
 
-  std::ofstream vecfile("spe10_0.rhs", std::ios::out);
+  std::ofstream vecfile("data/spe10/spe10_0.rhs", std::ios::out);
   B.Print(vecfile);
   vecfile.close();
 
-  std::ofstream bdyfile("spe10_0.bdy", std::ios::out);
+  std::ofstream bdyfile("data/spe10/spe10_0.bdy", std::ios::out);
   boundary_dofs.Save(bdyfile);
   bdyfile.close();
   // 9. Solve the system using PCG with symmetric Gauss-Seidel preconditioner.

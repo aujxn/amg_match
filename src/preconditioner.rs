@@ -428,7 +428,7 @@ impl<T: Preconditioner> Composite<T> {
     }
 
     pub fn rm_oldest(&mut self) {
-        self.components.remove(1);
+        self.components.remove(0);
     }
 
     pub fn components(&self) -> &Vec<T> {

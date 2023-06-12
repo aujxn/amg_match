@@ -6,4 +6,6 @@ find_package(MFEM REQUIRED)
 
 include_directories(${MFEM_INCLUDE_DIRS})
 add_executable(spe10 spe10.cpp spe10.hpp)
+add_executable(anisotropic anisotropic.cpp)
 target_link_libraries(spe10 PRIVATE ${MFEM_LIBRARIES})
+target_link_libraries(anisotropic PRIVATE ${MFEM_LIBRARIES})

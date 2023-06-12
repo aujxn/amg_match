@@ -183,8 +183,8 @@ fn main() {
         Solver::Pcg => {
             pcg(
                 &mat,
-                &b,     //rhs
-                &mut x, //initial
+                &b,
+                &mut x,
                 opt.max_iter,
                 opt.tolerance,
                 &*preconditioner,

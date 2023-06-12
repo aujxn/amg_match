@@ -164,6 +164,15 @@ pub fn pcg(
             if (now - last_log).as_secs() > log_iter as u64 {
                 r.copy_from(rhs);
                 spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+                // manufacture a solution and measure true error norm
+                // in A, this should be strictly monotone. Also test with
+                // Ax=0 and initial random guess.
+                //
+                // Make tests for preconditioners and composite for spd
+                //
+                // Make two level version with coarsening factor 8.0 or 27.0
+                //
+                // Test anisotropy matrices
                 d_report = r.dot(&r);
                 let ratio = (d_report / d0).sqrt();
                 trace!("squared norm iter {i}: {d_report:.3e} relative error: {ratio:.3e}");

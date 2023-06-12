@@ -73,7 +73,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64) 
             find_near_null(&mat, &preconditioner, &mut near_null)
         {
             add_trace(&mut plot, convergence_history);
-            if convergence_rate < 0.15 || preconditioner.components().len() == 20 {
+            if convergence_rate < 0.15 || preconditioner.components().len() == 5 {
                 return preconditioner;
             }
         } else {
@@ -121,8 +121,8 @@ fn find_near_null(
     loop {
         pcg(
             &mat,
-            &zeros,     //rhs
-            near_null, //initial
+            &zeros,
+            near_null,
             1,
             1e-16,
             composite_preconditioner,
@@ -130,10 +130,6 @@ fn find_near_null(
         );
         iter += 1;
         let current_error = near_null.dot(&(mat * &*near_null));
-        if current_error < 1e-16 {
-            warn!("find_near_null converged during search");
-            return None;
-        }
         let error_ratio = current_error / old_error_norm;
         old_error_norm = current_error;
 
@@ -142,6 +138,10 @@ fn find_near_null(
         let elapsed_secs = elapsed as f64 / 1000.0;
         let convergence = current_error / starting_error;
         let relative_error = convergence.sqrt();
+        if relative_error < 1e-16 {
+            warn!("find_near_null converged during search");
+            return None;
+        }
         convergence_history.push(relative_error);
         convergence_rate_per_second = convergence.powf(1.0 / (elapsed_secs * 2.0));
         convergence_rate_per_iter = convergence.powf(1.0 / (iter as f64 * 2.0));
@@ -159,7 +159,7 @@ fn find_near_null(
             last_log = now;
         }
 
-        if error_ratio > 0.93 || iter > 30 {
+        if error_ratio > 0.8 || iter > 10 {
             info!(
                 "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
                 composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)

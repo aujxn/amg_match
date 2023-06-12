@@ -67,6 +67,11 @@ pub fn delete_boundary(
         }
         old_id += 1;
     }
+    for _ in old_id..n {
+        p_mat.push(old_id, new_id, 1.0);
+        old_id += 1;
+        new_id += 1;
+    }
     assert_eq!(new_id, new_n);
 
     let p_mat = CsrMatrix::from(&p_mat);
