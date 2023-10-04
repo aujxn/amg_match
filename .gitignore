@@ -7,3 +7,9 @@
 *.png
 perf*
 *.gexf
+*.log
+*.nav
+*.aux
+*.gz
+*.toc
+*.out

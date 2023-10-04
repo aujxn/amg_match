@@ -15,12 +15,13 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize) -> Composite<Multilevel<PcgL1>> {
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize, target_convergence: f64, max_components: usize) -> (Composite<Multilevel<PcgL1>>, Vec<Vec<f64>>) {
     let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
     let dim = mat.nrows();
     let mut near_null_history = Vec::<DVector<f64>>::new();
+    let mut test_data = Vec::new();
 
     // Find initial near null to get the iterations started
     let mut l1 = L1::new(&mat);
@@ -77,12 +78,13 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
         if let Some((convergence_rate, convergence_history)) =
             find_near_null(&mat, &preconditioner, &mut near_null)
         {
-            add_trace(&mut plot, convergence_history);
-            if convergence_rate < 0.15 || preconditioner.components().len() == 5 {
-                return preconditioner;
+            add_trace(&mut plot, convergence_history.clone());
+            test_data.push(convergence_history);
+            if convergence_rate < target_convergence || preconditioner.components().len() == max_components {
+                return (preconditioner, test_data);
             }
         } else {
-            return preconditioner;
+            return (preconditioner, test_data);
         }
     }
 }

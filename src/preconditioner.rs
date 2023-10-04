@@ -251,7 +251,7 @@ impl Preconditioner for Multilevel<PcgL1> {
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
                 1500,
-                1.0e-8,
+                1.0e-10,
                 &self.forward_smoothers[levels],
                 None, //Some(5),
             );
