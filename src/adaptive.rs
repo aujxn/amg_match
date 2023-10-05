@@ -1,10 +1,10 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
 use crate::{
-    utils::{normalize, random_vec},
+    utils::{normalize, random_vec, norm, inner_product},
     partitioner::{modularity_matching_add_level, Hierarchy},
-    preconditioner::{Composite, CompositeType, Multilevel, PcgL1, L1},
-    solver::pcg
+    preconditioner::{Composite, CompositeType, Multilevel, L1, Smoother},
+    solver::{pcg, stationary},
 };
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -15,7 +15,7 @@ use plotly::{
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize, target_convergence: f64, max_components: usize) -> (Composite<Multilevel<PcgL1>>, Vec<Vec<f64>>) {
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize, target_convergence: f64, max_components: usize) -> (Composite<Multilevel<Smoother<L1>>>, Vec<Vec<f64>>) {
     let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
 
     let mut plot = Plot::new();
@@ -36,12 +36,13 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
 
         // Sanity check that each near null is orthogonal to the last.
         // Could move into test suite down the line.
-        let ortho_check: Vec<f64> = near_null_history
+        let ortho_check: String = near_null_history
             .iter()
-            .map(|old| old.dot(&near_null))
+            //.map(|old| old.dot(&near_null))
+            .map(|old| format!("{:.3e}, ", inner_product(old, &near_null, &mat)))
             .collect();
         near_null_history.push(near_null.clone());
-        trace!("Near null component inner product with history: {ortho_check:?}");
+        trace!("Near null component inner product with history: {ortho_check}");
 
         let mut levels = 1;
         while modularity_matching_add_level(&near_null, coarsening_factor, &mut hierarchy) {
@@ -71,7 +72,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
             };
         }
 
-        let ml1 = Multilevel::<PcgL1>::new(hierarchy);
+        let ml1 = Multilevel::<Smoother<L1>>::new(hierarchy);
         preconditioner.push(ml1);
 
         near_null = random_vec(dim);
@@ -84,6 +85,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
                 return (preconditioner, test_data);
             }
         } else {
+            // TODO keep last convergence history if tester converges (low prio)
             return (preconditioner, test_data);
         }
     }
@@ -110,14 +112,14 @@ fn add_trace(plot: &mut Plot, data: Vec<f64>) {
 
 fn find_near_null(
     mat: &CsrMatrix<f64>,
-    composite_preconditioner: &Composite<Multilevel<PcgL1>>,
+    composite_preconditioner: &Composite<Multilevel<Smoother<L1>>>,
     near_null: &mut DVector<f64>,
 ) -> Option<(f64, Vec<f64>)> {
     trace!("searching for near null");
     let mut iter = 0;
     let start = Instant::now();
     let mut last_log = start;
-    let log_interval = Duration::from_secs(2);
+    let log_interval = Duration::from_secs(20);
     let starting_error = near_null.dot(&(mat * &*near_null));
     let mut convergence_history: Vec<f64> = Vec::new();
     let mut old_error_norm = f64::MAX;
@@ -166,7 +168,7 @@ fn find_near_null(
             last_log = now;
         }
 
-        if error_ratio > 0.92 || iter > 30 {
+        if error_ratio > 0.9 || iter > 15 {
             info!(
                 "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
                 composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)

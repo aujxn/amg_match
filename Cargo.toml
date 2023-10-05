@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 nalgebra = { version = "0", features = ["rand"] }
-nalgebra-sparse = { version = "0", features = ["io"] }
+nalgebra-sparse = { version = "0", features = ["io", "serde-serialize"] }
 image = "0"
 indexmap = "1"
 rand = "0"

@@ -89,6 +89,16 @@ pub fn norm(vec: &DVector<f64>, mat: &CsrMatrix<f64>) -> f64 {
     return vec.dot(&workspace).sqrt();
 }
 
+pub fn inner_product(
+    vec_left: &DVector<f64>,
+    vec_right: &DVector<f64>,
+    mat: &CsrMatrix<f64>,
+) -> f64 {
+    let mut workspace = DVector::from(vec![0.0; vec_right.nrows()]);
+    spmm_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec_right);
+    return vec_left.dot(&workspace);
+}
+
 pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
     *vec /= norm(&*vec, mat);
 }

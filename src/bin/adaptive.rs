@@ -82,7 +82,7 @@ fn main() {
         opt.input, opt.coarsening_factor, opt.max_levels
     );
     plot(&test_data, &title);
-    pc.save(opt.output, notes);
+    //pc.save(opt.output, notes);
 
     //let (pc, notes) = Composite::load(mat.clone(), "data/out/test_pc.json");
     //println!("notes: {}", notes);

@@ -1,7 +1,7 @@
 use nalgebra_sparse::CsrMatrix;
 use serde::{Deserialize, Serialize};
 
-use crate::preconditioner::{Composite, Multilevel, PcgL1};
+use crate::preconditioner::{Composite, Multilevel, L1};
 
 #[derive(Serialize, Deserialize)]
 pub struct CompositeData {
@@ -48,8 +48,9 @@ impl Into<CsrMatrix<f64>> for CsrData {
     }
 }
 
+/*
 impl CompositeData {
-    pub fn new(pc: &Composite<Multilevel<PcgL1>>, notes: String) -> Self {
+    pub fn new(pc: &Composite<Multilevel<L1>>, notes: String) -> Self {
         let mut hierarchies = Vec::new();
 
         for comp in pc.components() {
@@ -65,3 +66,4 @@ impl CompositeData {
         Self { hierarchies, notes }
     }
 }
+    */

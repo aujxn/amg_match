@@ -4,17 +4,39 @@
 use crate::io::CompositeData;
 use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use crate::partitioner::Hierarchy;
-use crate::solver::{lsolve, pcg, usolve};
+use crate::solver::{lsolve, pcg, stationary, usolve};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::{cell::RefCell, path::Path, rc::Rc};
 
+// Maybe PC trait should be generalized to LinearOperator...
+// Then could have 3 options for apply:
+// - one in place
+// - one returning vec
+// - one with input and output vec
+//
+// Really a PC is just a LO. Also solvers are LO. So having
+// a trait called PC is redundant.
 pub trait Preconditioner {
     fn apply(&self, r: &mut DVector<f64>);
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Identity;
+impl Identity {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl Preconditioner for Identity {
+    fn apply(&self, r: &mut DVector<f64>) {}
+}
+
+//#[derive(Serialize, Deserialize)]
 pub struct L1 {
     l1_inverse: DVector<f64>,
 }
@@ -53,6 +75,55 @@ impl PcgL1 {
             steps,
             smoother,
         }
+    }
+}
+
+type Solver = fn(
+    &CsrMatrix<f64>,
+    &DVector<f64>,
+    &mut DVector<f64>,
+    usize,
+    f64,
+    &dyn Preconditioner,
+    Option<usize>,
+) -> (bool, f64);
+
+pub struct Smoother<P> {
+    solver: Solver,
+    matrix: Rc<CsrMatrix<f64>>,
+    preconditioner: P,
+    steps: usize,
+}
+
+impl<P: Preconditioner> Smoother<P> {
+    pub fn new(
+        solver: Solver,
+        matrix: Rc<CsrMatrix<f64>>,
+        preconditioner: P,
+        steps: usize,
+    ) -> Self {
+        Self {
+            solver,
+            matrix,
+            preconditioner,
+            steps,
+        }
+    }
+}
+
+impl<P: Preconditioner> Preconditioner for Smoother<P> {
+    fn apply(&self, r: &mut DVector<f64>) {
+        let mut x = DVector::from(vec![0.0; r.len()]);
+        (self.solver)(
+            &self.matrix,
+            r,
+            &mut x,
+            self.steps,
+            1e-12,
+            &self.preconditioner,
+            None,
+        );
+        *r = x;
     }
 }
 
@@ -186,7 +257,7 @@ fn resize_ml_workspace(hierarchy: &Hierarchy) {
     });
 }
 
-impl Preconditioner for Multilevel<PcgL1> {
+impl<T: Preconditioner> Preconditioner for Multilevel<T> {
     fn apply(&self, r: &mut DVector<f64>) {
         resize_ml_workspace(&self.hierarchy);
         ML_WORKSPACE.with(|ws| {
@@ -247,18 +318,21 @@ impl Preconditioner for Multilevel<PcgL1> {
 
             // Solve the coarsest problem almost exactly
             let (converged, ratio) = pcg(
+                //let (converged, ratio) = stationary(
                 &self.hierarchy.get_mat(levels),
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
-                1500,
-                1.0e-10,
+                300,
+                1.0e-6,
                 &self.forward_smoothers[levels],
+                //&Identity::new(),
+                //&L1::new(&self.hierarchy.get_mat(levels)),
                 None, //Some(5),
             );
 
             if !converged {
                 warn!(
-                    "PCG didn't converge on coarsest level with final ratio: {:3e}",
+                    "solver didn't converge on coarsest level with final ratio: {:3e}",
                     ratio
                 );
             }
@@ -297,19 +371,28 @@ impl TwoLevel {
 }
 */
 
-impl Multilevel<PcgL1> {
+impl Multilevel<Smoother<L1>> {
     // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy) -> Self {
         let fine_mat = hierarchy.get_mat(0);
-        let base_steps = 1;
-        let mut forward_smoothers = vec![PcgL1::new(fine_mat, base_steps)];
+        let base_steps = 3;
+        let mut forward_smoothers: Vec<Smoother<L1>> = vec![Smoother::new(
+            stationary,
+            fine_mat.clone(),
+            L1::new(&fine_mat),
+            base_steps as usize,
+        )];
         forward_smoothers.extend(
             hierarchy
                 .get_matrices()
                 .iter()
                 .enumerate()
                 .map(|(i, mat)| {
-                    PcgL1::new(mat.clone(), base_steps * (2u32.pow(i as u32 + 1) as usize))
+                    let mut steps: usize = (base_steps * 2u32.pow(i as u32 + 1)) as usize;
+                    if i == hierarchy.get_matrices().len() - 1 {
+                        steps = 1;
+                    }
+                    Smoother::new(stationary, mat.clone(), L1::new(&mat), steps)
                 })
                 .collect::<Vec<_>>(),
         );
@@ -351,7 +434,7 @@ pub struct Composite<T> {
 }
 
 pub enum CompositeType {
-    Additive,
+    Additive, //TODO
     Sequential,
 }
 
@@ -438,7 +521,8 @@ impl<T: Preconditioner> Composite<T> {
     }
 }
 
-impl Composite<Multilevel<PcgL1>> {
+/*
+impl Composite<Multilevel<Smoother<L1>>> {
     pub fn save<P: AsRef<Path>>(&self, p: P, notes: String) {
         let intermediate = CompositeData::new(&self, notes);
         let serialized = serde_json::to_string(&intermediate).unwrap();
@@ -467,9 +551,10 @@ impl Composite<Multilevel<PcgL1>> {
                 .map(|mat| mat.into())
                 .collect();
             let hierarchy = Hierarchy::from_hierarchy(mat.clone(), partition_matrices);
-            let comp: Multilevel<PcgL1> = Multilevel::new(hierarchy);
+            let comp: Multilevel<L1> = Multilevel::new(hierarchy);
             pc.push(comp);
         }
         (pc, deserialized.notes)
     }
 }
+*/

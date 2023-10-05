@@ -14,6 +14,21 @@ enum LogInterval {
 }
 */
 
+/*
+pub trait Solver {
+fn solve(
+    mat: &CsrMatrix<f64>,
+    rhs: &DVector<f64>,
+    x: &mut DVector<f64>,
+    max_iter: usize,
+    epsilon: f64,
+    preconditioner: &dyn Preconditioner,
+    log_convergence: Option<usize>,
+) -> bool {
+    fn (&self, r: &mut DVector<f64>);
+}
+*/
+
 /// Upper triangular solve for sparse matrices and dense rhs
 pub fn usolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
     for i in (0..mat.nrows()).rev() {
@@ -58,7 +73,7 @@ pub fn stationary(
     epsilon: f64,
     preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
-) -> bool {
+) -> (bool, f64) {
     //let mut r = rhs - &(mat * &x);
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     r.copy_from(rhs);
@@ -73,12 +88,14 @@ pub fn stationary(
 
     preconditioner.apply(&mut r);
     *x += &r;
+    let mut ratio = 1.0;
 
     for iter in 0..max_iter {
         //r = rhs - &(mat * &x);
         r.copy_from(rhs);
         spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
         let r_norm = r.dot(&r);
+        ratio = r_norm / r0_norm;
 
         if let Some(log_iter) = log_convergence {
             if iter % log_iter == 0 {
@@ -91,14 +108,14 @@ pub fn stationary(
             if log_convergence.is_some() {
                 trace!("converged in {iter} iterations\n");
             }
-            return true;
+            return (true, ratio);
         }
 
         preconditioner.apply(&mut r);
         *x += &r;
     }
 
-    false
+    (false, ratio)
 }
 
 /// Preconditioned conjugate gradient. Solves the system Ax = b for x where

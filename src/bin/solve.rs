@@ -68,6 +68,7 @@ enum Solver {
 }
 
 fn main() {
+    /*
     pretty_env_logger::init();
     let opt = Opt::from_args();
 
@@ -194,4 +195,5 @@ fn main() {
         }
     };
     info!("Solved in: {} ms.", timer.elapsed().as_millis());
+    */
 }
