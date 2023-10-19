@@ -3,11 +3,14 @@
 
 use crate::parallel_ops::spmm_csr_dense;
 use nalgebra::DVector;
-use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
+use nalgebra_sparse::{
+    coo::CooMatrix, csr::CsrMatrix, io::load_coo_from_matrix_market_file as load_mm,
+};
 use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
+    rc::Rc,
     time::Duration,
 };
 
@@ -15,6 +18,20 @@ pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
     let mut rng = rand::thread_rng();
     let distribution = rand::distributions::Uniform::new(-2.0_f64, 2.0_f64);
     nalgebra::DVector::from_distribution(size, &distribution, &mut rng)
+}
+
+pub fn load_system(prefix: &str) -> (Rc<CsrMatrix<f64>>, DVector<f64>) {
+    let matfile = format!("{}.mtx", prefix);
+    let doffile = format!("{}.bdy", prefix);
+    let rhsfile = format!("{}.rhs", prefix);
+
+    let mat = CsrMatrix::from(&load_mm(matfile).unwrap());
+
+    let b = load_vec(rhsfile);
+    let dofs = load_boundary_dofs(doffile);
+
+    let (mat, b) = delete_boundary(dofs, mat, b);
+    (std::rc::Rc::new(mat), b)
 }
 
 pub fn load_vec<P: AsRef<Path>>(path: P) -> DVector<f64> {
@@ -103,7 +120,7 @@ pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
     *vec /= norm(&*vec, mat);
 }
 
-pub fn format_duration(duration: Duration) -> String {
+pub fn format_duration(duration: &Duration) -> String {
     let seconds = duration.as_secs();
     let minutes = seconds / 60;
     let hours = minutes / 60;

@@ -1,3 +1,4 @@
+/*
 use amg_match::{
     adaptive::build_adaptive,
     preconditioner::Composite,
@@ -115,3 +116,5 @@ fn plot(data: &Vec<Vec<f64>>, title: &String) {
     plot.show();
     //plot.write_html(&filename);
 }
+*/
+fn main() {}

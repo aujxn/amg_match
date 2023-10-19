@@ -27,13 +27,13 @@ pub trait Preconditioner {
 #[derive(Serialize, Deserialize)]
 pub struct Identity;
 impl Identity {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self
     }
 }
 
 impl Preconditioner for Identity {
-    fn apply(&self, r: &mut DVector<f64>) {}
+    fn apply(&self, _r: &mut DVector<f64>) {}
 }
 
 //#[derive(Serialize, Deserialize)]
@@ -317,22 +317,22 @@ impl<T: Preconditioner> Preconditioner for Multilevel<T> {
             }
 
             // Solve the coarsest problem almost exactly
-            let (converged, ratio) = pcg(
+            let (converged, ratio, _) = pcg(
                 //let (converged, ratio) = stationary(
                 &self.hierarchy.get_mat(levels),
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
-                300,
-                1.0e-6,
+                5000,
+                1.0e-10,
                 &self.forward_smoothers[levels],
                 //&Identity::new(),
                 //&L1::new(&self.hierarchy.get_mat(levels)),
                 None, //Some(5),
             );
 
-            if !converged {
+            if !converged && ratio > 1.0e-5 {
                 warn!(
-                    "solver didn't converge on coarsest level with final ratio: {:3e}",
+                    "solver didn't converge on coarsest level with final ratio: {:.2e}",
                     ratio
                 );
             }
@@ -433,9 +433,10 @@ pub struct Composite<T> {
     application: CompositeType,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum CompositeType {
     Additive, //TODO
-    Sequential,
+    Multiplicative,
 }
 
 impl<T: Preconditioner> Preconditioner for Composite<T> {
@@ -448,12 +449,13 @@ impl<T: Preconditioner> Preconditioner for Composite<T> {
             ws.r_work.resize_vertically_mut(dim, 0.0);
 
             ws.x.fill(0.0);
+            ws.y.fill(0.0);
             ws.r_work.copy_from(r);
         });
 
         match self.application {
-            CompositeType::Sequential => self.apply_sequential(r),
-            CompositeType::Additive => unimplemented!(), //self.apply_additive(r),
+            CompositeType::Multiplicative => self.apply_sequential(r),
+            CompositeType::Additive => self.apply_additive(r),
         }
     }
 }
@@ -488,6 +490,20 @@ impl<T: Preconditioner> Composite<T> {
                 spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
             }
             r.copy_from(&ws.x);
+        });
+    }
+
+    fn apply_additive(&self, r: &mut DVector<f64>) {
+        COMPOSITE_WORKSPACE.with(|ws| {
+            let ws = &mut *ws.borrow_mut();
+            for component in self.components().iter() {
+                ws.r_work.copy_from(r);
+                component.apply(&mut ws.r_work);
+                ws.y += &ws.r_work;
+            }
+
+            ws.y /= self.components().len() as f64;
+            r.copy_from(&ws.y);
         });
     }
 
@@ -531,7 +547,7 @@ impl Composite<Multilevel<Smoother<L1>>> {
     }
 
     pub fn load<P: AsRef<Path>>(mat: Rc<CsrMatrix<f64>>, p: P) -> (Self, String) {
-        let application = CompositeType::Sequential;
+        let application = CompositeType::Multiplicative;
         let file = File::open(p).unwrap();
         let mut buf_reader = BufReader::new(file);
         let mut serialized = String::new();

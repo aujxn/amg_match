@@ -1,3 +1,4 @@
+/*
 use std::borrow::Borrow;
 
 use amg_match::{
@@ -197,3 +198,5 @@ fn main() {
     info!("Solved in: {} ms.", timer.elapsed().as_millis());
     */
 }
+*/
+fn main() {}

@@ -1,24 +1,20 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
 use crate::{
-    utils::{normalize, random_vec, norm, inner_product},
+    utils::{normalize, random_vec, inner_product},
     partitioner::{modularity_matching_add_level, Hierarchy},
     preconditioner::{Composite, CompositeType, Multilevel, L1, Smoother},
-    solver::{pcg, stationary},
+    solver::stationary, io::plot_convergence,
 };
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
-use plotly::{
-    layout::{Axis, AxisType, Layout},
-    Plot, Scatter,
-};
 use rand::prelude::*;
 use std::time::{Duration, Instant};
 
-pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize, target_convergence: f64, max_components: usize) -> (Composite<Multilevel<Smoother<L1>>>, Vec<Vec<f64>>) {
-    let mut preconditioner = Composite::new(mat.clone(), Vec::new(), CompositeType::Sequential);
+pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, max_level: usize, target_convergence: f64, max_components: usize, mat_name: &str) -> (Composite<Multilevel<Smoother<L1>>>, Vec<Vec<f64>>) {
+    let comp_type = CompositeType::Multiplicative;
+    let mut preconditioner = Composite::new(mat.clone(), Vec::new(), comp_type);
 
-    let mut plot = Plot::new();
     let dim = mat.nrows();
     let mut near_null_history = Vec::<DVector<f64>>::new();
     let mut test_data = Vec::new();
@@ -27,7 +23,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
     let mut l1 = L1::new(&mat);
     let zeros = DVector::from(vec![0.0; dim]);
     let mut near_null = random_vec(dim);
-    let _ = pcg(&mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
+    let _ = stationary(&mat, &zeros, &mut near_null, 50, 1e-16, &mut l1, None);
 
     loop {
         let mut hierarchy = Hierarchy::new(mat.clone());
@@ -39,7 +35,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
         let ortho_check: String = near_null_history
             .iter()
             //.map(|old| old.dot(&near_null))
-            .map(|old| format!("{:.3e}, ", inner_product(old, &near_null, &mat)))
+            .map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &mat)))
             .collect();
         near_null_history.push(near_null.clone());
         trace!("Near null component inner product with history: {ortho_check}");
@@ -57,7 +53,7 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
                 let zeros = DVector::from(vec![0.0; dim]);
                 let mut near_null = random_vec(dim);
                 // TODO: maybe go untill stall instead
-                let _ = pcg(
+                let _ = stationary(
                     &current_a,
                     &zeros,
                     &mut near_null,
@@ -79,8 +75,11 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
         if let Some((convergence_rate, convergence_history)) =
             find_near_null(&mat, &preconditioner, &mut near_null)
         {
-            add_trace(&mut plot, convergence_history.clone());
             test_data.push(convergence_history);
+            let last: Vec<f64> = test_data.iter().map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64))).collect();
+            let two_level = { if max_level == 2 { "two-level" } else { "multi-level" }};
+            let title = format!("{}_{}_CF-{:.0}_{:?}", two_level, mat_name, coarsening_factor, comp_type);
+            plot_convergence(&title, &vec![last], &vec![mat_name.to_string()]);
             if convergence_rate < target_convergence || preconditioner.components().len() == max_components {
                 return (preconditioner, test_data);
             }
@@ -89,25 +88,6 @@ pub fn build_adaptive(mat: std::rc::Rc<CsrMatrix<f64>>, coarsening_factor: f64, 
             return (preconditioner, test_data);
         }
     }
-}
-
-fn add_trace(plot: &mut Plot, data: Vec<f64>) {
-    let trace = Scatter::new(
-        (1..=data.len()).collect(),
-        data,
-    );
-    plot.add_trace(trace);
-    let layout = Layout::new()
-        .title("Preconditioner Testing".into())
-        .y_axis(
-            Axis::new()
-                .title("Relative Error in A-norm".into())
-                .type_(AxisType::Log),
-        )
-        .x_axis(Axis::new().title("Iteration".into()));
-    plot.set_layout(layout);
-    // TODO: add some metadata to output with unique name
-    plot.write_html("data/out/out.html");
 }
 
 fn find_near_null(
@@ -128,7 +108,7 @@ fn find_near_null(
     let zeros = DVector::from(vec![0.0; near_null.nrows()]);
 
     loop {
-        pcg(
+        stationary(
             &mat,
             &zeros,
             near_null,
@@ -157,7 +137,7 @@ fn find_near_null(
 
         if now - last_log > log_interval {
             trace!(
-                "iteration {}:\n\ttotal search time: {}s\n\tconvergence per second: {:.3}\n\tconvergence per iteration: {:.3}\n\terror ratio to previous iteration: {:.3}\n\trelative error (A-norm): {:.3e}",
+                "iteration {}:\n\ttotal search time: {:.0}s\n\tconvergence per second: {:.3}\n\tconvergence per iteration: {:.3}\n\terror ratio to previous iteration: {:.3}\n\trelative error (A-norm): {:.2e}",
                 iter,
                 elapsed_secs,
                 convergence_rate_per_second,
@@ -168,9 +148,10 @@ fn find_near_null(
             last_log = now;
         }
 
-        if error_ratio > 0.9 || iter > 15 {
+        //if error_ratio > 0.9 { //|| iter > 15 {
+        if iter == 15 {
             info!(
-                "{} components:\n\tconvergence rate stabilized at {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.3e}",
+                "{} components:\n\tconvergence rate: {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.2e}",
                 composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)
             );
             return Some((convergence_rate_per_iter, convergence_history));

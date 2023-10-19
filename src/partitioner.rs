@@ -296,7 +296,7 @@ fn build_weighted_matrix(
 
     if counter > 0 {
         warn!(
-            "{} of {} rows had negative rowsums. Average negative: {:.3e}",
+            "{} of {} rows had negative rowsums. Average negative: {:.1e}",
             counter,
             row_sums.nrows(),
             total / (counter as f64)

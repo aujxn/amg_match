@@ -130,7 +130,7 @@ pub fn pcg(
     epsilon: f64,
     preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
-) -> (bool, f64) {
+) -> (bool, f64, usize) {
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     let mut g = r.clone();
 
@@ -201,7 +201,7 @@ pub fn pcg(
             if log_convergence.is_some() {
                 trace!("converged in {i} iterations\n");
             }
-            return (true, (d_report / d0).sqrt());
+            return (true, (d_report / d0).sqrt(), i);
         }
 
         let beta = d / d_old;
@@ -213,5 +213,5 @@ pub fn pcg(
     r_final.copy_from(rhs);
     spmm_csr_dense(1.0, &mut r_final, -1.0, mat, &*x);
     let ratio = (r_final.dot(&r_final) / d0).sqrt();
-    (false, ratio)
+    (false, ratio, max_iter)
 }
