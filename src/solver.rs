@@ -1,7 +1,7 @@
 //! Implementation of various sparse matrix solvers for the
 //! system `Ax=b`.
 
-use crate::parallel_ops::spmm_csr_dense;
+//use crate::parallel_ops::spmm_csr_dense;
 use crate::preconditioner::Preconditioner;
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -73,11 +73,11 @@ pub fn stationary(
     epsilon: f64,
     preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
-) -> (bool, f64) {
-    //let mut r = rhs - &(mat * &x);
-    let mut r = DVector::from(vec![0.0; rhs.nrows()]);
-    r.copy_from(rhs);
-    spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+) -> (bool, f64, usize) {
+    let mut r = rhs - &(mat * &*x);
+    //let mut r = DVector::from(vec![0.0; rhs.nrows()]);
+    //r.copy_from(rhs);
+    //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let r0_norm = r.dot(&r);
 
     if log_convergence.is_some() {
@@ -91,9 +91,9 @@ pub fn stationary(
     let mut ratio = 1.0;
 
     for iter in 0..max_iter {
-        //r = rhs - &(mat * &x);
-        r.copy_from(rhs);
-        spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+        r = rhs - &(mat * &*x);
+        //r.copy_from(rhs);
+        //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
         let r_norm = r.dot(&r);
         ratio = r_norm / r0_norm;
 
@@ -108,14 +108,14 @@ pub fn stationary(
             if log_convergence.is_some() {
                 trace!("converged in {iter} iterations\n");
             }
-            return (true, ratio);
+            return (true, ratio, iter);
         }
 
         preconditioner.apply(&mut r);
         *x += &r;
     }
 
-    (false, ratio)
+    (false, ratio.sqrt(), max_iter)
 }
 
 /// Preconditioned conjugate gradient. Solves the system Ax = b for x where
@@ -134,9 +134,9 @@ pub fn pcg(
     let mut r = DVector::from(vec![0.0; rhs.nrows()]);
     let mut g = r.clone();
 
-    //let mut r = rhs - mat * &x;
-    r.copy_from(rhs);
-    spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+    let mut r = rhs - mat * &*x;
+    //r.copy_from(rhs);
+    //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
     let d0 = r.dot(&r);
     if log_convergence.is_some() {
         trace!("initial residual: {d0:.3e}")
@@ -153,8 +153,8 @@ pub fn pcg(
     let mut last_log = Instant::now();
 
     for i in 0..max_iter {
-        //let mut g = mat * &p;
-        spmm_csr_dense(0.0, &mut g, 1.0, mat, &p);
+        let mut g = mat * &p;
+        //spmm_csr_dense(0.0, &mut g, 1.0, mat, &p);
         let alpha = d / p.dot(&g);
         if alpha < 0.0 {
             error!("alpha is negative: {alpha}");
@@ -179,8 +179,9 @@ pub fn pcg(
         if let Some(log_iter) = log_convergence {
             let now = Instant::now();
             if (now - last_log).as_secs() > log_iter as u64 {
-                r.copy_from(rhs);
-                spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+                r = rhs - mat * &*x;
+                //r.copy_from(rhs);
+                //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
                 // manufacture a solution and measure true error norm
                 // in A, this should be strictly monotone. Also test with
                 // Ax=0 and initial random guess.
@@ -209,9 +210,10 @@ pub fn pcg(
         p += &r_bar;
     }
 
-    let mut r_final = DVector::from(vec![0.0; rhs.nrows()]);
-    r_final.copy_from(rhs);
-    spmm_csr_dense(1.0, &mut r_final, -1.0, mat, &*x);
+    let r_final = rhs - mat * &*x;
+    //let mut r_final = DVector::from(vec![0.0; rhs.nrows()]);
+    //r_final.copy_from(rhs);
+    //spmm_csr_dense(1.0, &mut r_final, -1.0, mat, &*x);
     let ratio = (r_final.dot(&r_final) / d0).sqrt();
     (false, ratio, max_iter)
 }

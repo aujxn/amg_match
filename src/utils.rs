@@ -1,7 +1,7 @@
 //! General utilities that don't have a specific home. Might move some of these
 //! in with `parallel_ops` to create a `la` module.
 
-use crate::parallel_ops::spmm_csr_dense;
+//use crate::parallel_ops::spmm_csr_dense;
 use nalgebra::DVector;
 use nalgebra_sparse::{
     coo::CooMatrix, csr::CsrMatrix, io::load_coo_from_matrix_market_file as load_mm,
@@ -25,12 +25,18 @@ pub fn load_system(prefix: &str) -> (Rc<CsrMatrix<f64>>, DVector<f64>) {
     let doffile = format!("{}.bdy", prefix);
     let rhsfile = format!("{}.rhs", prefix);
 
+    info!("Loading linear system...");
     let mat = CsrMatrix::from(&load_mm(matfile).unwrap());
 
     let b = load_vec(rhsfile);
     let dofs = load_boundary_dofs(doffile);
 
-    let (mat, b) = delete_boundary(dofs, mat, b);
+    let (mut mat, mut b) = delete_boundary(dofs, mat, b);
+    /*
+    info!("Normalizing starting matrix...");
+    let factor = normalize_mat(&mut mat);
+    b /= factor;
+    */
     (std::rc::Rc::new(mat), b)
 }
 
@@ -101,9 +107,8 @@ pub fn delete_boundary(
 }
 
 pub fn norm(vec: &DVector<f64>, mat: &CsrMatrix<f64>) -> f64 {
-    let mut workspace = DVector::from(vec![0.0; vec.nrows()]);
-    spmm_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec);
-    return vec.dot(&workspace).sqrt();
+    let temp = mat * vec;
+    return vec.dot(&temp).sqrt();
 }
 
 pub fn inner_product(
@@ -111,13 +116,42 @@ pub fn inner_product(
     vec_right: &DVector<f64>,
     mat: &CsrMatrix<f64>,
 ) -> f64 {
-    let mut workspace = DVector::from(vec![0.0; vec_right.nrows()]);
-    spmm_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec_right);
+    //let mut workspace = DVector::from(vec![0.0; vec_right.nrows()]);
+    //spmm_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec_right);
+    let workspace = mat * vec_right;
     return vec_left.dot(&workspace);
 }
 
 pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
     *vec /= norm(&*vec, mat);
+}
+
+pub fn normalize_mat(mat: &mut CsrMatrix<f64>) -> f64 {
+    let nrows = mat.nrows();
+    let mut v = random_vec(nrows);
+    let ones = DVector::from_element(nrows, 1.0);
+    let mut i = 1;
+    loop {
+        let new_v = &*mat * &v;
+        let mut eigs = new_v.component_div(&v);
+        let eig = new_v.sum() / new_v.len() as f64;
+        eigs -= &(eig * &ones);
+        let converge = eigs.norm();
+        if converge < 1e-5 {
+            *mat /= eig;
+            info!("Normalized after {} iterations with norm {:.2e}", i, eig);
+            return eig;
+        }
+        if i % 1000 == 0 {
+            info!(
+                "Convergence on normalization: {:.2e} at iter: {}",
+                converge, i
+            );
+        }
+        v.copy_from(&new_v);
+        v /= v.norm();
+        i += 1;
+    }
 }
 
 pub fn format_duration(duration: &Duration) -> String {

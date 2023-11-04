@@ -2,7 +2,7 @@
 //! of said trait.
 
 use crate::io::CompositeData;
-use crate::parallel_ops::{interpolate, spmm_csr_dense};
+//use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg, stationary, usolve};
 use nalgebra::base::DVector;
@@ -86,7 +86,7 @@ type Solver = fn(
     f64,
     &dyn Preconditioner,
     Option<usize>,
-) -> (bool, f64);
+) -> (bool, f64, usize);
 
 pub struct Smoother<P> {
     solver: Solver,
@@ -210,7 +210,7 @@ impl SymmetricGaussSeidel {
 // use the same code as L1
 //      - test spd of precon again
 pub struct Multilevel<T> {
-    hierarchy: Hierarchy,
+    pub hierarchy: Hierarchy,
     forward_smoothers: Vec<T>,
     //_backward_smoothers: Vec<T>,  // Eventually should probably support non-symmetric smoothers
 }
@@ -218,7 +218,6 @@ pub struct Multilevel<T> {
 struct MultilevelWorkspace {
     x_ks: Vec<DVector<f64>>,
     b_ks: Vec<DVector<f64>>,
-    r_ks: Vec<DVector<f64>>,
 }
 
 impl MultilevelWorkspace {
@@ -226,7 +225,6 @@ impl MultilevelWorkspace {
         Self {
             x_ks: Vec::new(),
             b_ks: Vec::new(),
-            r_ks: Vec::new(),
         }
     }
 }
@@ -242,7 +240,6 @@ fn resize_ml_workspace(hierarchy: &Hierarchy) {
             for _ in 0..new_levels {
                 ws.x_ks.push(DVector::from(Vec::new()));
                 ws.b_ks.push(DVector::from(Vec::new()));
-                ws.r_ks.push(DVector::from(Vec::new()));
             }
         }
 
@@ -251,7 +248,6 @@ fn resize_ml_workspace(hierarchy: &Hierarchy) {
 
         for (i, size) in sizes.into_iter().enumerate() {
             ws.x_ks[i].resize_vertically_mut(size, 0.0);
-            ws.r_ks[i].resize_vertically_mut(size, 0.0);
             ws.b_ks[i].resize_vertically_mut(size, 0.0);
         }
     });
@@ -268,95 +264,51 @@ impl<T: Preconditioner> Preconditioner for Multilevel<T> {
             let pt_ks = self.hierarchy.get_interpolations();
 
             // reset the workspaces
-            for ((xk, bk), rk) in ws
-                .x_ks
-                .iter_mut()
-                .zip(ws.b_ks.iter_mut())
-                .zip(ws.r_ks.iter_mut())
-            {
+            for (xk, bk) in ws.x_ks.iter_mut().zip(ws.b_ks.iter_mut()) {
                 xk.fill(0.0);
                 bk.fill(0.0);
-                rk.fill(0.0);
             }
 
             ws.b_ks[0].copy_from(&*r);
 
             for level in 0..levels {
-                //for _ in 0..self.smoothing_steps {
-                ws.r_ks[level].copy_from(&ws.b_ks[level]);
-                crate::parallel_ops::spmm_csr_dense(
-                    1.0,
-                    &mut ws.r_ks[level],
-                    -1.0,
-                    &self.hierarchy.get_mat(level),
-                    &ws.x_ks[level],
-                );
-
-                self.forward_smoothers[level].apply(&mut ws.r_ks[level]);
-                ws.x_ks[level] += &ws.r_ks[level];
-                //}
-
-                //let r_k = &self.b_ks[level] - &(&mat_ks[level] * &self.x_ks[level]);
-                ws.r_ks[level].copy_from(&ws.b_ks[level]);
-                spmm_csr_dense(
-                    1.0,
-                    &mut ws.r_ks[level],
-                    -1.0,
-                    &self.hierarchy.get_mat(level),
-                    &ws.x_ks[level],
-                );
-                //let p_t = p_ks[level + 1].transpose();
-                //self.b_ks[level + 1] = &p_t * &r_k;
-                spmm_csr_dense(
-                    0.0,
-                    &mut ws.b_ks[level + 1],
-                    1.0,
-                    &pt_ks[level],
-                    &ws.r_ks[level],
-                );
+                ws.x_ks[level].copy_from(&ws.b_ks[level]);
+                self.forward_smoothers[level].apply(&mut ws.x_ks[level]);
+                ws.b_ks[level + 1] = &pt_ks[level]
+                    * &(&ws.b_ks[level] - &*self.hierarchy.get_mat(level) * &ws.x_ks[level]);
             }
 
             // Solve the coarsest problem almost exactly
-            let (converged, ratio, _) = pcg(
-                //let (converged, ratio) = stationary(
+            let (converged, ratio, iters) = pcg(
                 &self.hierarchy.get_mat(levels),
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
-                5000,
+                10000,
                 1.0e-10,
                 &self.forward_smoothers[levels],
-                //&Identity::new(),
-                //&L1::new(&self.hierarchy.get_mat(levels)),
-                None, //Some(5),
+                None,
             );
 
-            if !converged && ratio > 1.0e-5 {
+            if !converged {
+                //&& ratio > 1.0e-5 {
                 warn!(
                     "solver didn't converge on coarsest level with final ratio: {:.2e}",
                     ratio
                 );
             }
+            /*
+            if iters < 3 {
+                warn!("Coarse level solver completed in {iters} iterations");
+            }
+                */
 
             for level in (0..levels).rev() {
-                //let interpolated_x = self.hierarchy.get_partition(level + 1) * &self.x_ks[level + 1];
-                //self.x_ks[level] += &interpolated_x;
-                interpolate(&mut ws.r_ks[level], &ws.x_ks[level + 1], &p_ks[level]);
-                ws.x_ks[level] += &ws.r_ks[level];
+                let interpolated = &p_ks[level] * &ws.x_ks[level + 1];
+                ws.x_ks[level] += interpolated;
 
-                //for _ in 0..self.smoothing_steps {
-                //let mut r_k = &self.b_ks[level] - &(self.hierarchy.get_matrix(level) * &self.x_ks[level]);
-                ws.r_ks[level].copy_from(&ws.b_ks[level]);
-                spmm_csr_dense(
-                    1.0,
-                    &mut ws.r_ks[level],
-                    -1.0,
-                    &self.hierarchy.get_mat(level),
-                    &ws.x_ks[level],
-                );
-
-                self.forward_smoothers[level].apply(&mut ws.r_ks[level]);
-                ws.x_ks[level] += &ws.r_ks[level];
-                //}
+                let mut r = &ws.b_ks[level] - &(&*self.hierarchy.get_mat(level) * &ws.x_ks[level]);
+                self.forward_smoothers[level].apply(&mut r);
+                ws.x_ks[level] += &r
             }
             r.copy_from(&ws.x_ks[0]);
         });
@@ -372,7 +324,6 @@ impl TwoLevel {
 */
 
 impl Multilevel<Smoother<L1>> {
-    // TODO this constructor should borrow mat when partitioner/hierarchy changes happen
     pub fn new(hierarchy: Hierarchy) -> Self {
         let fine_mat = hierarchy.get_mat(0);
         let base_steps = 3;
@@ -388,10 +339,13 @@ impl Multilevel<Smoother<L1>> {
                 .iter()
                 .enumerate()
                 .map(|(i, mat)| {
+                    let steps = 3;
+                    /*
                     let mut steps: usize = (base_steps * 2u32.pow(i as u32 + 1)) as usize;
                     if i == hierarchy.get_matrices().len() - 1 {
                         steps = 1;
                     }
+                    */
                     Smoother::new(stationary, mat.clone(), L1::new(&mat), steps)
                 })
                 .collect::<Vec<_>>(),
@@ -435,7 +389,7 @@ pub struct Composite<T> {
 
 #[derive(Copy, Clone, Debug)]
 pub enum CompositeType {
-    Additive, //TODO
+    Additive,
     Multiplicative,
 }
 
@@ -472,6 +426,11 @@ impl<T: Preconditioner> Composite<T> {
     fn apply_sequential(&self, r: &mut DVector<f64>) {
         COMPOSITE_WORKSPACE.with(|ws| {
             let ws = &mut *ws.borrow_mut();
+
+            if self.components().len() == 1 {
+                self.components()[0].apply(r);
+                return;
+            }
 
             for component in self.components.iter() {
                 ws.y.copy_from(&ws.r_work);

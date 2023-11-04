@@ -19,7 +19,7 @@ pub struct Hierarchy {
     mat: Rc<CsrMatrix<f64>>,
     partition_matrices: Vec<CsrMatrix<f64>>,
     interpolation_matrices: Vec<CsrMatrix<f64>>,
-    matrices: Vec<Rc<CsrMatrix<f64>>>,
+    pub matrices: Vec<Rc<CsrMatrix<f64>>>,
 }
 
 impl Hierarchy {
@@ -245,10 +245,12 @@ pub fn modularity_matching(
                         hierarchy.get_partitions().last().unwrap().ncols(),
                         hierarchy.get_matrices().last().unwrap().nnz()
                     );
+                    /*
                     if coarse_vertex_count < 1000.0 {
                         info!("Levels: {}", hierarchy.levels());
                         return hierarchy;
                     }
+                    */
                     partition_mat = None;
                     starting_vertex_count = coarse_vertex_count;
                 }
