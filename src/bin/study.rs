@@ -1,16 +1,28 @@
+use std::rc::Rc;
+
 use amg_match::{
     adaptive::build_adaptive,
-    io::plot_convergence,
-    utils::{format_duration, load_system},
+    io::{
+        plot_asymptotic_convergence, plot_convergence_history, plot_convergence_history_tester,
+        plot_hierarchy, write_gf,
+    },
+    preconditioner::{Composite, CompositeType, Multilevel, Smoother, L1},
+    solver::{pcg, ConvergenceLogger},
+    utils::{format_duration, load_system, random_vec},
 };
+use nalgebra::DVector;
+use nalgebra_sparse::{io::load_coo_from_matrix_market_file as load_mm, CsrMatrix};
+/*
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::time::Duration;
 use structopt::StructOpt;
+*/
 
 #[macro_use]
 extern crate log;
 
+/*
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct TestResult {
     matrix: String,
@@ -34,117 +46,239 @@ struct Opt {
     plot: bool,
 }
 
-static ANIS: (&'static str, &'static str) =
-    ("data/anisotropy/anisotropy_3d", "anisotropic-3d-laplace");
 static SPE10: (&'static str, &'static str) = ("data/spe10/spe10_0", "spe10");
+*/
 
 fn main() {
     pretty_env_logger::init();
-    let results_file = "data/out/results.json";
+    anisotropy();
+    spe10();
 
-    let opt = Opt::from_args();
-    if opt.plot {
-        use std::fs::File;
-        use std::io::{BufReader, Read};
-        let file = File::open(results_file).unwrap();
-        let mut buf_reader = BufReader::new(file);
-        let mut serialized = String::new();
-        buf_reader.read_to_string(&mut serialized).unwrap();
-        let deserialized: Vec<TestResult> = serde_json::from_str(&serialized).unwrap();
-        plot(&deserialized);
-        return;
-    }
-
-    //let mats = [SPE10, ANIS];
-    let mats = [ANIS];
-    //let coarsening_factors = [32.0, 16.0]; //, 8.0, 4.0];
-    let coarsening_factors = [16.0]; //, 8.0, 4.0];
-    let max_levels = [10]; //[2, 10];
-    let max_components = 20;
-    let test_iters = 15;
-
-    let mut results = Vec::new();
-    let mut all_last = Vec::new();
-    let mut labels = Vec::new();
-
-    for pair in mats {
-        for coarsening_factor in coarsening_factors {
-            for max_level in max_levels {
-                let (prefix, matrix) = pair;
-                let (mat, _b) = load_system(prefix);
-
-                let two_level = {
-                    if max_level == 2 {
-                        "two-level"
-                    } else {
-                        "multi-level"
-                    }
-                };
-                let label = format!("{}_{}_CF-{:.0}", two_level, matrix, coarsening_factor);
-                info!("Starting: {}", label);
-                labels.push(label);
-
-                let timer = std::time::Instant::now();
-                let (pc, convergence_hist) = build_adaptive(
-                    mat.clone(),
-                    coarsening_factor,
-                    max_level,
-                    0.01,
-                    max_components,
-                    matrix,
-                );
-
-                let construction_time = timer.elapsed();
-                info!(
-                    "Preconitioner built in: {}",
-                    format_duration(&construction_time)
-                );
-
-                let matrix = matrix.to_string();
-                let file = prefix.to_string();
-                let num_unknowns = mat.nrows();
-                let hierarchy_sizes = pc
-                    .components()
-                    .iter()
-                    .map(|multilevel_pc| {
-                        multilevel_pc
-                            .get_hierarchy()
-                            .get_matrices()
-                            .iter()
-                            .map(|mat| (mat.nrows(), mat.nnz()))
-                            .collect()
-                    })
-                    .collect();
-
-                let last: Vec<f64> = convergence_hist
-                    .iter()
-                    .map(|vec| *vec.last().unwrap())
-                    .collect();
-
-                all_last.push(last);
-                plot_convergence("Convergence", &all_last, &labels);
-
-                let result = TestResult {
-                    matrix,
-                    two_level: max_level == 2,
-                    file,
-                    hierarchy_sizes,
-                    coarsening_factor,
-                    num_unknowns,
-                    test_iters,
-                    construction_time,
-                    convergence_hist,
-                };
-
-                results.push(result);
-                let serialized = serde_json::to_string(&results).unwrap();
-                let mut file = std::fs::File::create(results_file).unwrap();
-                file.write_all(&serialized.as_bytes()).unwrap();
-            }
-        }
+    let suitesparse_mats = ["G3_circuit", "Flan_1565"];
+    for name in suitesparse_mats {
+        let mat_path = format!("data/suitesparse/{}/{}.mtx", name, name);
+        study_suitesparse(&mat_path, name);
     }
 }
 
+fn anisotropy() {
+    let prefix = "data/anisotropy/anisotropy_2d";
+    let name = "anisotropic-2d";
+    let coarsening_factor = 8.0;
+    let max_level = 16;
+    let target_convergence = 0.01;
+    let max_components = 20;
+    let step_size = 3;
+    let test_iters = None;
+    let project_first_only = false;
+
+    let mut all_last = Vec::new();
+    let mut labels = Vec::new();
+    let (mat, b, coords, projector) = load_system(prefix);
+
+    info!("Starting {} CF-{:.0}", name, coarsening_factor);
+
+    let timer = std::time::Instant::now();
+    let (mut pc, convergence_hist, near_nulls) = build_adaptive(
+        mat.clone(),
+        coarsening_factor,
+        max_level,
+        target_convergence,
+        max_components,
+        test_iters,
+        project_first_only,
+    );
+
+    let meshfile = "data/anisotropy/test.vtk";
+    let outfile = "../skillet/error.vtk";
+    write_gf(&near_nulls, &meshfile, &outfile, &projector);
+    plot_hierarchy("hierarchy", &pc.components()[0].hierarchy, &coords);
+
+    let construction_time = timer.elapsed();
+    info!(
+        "Preconitioner built in: {}",
+        format_duration(&construction_time)
+    );
+
+    let last: Vec<f64> = convergence_hist
+        .iter()
+        .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
+        .collect();
+
+    all_last.push(last);
+    let label = format!("CF: {:.0}", coarsening_factor);
+    labels.push(label);
+
+    let components_title = format!("{}_components_CF-{:.0}", name, coarsening_factor);
+    plot_convergence_history(&components_title, &convergence_hist, step_size);
+    let title = format!("{}_asymptotic", name);
+    plot_asymptotic_convergence(&title, &all_last, &labels);
+    test_solve(name, mat.clone(), &b, &mut pc);
+}
+
+fn test_solve(
+    name: &str,
+    mat: Rc<CsrMatrix<f64>>,
+    b: &DVector<f64>,
+    pc: &mut Composite<Multilevel<Smoother<L1>>>,
+) {
+    let step_size = (pc.components().len() / 5) - 1;
+    let epsilon = 1e-12;
+
+    // components, initial_residual, residual_norms
+    let mut results: Vec<(usize, f64, Vec<f64>)> = Vec::new();
+
+    let dim = mat.nrows();
+
+    info!("Solving {}", name);
+
+    let timer = std::time::Instant::now();
+    let rand: DVector<f64> = random_vec(dim);
+
+    info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles");
+    while pc.components().len() > 1 {
+        let mut x: DVector<f64> = rand.clone();
+        let mut convergence_logger = ConvergenceLogger::new();
+        let (_converged_multi, _ratio_multi, _iters_multi) = pcg(
+            &mat,
+            &b,
+            &mut x,
+            //TODO max time?
+            2000,
+            epsilon,
+            pc,
+            Some(3),
+            Some(&mut convergence_logger),
+        );
+
+        let components = pc.components().len();
+        let (initial_residual, history) = convergence_logger.data();
+
+        //TODO add solve time
+        info!(
+            "{:15} {:15} {:15}",
+            components,
+            history.len(),
+            history.len() * 2 * components
+        );
+
+        results.push((components, initial_residual, history));
+        for _ in 0..step_size {
+            let _ = pc.components_mut().pop();
+        }
+
+        let title = format!("{}_tester_results", name);
+        plot_convergence_history_tester(&title, &results);
+    }
+}
+
+fn spe10() {
+    let prefix = "data/spe10/spe10_0";
+    let name = "spe10";
+    let coarsening_factor = 16.0;
+    let max_level = 30;
+    let target_convergence = 0.01;
+    let max_components = 30;
+    let step_size = 4;
+    let test_iters = None;
+    let project_first_only = false;
+
+    let mut all_last = Vec::new();
+    let mut labels = Vec::new();
+    let (mat, b) = {
+        let (mat, b, _coords, _projector) = load_system(prefix);
+        (mat, b)
+    };
+
+    info!("Starting {} CF-{:.0}", name, coarsening_factor);
+
+    let timer = std::time::Instant::now();
+    let (mut pc, convergence_hist, _near_nulls) = build_adaptive(
+        mat.clone(),
+        coarsening_factor,
+        max_level,
+        target_convergence,
+        max_components,
+        test_iters,
+        project_first_only,
+    );
+
+    let construction_time = timer.elapsed();
+    info!(
+        "Preconitioner built in: {}",
+        format_duration(&construction_time)
+    );
+
+    let last: Vec<f64> = convergence_hist
+        .iter()
+        .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
+        .collect();
+
+    all_last.push(last);
+    let label = format!("CF: {:.0}", coarsening_factor);
+    labels.push(label);
+
+    let components_title = format!("{}_components_CF-{:.0}", name, coarsening_factor);
+    plot_convergence_history(&components_title, &convergence_hist, step_size);
+
+    let title = format!("{}_asymptotic", name);
+    plot_asymptotic_convergence(&title, &all_last, &labels);
+    test_solve(name, mat.clone(), &b, &mut pc);
+}
+
+fn study_suitesparse(mat_path: &str, name: &str) {
+    let coarsening_factor = 16.0;
+    let max_level = 25;
+    let target_convergence = 0.01;
+    let max_components = 30;
+    let step_size = 4;
+    let test_iters = None;
+    let project_first_only = false;
+
+    let mut all_last = Vec::new();
+    let mut labels = Vec::new();
+    let mat = std::rc::Rc::new(CsrMatrix::from(&load_mm(mat_path).unwrap()));
+    let dim = mat.nrows();
+    let b: DVector<f64> = random_vec(dim);
+
+    info!("Starting {} CF-{:.0}", name, coarsening_factor);
+
+    let timer = std::time::Instant::now();
+    let (mut pc, convergence_hist, _near_nulls) = build_adaptive(
+        mat.clone(),
+        coarsening_factor,
+        max_level,
+        target_convergence,
+        max_components,
+        test_iters,
+        project_first_only,
+    );
+
+    let construction_time = timer.elapsed();
+    info!(
+        "Preconitioner built in: {}",
+        format_duration(&construction_time)
+    );
+
+    let last: Vec<f64> = convergence_hist
+        .iter()
+        .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
+        .collect();
+
+    all_last.push(last);
+    let label = format!("CF: {:.0}", coarsening_factor);
+    labels.push(label);
+
+    let components_title = format!("{}_components_CF-{:.0}", name, coarsening_factor);
+    plot_convergence_history(&components_title, &convergence_hist, step_size);
+
+    let title = format!("{}_asymptotic", name);
+    plot_asymptotic_convergence(&title, &all_last, &labels);
+
+    test_solve(name, mat.clone(), &b, &mut pc);
+}
+
+/*
 fn plot(data: &Vec<TestResult>) {
     use plotters::prelude::*;
     let spe10: Vec<TestResult> = data
@@ -260,3 +394,4 @@ fn plot(data: &Vec<TestResult>) {
             .unwrap();
     }
 }
+*/

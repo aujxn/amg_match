@@ -1,12 +1,14 @@
 //! General utilities that don't have a specific home. Might move some of these
 //! in with `parallel_ops` to create a `la` module.
 
+use indexmap::IndexSet;
 //use crate::parallel_ops::spmm_csr_dense;
 use nalgebra::DVector;
 use nalgebra_sparse::{
     coo::CooMatrix, csr::CsrMatrix, io::load_coo_from_matrix_market_file as load_mm,
 };
 use std::{
+    fmt::Display,
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
@@ -20,24 +22,60 @@ pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
     nalgebra::DVector::from_distribution(size, &distribution, &mut rng)
 }
 
-pub fn load_system(prefix: &str) -> (Rc<CsrMatrix<f64>>, DVector<f64>) {
+pub fn load_system(
+    prefix: &str,
+) -> (
+    Rc<CsrMatrix<f64>>,
+    DVector<f64>,
+    Vec<(f64, f64)>,
+    CsrMatrix<f64>,
+) {
     let matfile = format!("{}.mtx", prefix);
     let doffile = format!("{}.bdy", prefix);
     let rhsfile = format!("{}.rhs", prefix);
+    let coordsfile = format!("{}.coords", prefix);
 
     info!("Loading linear system...");
     let mat = CsrMatrix::from(&load_mm(matfile).unwrap());
 
     let b = load_vec(rhsfile);
     let dofs = load_boundary_dofs(doffile);
+    let mut coords = load_coords(coordsfile);
 
-    let (mut mat, mut b) = delete_boundary(dofs, mat, b);
+    let (mut mat, mut b, projector) = delete_boundary(dofs, mat, b, &mut coords);
     /*
     info!("Normalizing starting matrix...");
     let factor = normalize_mat(&mut mat);
     b /= factor;
     */
-    (std::rc::Rc::new(mat), b)
+    (std::rc::Rc::new(mat), b, coords, projector)
+}
+
+// TODO add coords file for spe10
+pub fn load_coords<P: AsRef<Path> + Display>(path: P) -> Vec<(f64, f64)> {
+    let file = File::open(&path);
+    match file {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let mut data = Vec::new();
+
+            for line in reader.lines() {
+                let line = line.unwrap();
+                let numbers: Vec<f64> = line
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+
+                data.push((numbers[0], numbers[1]));
+            }
+            data
+        }
+        Err(_) => {
+            error!("File not found: {}", path);
+            // TODO make this better?
+            Vec::new()
+        }
+    }
 }
 
 pub fn load_vec<P: AsRef<Path>>(path: P) -> DVector<f64> {
@@ -73,10 +111,23 @@ pub fn delete_boundary(
     dofs: Vec<usize>,
     mat: CsrMatrix<f64>,
     vec: DVector<f64>,
-) -> (CsrMatrix<f64>, DVector<f64>) {
+    coords: &mut Vec<(f64, f64)>,
+) -> (CsrMatrix<f64>, DVector<f64>, CsrMatrix<f64>) {
     let n = mat.nrows();
     let new_n = n - dofs.len();
     let mut p_mat = CooMatrix::new(n, new_n);
+
+    let bdy_dofs_idx: IndexSet<_> = dofs.iter().collect();
+    if coords.len() > 0 {
+        *coords = coords
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !bdy_dofs_idx.contains(i))
+            .map(|(_, coord)| coord)
+            .cloned()
+            .collect();
+        assert_eq!(new_n, coords.len());
+    }
 
     let mut old_id = 0;
     let mut new_id = 0;
@@ -103,7 +154,7 @@ pub fn delete_boundary(
     let p_t = p_mat.transpose();
     let new_mat = &p_t * &(mat * &p_mat);
     let new_vec = &p_t * &vec;
-    (new_mat, new_vec)
+    (new_mat, new_vec, p_mat)
 }
 
 pub fn norm(vec: &DVector<f64>, mat: &CsrMatrix<f64>) -> f64 {

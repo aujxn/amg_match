@@ -9,6 +9,8 @@ use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use crate::parallel_ops::spmm;
+
 //TODO bring back tests you deleted when preconditioner refactor happened
 //     also, stop copying the fine mat into the hierarchy
 
@@ -74,9 +76,10 @@ impl Hierarchy {
     /// Adds a level to the hierarchy.
     pub fn push(&mut self, partition_mat: CsrMatrix<f64>, near_null: &DVector<f64>) {
         let fine_mat: &CsrMatrix<f64>;
-        let mut partition_mat = partition_mat.clone();
         if self.matrices.is_empty() {
+            let mut partition_mat = partition_mat.clone();
             fine_mat = self.mat.borrow();
+            fix_bad_clusters(&mut partition_mat, near_null, fine_mat);
             partition_mat
                 .triplet_iter_mut()
                 .for_each(|(i, _, w)| *w *= near_null[i]);
@@ -109,6 +112,8 @@ impl Hierarchy {
         } else {
             fine_mat = self.matrices.last().unwrap().borrow();
         }
+
+        fix_bad_clusters(&mut partition_mat, near_null, fine_mat);
         partition_mat
             .triplet_iter_mut()
             .for_each(|(i, _, w)| *w *= near_null[i]);
@@ -219,7 +224,26 @@ pub fn modularity_matching(
 
         match find_pairs(&modularity_mat, 1) {
             None => {
-                info!("Levels: {}", hierarchy.levels());
+                assert_eq!(modularity_mat.nnz(), 0);
+                if let Some(partition_mat) = partition_mat {
+                    let cf = partition_mat.nrows() as f64 / partition_mat.ncols() as f64;
+                    hierarchy.push(partition_mat, near_null);
+                    trace!(
+                        "added level because no pairs were found...! num vertices coarse: {} nnz: {} CF: {:.2}",
+                        hierarchy.get_partitions().last().unwrap().ncols(),
+                        hierarchy.get_matrices().last().unwrap().nnz(),
+                        cf
+                    );
+                }
+                info!("Hierarchy constructed. Levels: {}", hierarchy.levels());
+                for (i, mat) in hierarchy.get_matrices().iter().enumerate() {
+                    info!(
+                        "Level: {}\t Size: {}\t NNZ: {}",
+                        i + 2,
+                        mat.nrows(),
+                        mat.nnz()
+                    );
+                }
                 return hierarchy;
             }
             Some(pairs) => {
@@ -235,7 +259,7 @@ pub fn modularity_matching(
                 let p_transpose = new_partition.transpose();
 
                 a_bar = &p_transpose * &(&a_bar * &new_partition);
-                row_sums = &p_transpose * &row_sums;
+                row_sums = spmm(&p_transpose, &row_sums);
                 modularity_mat = build_sparse_modularity_matrix(&a_bar, &row_sums, inverse_total);
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
@@ -245,12 +269,7 @@ pub fn modularity_matching(
                         hierarchy.get_partitions().last().unwrap().ncols(),
                         hierarchy.get_matrices().last().unwrap().nnz()
                     );
-                    /*
-                    if coarse_vertex_count < 1000.0 {
-                        info!("Levels: {}", hierarchy.levels());
-                        return hierarchy;
-                    }
-                    */
+
                     partition_mat = None;
                     starting_vertex_count = coarse_vertex_count;
                 }
@@ -270,7 +289,7 @@ fn build_weighted_matrix(
     let num_vertices = mat.nrows();
     let mut mat_bar = CooMatrix::new(num_vertices, num_vertices);
     for (i, j, val) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
-        let val_ij = val * -near_null[i] * near_null[j];
+        let val_ij = val * (-near_null[i]) * near_null[j];
         mat_bar.push(i, j, val_ij);
     }
     let mat_bar = CsrMatrix::from(&mat_bar);
@@ -296,6 +315,7 @@ fn build_weighted_matrix(
         }
     }
 
+    /*
     if counter > 0 {
         warn!(
             "{} of {} rows had negative rowsums. Average negative: {:.1e}",
@@ -304,6 +324,7 @@ fn build_weighted_matrix(
             total / (counter as f64)
         );
     }
+    */
 
     let total: f64 = row_sums.iter().sum();
     let inverse_total = 1.0 / total;
@@ -324,7 +345,7 @@ fn build_sparse_modularity_matrix(
 
     // NOTE: don't actually have to form this, can check if positive when looking
     // for pairs to merge which could save copying the entire matrix
-    for (i, j, weight_ij) in mat.triplet_iter() {
+    for (i, j, weight_ij) in mat.triplet_iter().filter(|(i, j, _)| i != j) {
         let modularity_ij = weight_ij - inverse_total * row_sums[i] * row_sums[j];
         if modularity_ij > 0.0 {
             modularity_mat.push(i, j, modularity_ij);
@@ -419,6 +440,119 @@ fn build_partition_from_pairs(pairs: &Vec<(usize, usize)>, vertex_count: usize) 
 
     for (aggregate, vertex) in not_merged_vertices.into_iter().enumerate() {
         partition_mat.push(vertex, aggregate + pairs_count, 1.0);
+    }
+
+    CsrMatrix::from(&partition_mat)
+}
+
+fn fix_bad_clusters(
+    partition_mat: &mut CsrMatrix<f64>,
+    near_null: &DVector<f64>,
+    mat: &CsrMatrix<f64>,
+) {
+    // TODO we have all this data already so we shouldn't do it again....
+    let (a_bar, row_sums, inverse_total) = build_weighted_matrix(mat, near_null);
+
+    let abs = near_null.abs();
+    let max = abs.max();
+    let threshold = 1.0e-8_f64;
+    let almost_zero: IndexSet<_> = abs
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| threshold * max > **x)
+        .map(|(i, _)| i)
+        .collect();
+
+    loop {
+        let p_transpose = partition_mat.transpose();
+        let mut new_a_bar = &p_transpose * &(&a_bar * &*partition_mat);
+        let new_row_sums = &p_transpose * &row_sums;
+
+        for (i, j, weight_ij) in new_a_bar.triplet_iter_mut() {
+            *weight_ij -= inverse_total * new_row_sums[i] * new_row_sums[j];
+        }
+
+        let p_transpose = partition_mat.transpose();
+        let clusters: Vec<IndexSet<_>> = p_transpose
+            .row_iter()
+            .map(|row| row.col_indices().iter().cloned().collect())
+            .collect();
+        let mut bad_clusters: IndexSet<usize> = clusters
+            .iter()
+            .enumerate()
+            .filter(|(_, cluster)| cluster.is_subset(&almost_zero))
+            .map(|(i, _)| i)
+            .collect();
+
+        if bad_clusters.is_empty() {
+            return;
+        }
+        trace!("{} bad clusters remain", bad_clusters.len());
+
+        let wants_to_merge: Vec<usize> = new_a_bar
+            .row_iter()
+            .enumerate()
+            // TODO could filter here on only bad
+            .map(|(i, row)| {
+                row.col_indices()
+                    .iter()
+                    .zip(row.values().iter())
+                    .filter(|(j, _)| i != **j)
+                    .map(|(j, weight)| (*j, *weight))
+                    .max_by(|(_, w1), (_, w2)| w2.partial_cmp(w1).unwrap())
+                    .unwrap()
+                    .0
+            })
+            .collect();
+
+        let mut groups: Vec<IndexSet<usize>> = vec![];
+
+        loop {
+            if let Some(row) = bad_clusters.pop() {
+                let wants_to_match = wants_to_merge[row];
+
+                let mut found_group = false;
+                for group in groups.iter_mut() {
+                    if group.contains(&wants_to_match) {
+                        group.insert(row);
+                        found_group = true;
+                        break;
+                    }
+                }
+                if found_group == false {
+                    groups.push(IndexSet::from([row, wants_to_match]));
+                    bad_clusters.remove(&wants_to_match);
+                }
+            } else {
+                break;
+            }
+        }
+        let new_partition = build_partition_from_groups(&groups, partition_mat.ncols());
+
+        *partition_mat = &*partition_mat * &new_partition;
+    }
+}
+
+fn build_partition_from_groups(
+    groups: &Vec<IndexSet<usize>>,
+    vertex_count: usize,
+) -> CsrMatrix<f64> {
+    let mut not_merged_vertices: IndexSet<usize> = (0..vertex_count).collect();
+    let groups_count = groups.len();
+    let reduction: usize = groups.iter().map(|group| group.len() - 1).sum();
+    let aggregate_count = vertex_count - reduction;
+    //NOTE probably can go straight to csr now
+    let mut partition_mat = CooMatrix::new(vertex_count, aggregate_count);
+
+    for (aggregate, group) in groups.into_iter().enumerate() {
+        for i in group {
+            partition_mat.push(*i, aggregate, 1.0);
+            assert!(not_merged_vertices.remove(i));
+        }
+    }
+
+    for (aggregate, vertex) in not_merged_vertices.into_iter().enumerate() {
+        partition_mat.push(vertex, aggregate + groups_count, 1.0);
     }
 
     CsrMatrix::from(&partition_mat)

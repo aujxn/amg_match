@@ -2,6 +2,7 @@
 //! of said trait.
 
 use crate::io::CompositeData;
+use crate::parallel_ops::spmm;
 //use crate::parallel_ops::{interpolate, spmm_csr_dense};
 use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, pcg, stationary, usolve};
@@ -14,9 +15,9 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 // Maybe PC trait should be generalized to LinearOperator...
 // Then could have 3 options for apply:
-// - one in place
-// - one returning vec
-// - one with input and output vec
+// - one in place (apply_mut)
+// - one returning vec (apply)
+// - one with input and output vec (apply_input)
 //
 // Really a PC is just a LO. Also solvers are LO. So having
 // a trait called PC is redundant.
@@ -137,6 +138,7 @@ impl Preconditioner for PcgL1 {
             self.steps,
             1e-12,
             &self.smoother,
+            None,
             None,
         );
         r.copy_from(&x);
@@ -274,18 +276,21 @@ impl<T: Preconditioner> Preconditioner for Multilevel<T> {
             for level in 0..levels {
                 ws.x_ks[level].copy_from(&ws.b_ks[level]);
                 self.forward_smoothers[level].apply(&mut ws.x_ks[level]);
-                ws.b_ks[level + 1] = &pt_ks[level]
-                    * &(&ws.b_ks[level] - &*self.hierarchy.get_mat(level) * &ws.x_ks[level]);
+                ws.b_ks[level + 1] = spmm(
+                    &pt_ks[level],
+                    &(&ws.b_ks[level] - spmm(&self.hierarchy.get_mat(level), &ws.x_ks[level])),
+                );
             }
 
             // Solve the coarsest problem almost exactly
-            let (converged, ratio, iters) = pcg(
+            let (converged, ratio, _iters) = pcg(
                 &self.hierarchy.get_mat(levels),
                 &ws.b_ks[levels],
                 &mut ws.x_ks[levels],
-                10000,
+                1000,
                 1.0e-10,
                 &self.forward_smoothers[levels],
+                None,
                 None,
             );
 
@@ -303,10 +308,11 @@ impl<T: Preconditioner> Preconditioner for Multilevel<T> {
                 */
 
             for level in (0..levels).rev() {
-                let interpolated = &p_ks[level] * &ws.x_ks[level + 1];
+                let interpolated = spmm(&p_ks[level], &ws.x_ks[level + 1]);
                 ws.x_ks[level] += interpolated;
 
-                let mut r = &ws.b_ks[level] - &(&*self.hierarchy.get_mat(level) * &ws.x_ks[level]);
+                let mut r =
+                    &ws.b_ks[level] - spmm(&*self.hierarchy.get_mat(level), &ws.x_ks[level]);
                 self.forward_smoothers[level].apply(&mut r);
                 ws.x_ks[level] += &r
             }
@@ -384,7 +390,7 @@ thread_local!(static COMPOSITE_WORKSPACE: RefCell<CompositeWorkspace> = RefCell:
 pub struct Composite<T> {
     mat: Rc<CsrMatrix<f64>>,
     components: Vec<T>,
-    application: CompositeType,
+    pub application: CompositeType,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -437,22 +443,30 @@ impl<T: Preconditioner> Composite<T> {
                 component.apply(&mut ws.y);
                 ws.x += &ws.y;
                 //*r -= self.mat * &y;
-                ws.r_work.copy_from(r);
-                spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
+                ws.r_work = &*r - &*self.mat * &ws.x;
+                //ws.r_work.copy_from(r);
+                //spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
             }
             for component in self.components.iter().rev() {
                 ws.y.copy_from(&ws.r_work);
                 component.apply(&mut ws.y);
                 ws.x += &ws.y;
                 //*r -= self.mat * &y;
-                ws.r_work.copy_from(r);
-                spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
+                ws.r_work = &*r - &*self.mat * &ws.x;
+                //ws.r_work.copy_from(r);
+                //spmm_csr_dense(1.0, &mut ws.r_work, -1.0, &self.mat, &ws.x);
             }
             r.copy_from(&ws.x);
         });
     }
 
     fn apply_additive(&self, r: &mut DVector<f64>) {
+        use rand::seq::SliceRandom;
+        self.components
+            .choose(&mut rand::thread_rng())
+            .unwrap()
+            .apply(r);
+        /*
         COMPOSITE_WORKSPACE.with(|ws| {
             let ws = &mut *ws.borrow_mut();
             for component in self.components().iter() {
@@ -461,9 +475,10 @@ impl<T: Preconditioner> Composite<T> {
                 ws.y += &ws.r_work;
             }
 
-            ws.y /= self.components().len() as f64;
+            //ws.y /= self.components().len() as f64;
             r.copy_from(&ws.y);
         });
+        */
     }
 
     /*

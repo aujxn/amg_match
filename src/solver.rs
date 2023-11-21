@@ -2,7 +2,7 @@
 //! system `Ax=b`.
 
 //use crate::parallel_ops::spmm_csr_dense;
-use crate::preconditioner::Preconditioner;
+use crate::{parallel_ops::spmm, preconditioner::Preconditioner};
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
 use std::time::Instant;
@@ -28,6 +28,51 @@ fn solve(
     fn (&self, r: &mut DVector<f64>);
 }
 */
+
+pub trait LogConvergence {
+    type ConvLogger;
+    fn callback(
+        &mut self,
+        iter: usize,
+        initial_squared_residual: f64,
+        squared_residual: f64,
+        iterate: &DVector<f64>,
+        residual: &DVector<f64>,
+    );
+}
+
+pub struct ConvergenceLogger {
+    pub initial_residual: f64,
+    pub residual_norm_hist: Vec<f64>,
+}
+
+impl ConvergenceLogger {
+    pub fn new() -> Self {
+        Self {
+            initial_residual: 0.0,
+            residual_norm_hist: Vec::new(),
+        }
+    }
+
+    pub fn data(self) -> (f64, Vec<f64>) {
+        (self.initial_residual, self.residual_norm_hist)
+    }
+}
+
+impl LogConvergence for ConvergenceLogger {
+    type ConvLogger = ConvergenceLogger;
+    fn callback(
+        &mut self,
+        _iter: usize,
+        initial_squared_residual: f64,
+        squared_residual: f64,
+        _iterate: &DVector<f64>,
+        _residual: &DVector<f64>,
+    ) {
+        self.initial_residual = initial_squared_residual.powf(0.5);
+        self.residual_norm_hist.push(squared_residual.powf(0.5));
+    }
+}
 
 /// Upper triangular solve for sparse matrices and dense rhs
 pub fn usolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
@@ -90,10 +135,9 @@ pub fn stationary(
     *x += &r;
     let mut ratio = 1.0;
 
-    for iter in 0..max_iter {
-        r = rhs - &(mat * &*x);
-        //r.copy_from(rhs);
-        //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+    for iter in 1..max_iter + 1 {
+        //r = rhs - &(mat * &*x);
+        r = rhs - spmm(mat, &*x);
         let r_norm = r.dot(&r);
         ratio = r_norm / r0_norm;
 
@@ -130,13 +174,13 @@ pub fn pcg(
     epsilon: f64,
     preconditioner: &dyn Preconditioner,
     log_convergence: Option<usize>,
+    mut convergence_logger: Option<&mut ConvergenceLogger>,
 ) -> (bool, f64, usize) {
-    let mut r = DVector::from(vec![0.0; rhs.nrows()]);
-    let mut g = r.clone();
+    //let mut r = DVector::from(vec![0.0; rhs.nrows()]);
+    //let mut g = r.clone();
 
-    let mut r = rhs - mat * &*x;
-    //r.copy_from(rhs);
-    //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
+    //let mut r = rhs - mat * &*x;
+    let mut r = rhs - spmm(mat, &*x);
     let d0 = r.dot(&r);
     if log_convergence.is_some() {
         trace!("initial residual: {d0:.3e}")
@@ -152,9 +196,9 @@ pub fn pcg(
 
     let mut last_log = Instant::now();
 
-    for i in 0..max_iter {
-        let mut g = mat * &p;
-        //spmm_csr_dense(0.0, &mut g, 1.0, mat, &p);
+    for i in 1..max_iter + 1 {
+        //let mut g = mat * &p;
+        let mut g = spmm(mat, &p);
         let alpha = d / p.dot(&g);
         if alpha < 0.0 {
             error!("alpha is negative: {alpha}");
@@ -179,7 +223,8 @@ pub fn pcg(
         if let Some(log_iter) = log_convergence {
             let now = Instant::now();
             if (now - last_log).as_secs() > log_iter as u64 {
-                r = rhs - mat * &*x;
+                //r = rhs - mat * &*x;
+                r = rhs - spmm(mat, &*x);
                 //r.copy_from(rhs);
                 //spmm_csr_dense(1.0, &mut r, -1.0, mat, &*x);
                 // manufacture a solution and measure true error norm
@@ -193,9 +238,13 @@ pub fn pcg(
                 // Test anisotropy matrices
                 d_report = r.dot(&r);
                 let ratio = (d_report / d0).sqrt();
-                trace!("squared norm iter {i}: {d_report:.3e} relative error: {ratio:.3e}");
+                trace!("squared norm iter {i}: {d_report:.3e} relative norm: {ratio:.3e}");
                 last_log = now;
             }
+        }
+
+        if let Some(ref mut logger) = convergence_logger {
+            logger.callback(i, d0, d_report, &*x, &r);
         }
 
         if d_report < epsilon * epsilon * d0 {
@@ -210,10 +259,8 @@ pub fn pcg(
         p += &r_bar;
     }
 
-    let r_final = rhs - mat * &*x;
-    //let mut r_final = DVector::from(vec![0.0; rhs.nrows()]);
-    //r_final.copy_from(rhs);
-    //spmm_csr_dense(1.0, &mut r_final, -1.0, mat, &*x);
+    //let r_final = rhs - mat * &*x;
+    let r_final = rhs - spmm(mat, &*x);
     let ratio = (r_final.dot(&r_final) / d0).sqrt();
     (false, ratio, max_iter)
 }

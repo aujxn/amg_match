@@ -2,6 +2,7 @@
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
+#include <mfem/linalg/operator.hpp>
 
 using namespace std;
 using namespace mfem;
@@ -46,19 +47,36 @@ int main(int argc, char *argv[]) {
   SparseMatrix A;
   Vector B, X;
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
+  A.EliminateBC(boundary_dofs, mfem::Operator::DIAG_ZERO);
+  A.Threshold(1e-12);
   cout << "Size of linear system: " << A.Height() << endl;
+  cout << "Linear system nnz: " << A.NumNonZeroElems() << endl;
 
-  std::ofstream matfile("data/spe10/spe10_0.mtx", std::ios::out);
+  std::ofstream matfile("../spe10/spe10_0.mtx", std::ios::out);
   A.PrintMM(matfile);
   matfile.close();
 
-  std::ofstream vecfile("data/spe10/spe10_0.rhs", std::ios::out);
+  std::ofstream vecfile("../spe10/spe10_0.rhs", std::ios::out);
   B.Print(vecfile);
   vecfile.close();
 
-  std::ofstream bdyfile("data/spe10/spe10_0.bdy", std::ios::out);
+  std::ofstream bdyfile("../spe10/spe10_0.bdy", std::ios::out);
   boundary_dofs.Save(bdyfile);
   bdyfile.close();
+
+  /*
+  DG_FECollection fec_dg(0, 3);
+  FiniteElementSpace fespace_dg(&mesh, &fec);
+  GridFunction coef_gf(&fespace_dg);
+  coef_gf.ProjectCoefficient(coef);
+
+  cout << "Saving coefficient..." << endl;
+  std::ofstream coeffile("../spe10/spe10_coef.vtk", std::ios::out);
+  coeffile.precision(14);
+  mesh.PrintVTK(coeffile, 1);
+  coef_gf.SaveVTK(coeffile, "permiability", 1);
+  */
+
   // 9. Solve the system using PCG with symmetric Gauss-Seidel preconditioner.
   // GSSmoother M(A);
   // PCG(A, M, B, X, 1, 200, 1e-12, 0.0);

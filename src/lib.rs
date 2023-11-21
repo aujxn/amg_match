@@ -34,7 +34,7 @@ extern crate log;
 
 pub mod adaptive;
 pub mod io;
-//pub mod parallel_ops;
+pub mod parallel_ops;
 pub mod partitioner;
 pub mod preconditioner;
 pub mod solver;

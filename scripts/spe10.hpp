@@ -23,7 +23,7 @@ struct SPE10Data {
 
   Array<double> coeff_data;
   SPE10Data() : coeff_data(3 * nx * ny * nz) {
-    std::ifstream permfile("data/spe10/spe_perm.dat");
+    std::ifstream permfile("../spe10/spe_perm.dat");
     if (!permfile.good()) {
       MFEM_ABORT("Cannot open data file spe_perm.dat.")
     }
