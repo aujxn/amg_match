@@ -1,3 +1,4 @@
+use crate::solver::SolveInfo;
 use nalgebra::DVector;
 use nalgebra_sparse::CsrMatrix;
 use plotters::prelude::*;
@@ -6,8 +7,8 @@ use serde::{Deserialize, Serialize};
 extern crate vtkio;
 
 use crate::partitioner::Hierarchy;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::Write;
 /*
 *
 * Visualizations:
@@ -123,7 +124,7 @@ pub fn plot_hierarchy(title: &str, hierarchy: &Hierarchy, coords: &Vec<(f64, f64
         ctx.configure_mesh().draw().unwrap();
 
         for (i, group) in data.iter().enumerate() {
-            let size = 0.3;
+            let size = 0.6;
             let cross_style = ShapeStyle {
                 color: Palette99::pick(i).mix(1.0),
                 filled: true,
@@ -336,21 +337,25 @@ pub fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: us
     trace!("Plotting filename: {}", filename);
 }
 
-pub fn plot_convergence_history_tester(title: &str, data: &Vec<(usize, f64, Vec<f64>)>) {
+pub fn plot_convergence_history_tester(title: &str, data: &Vec<(usize, SolveInfo)>) {
     let filename = format!("images/{}.png", title);
     let root = BitMapBackend::new(&filename, (900, 600)).into_drawing_area();
     root.fill(&WHITE).unwrap();
 
     let data: Vec<(usize, Vec<(f64, f64)>)> = data
         .iter()
-        .map(|(num_components, initial, inner)| {
+        .map(|(num_components, solve_info)| {
             (
                 *num_components,
-                inner
+                solve_info
+                    .relative_residual_norm_history
                     .iter()
                     .enumerate()
                     .map(|(i, residual)| {
-                        (((i + 1) * 2 * num_components) as f64, residual / initial)
+                        (
+                            ((i + 1) * ((2 * (num_components - 1)) + 1)) as f64,
+                            *residual,
+                        )
                     })
                     .collect(),
             )

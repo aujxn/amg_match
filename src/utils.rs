@@ -42,7 +42,7 @@ pub fn load_system(
     let dofs = load_boundary_dofs(doffile);
     let mut coords = load_coords(coordsfile);
 
-    let (mut mat, mut b, projector) = delete_boundary(dofs, mat, b, &mut coords);
+    let (mat, b, projector) = delete_boundary(dofs, mat, b, &mut coords);
     /*
     info!("Normalizing starting matrix...");
     let factor = normalize_mat(&mut mat);

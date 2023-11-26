@@ -1,3 +1,4 @@
+/*
 use amg_match::{
     adaptive::build_adaptive,
     solver::{pcg, stationary},
@@ -67,3 +68,5 @@ fn main() {
         }
     }
 }
+*/
+fn main() {}

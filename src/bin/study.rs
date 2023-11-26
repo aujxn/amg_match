@@ -1,13 +1,10 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use amg_match::{
-    adaptive::build_adaptive,
-    io::{
-        plot_asymptotic_convergence, plot_convergence_history, plot_convergence_history_tester,
-        plot_hierarchy, write_gf,
-    },
-    preconditioner::{Composite, CompositeType, Multilevel, Smoother, L1},
-    solver::{pcg, ConvergenceLogger},
+    adaptive::AdaptiveBuilder,
+    io::{plot_asymptotic_convergence, plot_convergence_history, plot_convergence_history_tester},
+    preconditioner::Composite,
+    solver::{IterativeMethod, IterativeSolver, LogInterval, SolveInfo},
     utils::{format_duration, load_system, random_vec},
 };
 use nalgebra::DVector;
@@ -46,21 +43,155 @@ struct Opt {
     plot: bool,
 }
 
-static SPE10: (&'static str, &'static str) = ("data/spe10/spe10_0", "spe10");
 */
 
 fn main() {
     pretty_env_logger::init();
-    anisotropy();
-    spe10();
+
+    let mfem_mats = [
+        //("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
+        ("data/spe10/spe10_0", "spe10"),
+    ];
+
+    for (prefix, name) in mfem_mats {
+        let first_name = format!("project_first/{}", name);
+        study_mfem(prefix, &first_name, true);
+
+        //let all_name = format!("project_all/{}", name);
+        //study_mfem(prefix, &all_name, false);
+    }
 
     let suitesparse_mats = ["G3_circuit", "Flan_1565"];
     for name in suitesparse_mats {
         let mat_path = format!("data/suitesparse/{}/{}.mtx", name, name);
-        study_suitesparse(&mat_path, name);
+
+        let first_name = format!("project_first/{}", name);
+        study_suitesparse(&mat_path, &first_name, true);
+
+        //let all_name = format!("project_all/{}", name);
+        //study_suitesparse(&mat_path, &all_name, false);
     }
 }
 
+fn test_solve(name: &str, mat: Rc<CsrMatrix<f64>>, b: &DVector<f64>, pc: &mut Composite) {
+    /*
+    let mut step_size = (pc.components().len() / 5) - 1;
+    if step_size == 0 {
+        step_size = 1
+    }
+    */
+    let step_size = 5;
+    let epsilon = 1e-6;
+
+    // components, initial_residual, residual_norms
+    let mut results_pcg: Vec<(usize, SolveInfo)> = Vec::new();
+    let mut results_stationary: Vec<(usize, SolveInfo)> = Vec::new();
+    let max_minutes = 30;
+
+    let dim = mat.nrows();
+
+    info!("Solving {}", name);
+
+    // TODO move timer inside solver?
+    let _timer = std::time::Instant::now();
+    let rand: DVector<f64> = random_vec(dim);
+
+    info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles");
+    while pc.components().len() > 0 {
+        let x = rand.clone();
+        let pcg = IterativeSolver::new(mat.clone(), Some(x))
+            .with_tolerance(epsilon)
+            .with_max_iter(1000)
+            .with_max_duration(Duration::from_secs(60 * max_minutes))
+            .with_solver(IterativeMethod::ConjugateGradient)
+            .with_preconditioner(Rc::new(pc.clone()))
+            .with_log_interval(LogInterval::Time(Duration::from_secs(30)));
+        let (_, solve_info_pcg) = pcg.solve(&b);
+
+        let x = rand.clone();
+        let stationary = IterativeSolver::new(mat.clone(), Some(x))
+            .with_tolerance(epsilon)
+            .with_max_iter(1000)
+            .with_max_duration(Duration::from_secs(60 * max_minutes))
+            .with_solver(IterativeMethod::StationaryIteration)
+            .with_preconditioner(Rc::new(pc.clone()))
+            .with_log_interval(LogInterval::Time(Duration::from_secs(30)));
+        let (_, solve_info_stationary) = stationary.solve(&b);
+
+        let components = pc.components().len();
+
+        //TODO add solve time
+        info!(
+            "{:15} {:15} {:15}",
+            components,
+            solve_info_pcg.iterations,
+            solve_info_pcg.iterations * ((2 * (components - 1)) + 1)
+        );
+
+        results_pcg.push((components, solve_info_pcg));
+        results_stationary.push((components, solve_info_stationary));
+        for _ in 0..step_size {
+            let _ = pc.components_mut().pop();
+        }
+
+        let title_pcg = format!("{}_tester_results_pcg", name);
+        let title_stationary = format!("{}_tester_results_stationary", name);
+        plot_convergence_history_tester(&title_pcg, &results_pcg);
+        plot_convergence_history_tester(&title_stationary, &results_stationary);
+    }
+}
+
+fn study_mfem(prefix: &str, name: &str, project_first: bool) {
+    let mut all_last = Vec::new();
+    let mut labels = Vec::new();
+    let step_size = 5;
+
+    let coarsening_factor = 4.0;
+    let (mat, b, _coords, _projector) = load_system(prefix);
+    let mut adaptive_builder = AdaptiveBuilder::new(mat.clone())
+        .with_max_components(45)
+        .with_coarsening_factor(coarsening_factor);
+
+    if project_first {
+        adaptive_builder = adaptive_builder.with_project_first_only();
+    }
+
+    info!("Starting {} CF-{:.0}", name, coarsening_factor);
+    let timer = std::time::Instant::now();
+    let (mut pc, convergence_hist, _near_nulls) = adaptive_builder.build();
+
+    /* Now that everything is Rc I can't get to the internal hierarchy anymore...
+    if name == "anisotropic-2d" {
+        let meshfile = "data/anisotropy/test.vtk";
+        let outfile = "../skillet/error.vtk";
+        write_gf(&near_nulls, &meshfile, &outfile, &projector);
+        plot_hierarchy("hierarchy", &pc.components()[0].hierarchy, &coords);
+    }
+    */
+
+    let construction_time = timer.elapsed();
+    info!(
+        "Preconitioner built in: {}",
+        format_duration(&construction_time)
+    );
+
+    let min_len: usize = convergence_hist.iter().map(|vec| vec.len()).min().unwrap() - 1;
+    let last: Vec<f64> = convergence_hist
+        .iter()
+        .map(|vec| vec[min_len].powf(1.0 / (min_len as f64)))
+        .collect();
+    all_last.push(last);
+    let label = format!("CF: {:.0}", coarsening_factor);
+    labels.push(label);
+
+    let components_title = format!("{}_components_CF-{:.0}", name, coarsening_factor);
+    plot_convergence_history(&components_title, &convergence_hist, step_size);
+    let title = format!("{}_asymptotic", name);
+    plot_asymptotic_convergence(&title, &all_last, &labels);
+    test_solve(name, mat.clone(), &b, &mut pc);
+}
+
+/*
 fn anisotropy() {
     let prefix = "data/anisotropy/anisotropy_2d";
     let name = "anisotropic-2d";
@@ -100,6 +231,7 @@ fn anisotropy() {
         format_duration(&construction_time)
     );
 
+    let max_len: usize = convergence_hist.iter().map(|vec| vec.len()).max().unwrap() - 1;
     let last: Vec<f64> = convergence_hist
         .iter()
         .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
@@ -115,63 +247,6 @@ fn anisotropy() {
     plot_asymptotic_convergence(&title, &all_last, &labels);
     test_solve(name, mat.clone(), &b, &mut pc);
 }
-
-fn test_solve(
-    name: &str,
-    mat: Rc<CsrMatrix<f64>>,
-    b: &DVector<f64>,
-    pc: &mut Composite<Multilevel<Smoother<L1>>>,
-) {
-    let step_size = (pc.components().len() / 5) - 1;
-    let epsilon = 1e-12;
-
-    // components, initial_residual, residual_norms
-    let mut results: Vec<(usize, f64, Vec<f64>)> = Vec::new();
-
-    let dim = mat.nrows();
-
-    info!("Solving {}", name);
-
-    let timer = std::time::Instant::now();
-    let rand: DVector<f64> = random_vec(dim);
-
-    info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles");
-    while pc.components().len() > 1 {
-        let mut x: DVector<f64> = rand.clone();
-        let mut convergence_logger = ConvergenceLogger::new();
-        let (_converged_multi, _ratio_multi, _iters_multi) = pcg(
-            &mat,
-            &b,
-            &mut x,
-            //TODO max time?
-            2000,
-            epsilon,
-            pc,
-            Some(3),
-            Some(&mut convergence_logger),
-        );
-
-        let components = pc.components().len();
-        let (initial_residual, history) = convergence_logger.data();
-
-        //TODO add solve time
-        info!(
-            "{:15} {:15} {:15}",
-            components,
-            history.len(),
-            history.len() * 2 * components
-        );
-
-        results.push((components, initial_residual, history));
-        for _ in 0..step_size {
-            let _ = pc.components_mut().pop();
-        }
-
-        let title = format!("{}_tester_results", name);
-        plot_convergence_history_tester(&title, &results);
-    }
-}
-
 fn spe10() {
     let prefix = "data/spe10/spe10_0";
     let name = "spe10";
@@ -209,9 +284,10 @@ fn spe10() {
         format_duration(&construction_time)
     );
 
+    let max_len: usize = convergence_hist.iter().map(|vec| vec.len()).max().unwrap() - 1;
     let last: Vec<f64> = convergence_hist
         .iter()
-        .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
+        .map(|vec| vec[max_len].powf(1.0 / (max_len as f64)))
         .collect();
 
     all_last.push(last);
@@ -225,34 +301,30 @@ fn spe10() {
     plot_asymptotic_convergence(&title, &all_last, &labels);
     test_solve(name, mat.clone(), &b, &mut pc);
 }
+*/
 
-fn study_suitesparse(mat_path: &str, name: &str) {
-    let coarsening_factor = 16.0;
-    let max_level = 25;
-    let target_convergence = 0.01;
-    let max_components = 30;
-    let step_size = 4;
-    let test_iters = None;
-    let project_first_only = false;
+fn study_suitesparse(mat_path: &str, name: &str, project_first: bool) {
+    let step_size = 5;
+    let coarsening_factor = 4.0;
 
-    let mut all_last = Vec::new();
-    let mut labels = Vec::new();
     let mat = std::rc::Rc::new(CsrMatrix::from(&load_mm(mat_path).unwrap()));
     let dim = mat.nrows();
     let b: DVector<f64> = random_vec(dim);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
 
+    let mut adaptive_builder = AdaptiveBuilder::new(mat.clone())
+        .with_max_components(45)
+        .with_coarsening_factor(coarsening_factor);
+
+    if project_first {
+        adaptive_builder = adaptive_builder.with_project_first_only();
+    }
+
+    info!("Starting {} CF-{:.0}", name, coarsening_factor);
+    // maybe should move time inside builder
     let timer = std::time::Instant::now();
-    let (mut pc, convergence_hist, _near_nulls) = build_adaptive(
-        mat.clone(),
-        coarsening_factor,
-        max_level,
-        target_convergence,
-        max_components,
-        test_iters,
-        project_first_only,
-    );
+    let (mut pc, convergence_hist, _near_nulls) = adaptive_builder.build();
 
     let construction_time = timer.elapsed();
     info!(
@@ -265,9 +337,10 @@ fn study_suitesparse(mat_path: &str, name: &str) {
         .map(|vec| (*vec.last().unwrap()).powf(1.0 / (vec.len() as f64)))
         .collect();
 
-    all_last.push(last);
     let label = format!("CF: {:.0}", coarsening_factor);
-    labels.push(label);
+
+    let all_last = vec![last];
+    let labels = vec![label];
 
     let components_title = format!("{}_components_CF-{:.0}", name, coarsening_factor);
     plot_convergence_history(&components_title, &convergence_hist, step_size);

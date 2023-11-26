@@ -84,7 +84,7 @@ impl Hierarchy {
                 .triplet_iter_mut()
                 .for_each(|(i, _, w)| *w *= near_null[i]);
 
-            // TODO test product of all Ps with coarse ones to get w
+            // test product of all Ps with coarse ones to get w
             let ones = DVector::from(vec![1.0; partition_mat.ncols()]);
             let maybe_w = &partition_mat * &ones;
             for (w_i, maybe_w_i) in near_null.iter().zip(maybe_w.iter()) {
@@ -130,6 +130,11 @@ impl Hierarchy {
         &self.partition_matrices[level]
     }
 
+    /// Get a single P^T matrix from the hierarchy.
+    pub fn get_interpolation(&self, level: usize) -> &CsrMatrix<f64> {
+        &self.interpolation_matrices[level]
+    }
+
     /// Get a reference to the matrices Vec.
     pub fn get_matrices(&self) -> &[Rc<CsrMatrix<f64>>] {
         &self.matrices
@@ -140,7 +145,7 @@ impl Hierarchy {
         &self.partition_matrices
     }
 
-    /// Get a reference to the P matrices Vec.
+    /// Get a reference to the P^T matrices Vec.
     pub fn get_interpolations(&self) -> &Vec<CsrMatrix<f64>> {
         &self.interpolation_matrices
     }
@@ -225,6 +230,7 @@ pub fn modularity_matching(
         match find_pairs(&modularity_mat, 1) {
             None => {
                 assert_eq!(modularity_mat.nnz(), 0);
+                /*
                 if let Some(partition_mat) = partition_mat {
                     let cf = partition_mat.nrows() as f64 / partition_mat.ncols() as f64;
                     hierarchy.push(partition_mat, near_null);
@@ -235,6 +241,7 @@ pub fn modularity_matching(
                         cf
                     );
                 }
+                */
                 info!("Hierarchy constructed. Levels: {}", hierarchy.levels());
                 for (i, mat) in hierarchy.get_matrices().iter().enumerate() {
                     info!(
@@ -297,12 +304,12 @@ fn build_weighted_matrix(
 
     let mut row_sums: DVector<f64> = &mat_bar * ones;
 
-    let mut counter = 0;
-    let mut total = 0.0;
+    //let mut counter = 0;
+    //let mut total = 0.0;
     // TODO maybe just count how many rowsums are negative and by how much
     for sum in row_sums.iter_mut() {
         if *sum < 0.0 {
-            counter += 1;
+            //counter += 1;
             /*
             warn!(
                 "sum was {sum} for row {i}. a_ii * w^2: {} w_i: {}. Setting to 0.0",
@@ -310,7 +317,7 @@ fn build_weighted_matrix(
                 near_null[i]
             );
             */
-            total += *sum;
+            //total += *sum;
             *sum = 0.0
         }
     }
