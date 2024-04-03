@@ -2,7 +2,7 @@ use std::{fs::File, io::Write, rc::Rc, time::Duration};
 
 use amg_match::{
     adaptive::AdaptiveBuilder,
-    preconditioner::Composite,
+    preconditioner::{Application, Composite},
     solver::{Iterative, IterativeMethod, LogInterval, SolveInfo},
     utils::{format_duration, load_system, random_vec},
 };
@@ -118,7 +118,7 @@ fn study_suitesparse(mat_path: &str, name: &str) {
 fn study(mat: Rc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
     info!("nrows: {} nnz: {}", mat.nrows(), mat.nnz());
     let max_components = 30;
-    let coarsening_factor = 16.0;
+    let coarsening_factor = 32.0;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
@@ -128,7 +128,10 @@ fn study(mat: Rc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
     let timer = std::time::Instant::now();
     let (pc, convergence_hist, _near_nulls) = adaptive_builder.build();
-    let step_size = pc.components().len() / 6;
+    let mut step_size = pc.components().len() / 6;
+    if step_size == 0 {
+        step_size += 1;
+    }
 
     let construction_time = timer.elapsed();
     info!(
@@ -165,60 +168,80 @@ fn test_solve(
     step_size: usize,
 ) {
     let epsilon = 1e-12;
-    let mut results_pcg = Vec::new();
-    let mut results_stationary = Vec::new();
+    let num_tests = 3;
+    let mut results = vec![Vec::new(); num_tests];
+    let methods = [
+        IterativeMethod::StationaryIteration,
+        IterativeMethod::StationaryIteration,
+        IterativeMethod::ConjugateGradient,
+    ];
+    assert_eq!(num_tests, methods.len());
     let max_minutes = 15;
 
     let dim = mat.nrows();
-
     info!("Solving {}", name);
 
     let guess: DVector<f64> = random_vec(dim);
 
-    let log_result = |solver_type: &str, solve_results: &Vec<SolveResults>| {
-        info!("{} Results", solver_type);
+    let log_result = |solver_type: IterativeMethod,
+                      solve_results: &Vec<SolveResults>,
+                      application: Application| {
+        info!("{:?} Results", solver_type);
         info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles");
         for result in solve_results.iter() {
             info!(
                 "{:15} {:15} {:15}",
                 result.num_components,
                 result.solve_info.iterations,
-                result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1)
+                match application {
+                    Application::Multiplicative =>
+                        result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1),
+                    Application::Random => result.solve_info.iterations,
+                }
             );
         }
     };
 
-    let base_solver = |mat: Rc<CsrMatrix<f64>>, pc: Composite, guess: DVector<f64>| {
-        Iterative::new(mat.clone(), Some(guess))
-            .with_tolerance(epsilon)
-            .with_max_iter(10000)
-            .with_max_duration(Duration::from_secs(60 * max_minutes))
-            .with_solver(IterativeMethod::ConjugateGradient)
-            .with_preconditioner(Rc::new(pc))
-            .with_log_interval(LogInterval::Time(Duration::from_secs(30)))
+    let solve = |method: IterativeMethod,
+                 results: &mut Vec<SolveResults>,
+                 application: Application,
+                 pc: &mut Composite| {
+        let base_solver = |mat: Rc<CsrMatrix<f64>>, pc: Composite, guess: DVector<f64>| {
+            Iterative::new(mat.clone(), Some(guess))
+                .with_tolerance(epsilon)
+                .with_max_iter(10000)
+                .with_max_duration(Duration::from_secs(60 * max_minutes))
+                .with_solver(IterativeMethod::ConjugateGradient)
+                .with_preconditioner(Rc::new(pc))
+                .with_log_interval(LogInterval::Time(Duration::from_secs(30)))
+        };
+        let num_components = pc.components().len();
+        pc.application = application;
+        let max_iter = match application {
+            Application::Multiplicative => 2000 / ((2 * (num_components - 1)) + 1),
+            Application::Random => 2000,
+        };
+        let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
+            .with_solver(method)
+            .with_max_iter(max_iter);
+        let (_, solve_info) = solver.solve(&b);
+        results.push(SolveResults {
+            num_components,
+            solve_info,
+        });
+        log_result(method, &results, application);
+        let title = format!("{}_{:?}_{:?}", name, method, &application);
+        plot_test_solve(&title, &results, application);
     };
 
     while pc.components().len() > 0 {
-        let num_components = pc.components().len();
-        let pcg = base_solver(mat.clone(), pc.clone(), guess.clone())
-            .with_solver(IterativeMethod::ConjugateGradient);
-        let (_, solve_info) = pcg.solve(&b);
-        results_pcg.push(SolveResults {
-            num_components,
-            solve_info,
-        });
-        log_result("PCG", &results_pcg);
-        let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
-
-        let stationary = base_solver(mat.clone(), pc.clone(), guess.clone())
-            .with_solver(IterativeMethod::StationaryIteration)
-            .with_max_iter(max_iter);
-        let (_, solve_info) = stationary.solve(&b);
-        results_stationary.push(SolveResults {
-            num_components,
-            solve_info,
-        });
-        log_result("Stationary", &results_stationary);
+        // todo do additive?
+        let applications = [Application::Multiplicative, Application::Random];
+        for (method, mut result) in methods.iter().zip(results.iter_mut()) {
+            for application in applications.iter() {
+                solve(*method, &mut result, *application, &mut pc);
+            }
+        }
 
         if pc.components().len() > 1 {
             for _ in 0..step_size {
@@ -230,11 +253,6 @@ fn test_solve(
         } else {
             let _ = pc.components_mut().pop();
         }
-
-        let title_pcg = format!("{}_pcg", name);
-        let title_stationary = format!("{}_stationary", name);
-        plot_test_solve(&title_pcg, &results_pcg);
-        plot_test_solve(&title_stationary, &results_stationary);
     }
 }
 
@@ -245,7 +263,7 @@ fn save_plot_raw_data(title: &str, serialized: String) {
     file.write_all(&serialized.as_bytes()).unwrap();
 }
 
-fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
+fn plot_test_solve(title: &str, data: &Vec<SolveResults>, application: Application) {
     let serialized = serde_json::to_string(&data).unwrap();
     save_plot_raw_data(title, serialized);
 
@@ -263,11 +281,12 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
                     .relative_residual_norm_history
                     .iter()
                     .enumerate()
-                    .map(|(i, residual)| {
-                        (
+                    .map(|(i, residual)| match application {
+                        Application::Multiplicative => (
                             ((i + 1) * ((2 * (solve_result.num_components - 1)) + 1)) as f64,
                             *residual,
-                        )
+                        ),
+                        Application::Random => ((i + 1) as f64, *residual),
                     })
                     //.filter(|(cycles, _)| cycles < 2000.0)
                     .collect(),
@@ -309,7 +328,7 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
         .light_line_style(&WHITE.mix(0.3))
         .bold_line_style(&BLACK.mix(0.3))
         .y_desc("Relative Residual")
-        .x_desc("W-Cycles")
+        .x_desc("V-Cycles")
         .axis_desc_style(("sans-serif", 35))
         .label_style(("sans-serif", 30))
         .y_labels(8)

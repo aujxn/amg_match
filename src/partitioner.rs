@@ -2,6 +2,7 @@
 //! This could potentially be moved to a seperate crate, since I have copied
 //! this code into other projects as well.
 
+use core::fmt;
 use indexmap::IndexSet;
 use nalgebra::base::DVector;
 use nalgebra_sparse::{coo::CooMatrix, csr::CsrMatrix};
@@ -22,6 +23,30 @@ pub struct Hierarchy {
     partition_matrices: Vec<CsrMatrix<f64>>,
     interpolation_matrices: Vec<CsrMatrix<f64>>,
     pub matrices: Vec<Rc<CsrMatrix<f64>>>,
+}
+
+impl fmt::Debug for Hierarchy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sizes: Vec<usize> = self.partition_matrices.iter().map(|p| p.nrows()).collect();
+        let fine_nnz = self.mat.nnz();
+        let mut nnzs: Vec<usize> = vec![fine_nnz];
+        nnzs.extend(self.matrices.iter().map(|p| p.nrows()));
+        let total_nnz_coarse = nnzs.iter().sum::<usize>() as f32;
+        let complexity = total_nnz_coarse / (fine_nnz as f32);
+        let coarsening_factors: Vec<f32> = sizes
+            .iter()
+            .zip(sizes.iter().skip(1))
+            .map(|(a, b)| (*a as f32) / (*b as f32))
+            .collect();
+
+        f.debug_struct("Hierarchy")
+            .field("levels", &self.levels())
+            .field("sizes", &sizes)
+            .field("coarsening_factors", &coarsening_factors)
+            .field("nnz", &nnzs)
+            .field("total_nnz_and_complexity", &(total_nnz_coarse, complexity))
+            .finish()
+    }
 }
 
 impl Hierarchy {
@@ -142,6 +167,8 @@ impl Hierarchy {
         let n = fine_mat.nrows();
         let p_transpose = partition_mat.transpose();
         let mut strong_neighbors: Vec<IndexSet<usize>> = vec![IndexSet::new(); n];
+        //let n_aggs = p_transpose.nrows();
+        //let mut coarse_vertices_by_agg: Vec<IndexSet<usize>> = vec![IndexSet::new(); n_aggs];
         let mut delta_i = vec![0.0; n];
         let mut all_coarse = IndexSet::new();
 
@@ -253,46 +280,43 @@ impl Hierarchy {
                 strong_neighbors: &Vec<IndexSet<usize>>,
                 fine_mat: &CsrMatrix<f64>,
                 near_null: &DVector<f64>,
-            ) -> bool {
+            ) {
                 for i in agg_vertices.iter() {
                     if coarse_vertices.contains(i) {
                         continue;
                     }
 
                     let si = &strong_neighbors[*i];
-                    let aci: IndexSet<usize> = coarse_vertices.intersection(si).cloned().collect();
-                    let si_minus_aci: IndexSet<usize> = si.difference(&aci).cloned().collect();
+                    let mut aci: IndexSet<usize> =
+                        coarse_vertices.intersection(si).cloned().collect();
+                    let mut si_minus_aci: IndexSet<usize> = si.difference(&aci).cloned().collect();
 
-                    for j in si_minus_aci {
-                        let mut sum = 0.0;
-                        for jc in aci.iter() {
-                            sum +=
-                                (fine_mat.index_entry(j, *jc).into_value() * near_null[*jc]).abs();
-                        }
-                        if sum == 0.0 {
-                            coarse_vertices.insert(j);
-                            return false;
-                        }
+                    loop {
+                        let j = match si_minus_aci.iter().cloned().find(|j| {
+                            let mut sum = 0.0;
+                            for jc in aci.iter() {
+                                sum += (fine_mat.index_entry(*j, *jc).into_value()
+                                    * near_null[*jc])
+                                    .abs();
+                            }
+                            sum == 0.0
+                        }) {
+                            Some(j) => j,
+                            None => break,
+                        };
+                        coarse_vertices.insert(j);
+                        aci.insert(j);
+                        si_minus_aci.swap_remove(&j);
                     }
                 }
-                true
             }
-            let mut warn_counter = 0;
-            loop {
-                if fix_si(
-                    &agg_vertices,
-                    &mut coarse_vertices,
-                    &strong_neighbors,
-                    fine_mat,
-                    near_null,
-                ) {
-                    break;
-                }
-                warn_counter += 1;
-            }
-            if warn_counter > 0 {
-                //warn!("had to correct {} divide by 0's", warn_counter);
-            }
+            fix_si(
+                &agg_vertices,
+                &mut coarse_vertices,
+                &strong_neighbors,
+                fine_mat,
+                near_null,
+            );
 
             for new_coarse in coarse_vertices {
                 all_coarse.insert(new_coarse);
@@ -337,11 +361,6 @@ impl Hierarchy {
                             (fine_mat.index_entry(*j, *jc).into_value() * near_null[*jc]).abs();
                     }
                     assert!(denom != 0.0);
-                    /*
-                    if denom == 0.0 {
-                        error!("divide by 0!");
-                    }
-                    */
                     value += numerator / denom;
                 }
                 value /= -delta_i[i];
@@ -357,10 +376,13 @@ impl Hierarchy {
 
         let err = reconstruction - near_null;
         let err_norm = err.norm();
-        info!(
-            "Near-null reconstruction relative error norm: {:.2e}",
-            err_norm / near_null.norm()
-        );
+        let rel_err = err_norm / near_null.norm();
+        if rel_err > 1e-4 {
+            warn!(
+                "Near-null reconstruction relative error norm: {:.2e}",
+                rel_err
+            );
+        }
 
         let p_transpose = interpolation.transpose();
         let coarse_mat = &p_transpose * &(fine_mat * &interpolation);

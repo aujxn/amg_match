@@ -177,8 +177,8 @@ impl AdaptiveBuilder {
                             .clone();
 
                         let dim = current_a.nrows();
-                        //let start = hierarchy.get_interpolations().last().unwrap() * near_null;
-                        let start = DVector::from(vec![1.0; dim]);
+                        let start = hierarchy.get_interpolations().last().unwrap() * near_null;
+                        //let start = DVector::from(vec![1.0; dim]);
                         let l1 = Rc::new(L1::new(&current_a));
                         let zeros = DVector::from(vec![0.0; dim]);
 
@@ -195,6 +195,7 @@ impl AdaptiveBuilder {
                 }
                 hierarchy
             };
+            info!("Hierarchy info: {:?}", hierarchy);
 
             let ml1 = Rc::new(Multilevel::new(
                 hierarchy,

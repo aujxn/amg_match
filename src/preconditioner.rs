@@ -6,6 +6,8 @@ use crate::partitioner::Hierarchy;
 use crate::solver::{lsolve, usolve, Direct, Iterative, IterativeMethod, Solver};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
+use rand::seq::SliceRandom;
+use std::process::Output;
 use std::rc::Rc;
 
 pub trait LinearOperator {
@@ -360,22 +362,38 @@ impl Multilevel {
 pub struct Composite {
     mat: Rc<CsrMatrix<f64>>,
     components: Vec<Rc<Multilevel>>,
+    pub application: Application,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Application {
+    Multiplicative,
+    Random,
 }
 
 impl LinearOperator for Composite {
     fn apply_mut(&self, vec: &mut DVector<f64>) {
-        self.apply_multiplicative(vec);
+        match self.application {
+            Application::Multiplicative => self.apply_multiplicative(vec),
+            Application::Random => self.apply_rand(vec),
+        }
     }
 
     fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
         let mut vec = vec.clone();
-        self.apply_multiplicative(&mut vec);
+        match self.application {
+            Application::Multiplicative => self.apply_multiplicative(&mut vec),
+            Application::Random => self.apply_rand(&mut vec),
+        }
         vec
     }
 
     fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
         out_vec.copy_from(in_vec);
-        self.apply_multiplicative(out_vec);
+        match self.application {
+            Application::Multiplicative => self.apply_multiplicative(out_vec),
+            Application::Random => self.apply_rand(out_vec),
+        }
     }
 }
 
@@ -384,11 +402,16 @@ impl Composite {
         Self {
             mat,
             components: Vec::new(),
+            application: Application::Multiplicative,
         }
     }
 
     pub fn new_with_components(mat: Rc<CsrMatrix<f64>>, components: Vec<Rc<Multilevel>>) -> Self {
-        Self { mat, components }
+        Self {
+            mat,
+            components,
+            application: Application::Multiplicative,
+        }
     }
 
     fn apply_multiplicative(&self, v: &mut DVector<f64>) {
@@ -408,6 +431,13 @@ impl Composite {
             }
         }
         v.copy_from(&x);
+    }
+
+    fn apply_rand(&self, v: &mut DVector<f64>) {
+        self.components
+            .choose(&mut rand::thread_rng())
+            .unwrap()
+            .apply_mut(v)
     }
 
     pub fn push(&mut self, component: Rc<Multilevel>) {

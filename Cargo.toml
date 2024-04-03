@@ -2,6 +2,10 @@
 name = "amg_match"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Research iterative solver utilities"
+repository = "https://github.com/aujxn/amg_match"
+readme = "README.md"
 
 [dependencies]
 nalgebra = { version = "0", features = ["rand"] }
