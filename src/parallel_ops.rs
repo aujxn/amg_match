@@ -21,13 +21,3 @@ pub fn spmm(a: &CsrMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
         });
     c
 }
-
-/*
-pub fn interpolate(fine_vec: &mut DVector<f64>, coarse_vec: &DVector<f64>, p: &CsrMatrix<f64>) {
-    fine_vec
-        .as_mut_slice()
-        .par_iter_mut()
-        .zip(p.values().par_iter().zip(p.col_indices().par_iter()))
-        .for_each(|(fine, (p_val, coarse_i))| *fine = p_val * coarse_vec[*coarse_i])
-}
-*/

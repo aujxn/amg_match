@@ -3,10 +3,15 @@
 \usepackage{amsmath,amssymb}
 \usepackage{multirow}
 %\usepackage{mathtools}
-\usepackage[ruled]{algorithm2e}
-
+\usepackage[linesnumbered,ruled,vlined]{algorithm2e}
 
 \usetheme{Madrid}
+
+\setbeamersize
+{
+    text margin left=0.75cm,
+    text margin right=0.75cm
+}
 
 \newcommand*\oldmacro{}
 %\newcommand{\longsearrow}{\lower 1.4ex\hbox{\begin{picture}(18,18)(0,0)
@@ -32,7 +37,7 @@
 \newcommand{\R}{{\mathcal R}}
 \newcommand{\M}{{\mathcal M}}
 \newcommand{\Range}{{\mathcal Range}}
-\renewcommand{\Ref}[1]{\mbox{(\ref{#1})}}
+%\renewcommand{\Ref}[1]{\mbox{(\ref{#1})}}
 %\DeclarePairedDelimiter\ceil{\lceil}{\rceil}
 
 \newcommand{\e}{\varepsilon}
@@ -44,15 +49,20 @@
 \newcommand{\QQ}{\mathbb{Q}}
 
 \let\oldmacro\insertshorttitle% save previous definition
-\renewcommand*\insertshorttitle{ILU0 / MDF for DG}
+\renewcommand*\insertshorttitle{Adaptive AMG}
 \usebeamertemplate{mytheme}
 
 \renewcommand{\div}{\operatorname{div}}
 \newcommand{\grad}{\operatorname{grad}}
 
-\title{Adaptive Algebraic Multigrig Preconditionering}
+\DeclareMathOperator{\CreateSolver}{CreateSolver}
+\DeclareMathOperator{\TestHomogeneous}{TestHomogeneous}
+\DeclareMathOperator{\AdaptiveSolver}{AdaptiveMLSolver}
+\DeclareMathOperator{\SymmetricComposition}{SymmetricComposition}
 
-\subtitle{with Graph Modularity Matching}
+\title{Adaptive Composite AMG Solvers}
+
+\subtitle{with Graph Modularity Coarsening}
 
 \author[Nelson/Vassilevski]{Austen Nelson \inst{1}  and Panayot S. Vassilevski\inst{1}}
 
@@ -66,8 +76,8 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
 
 \vspace*{0.5cm}
 
-\date[06-15-2023]
-{{\color{blue} MTH 510 --- Multilevel Methods}\\ June 15, 2023}
+\date[\today]
+{{\color{blue} MTH 501 Research Project}\\ \today}
 \vspace*{-0.4cm}
 \titlegraphic{\includegraphics[width=3.5cm,height=0.75cm]{PSU_logo.png}}
 
@@ -87,10 +97,11 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
   Want to solve the linear matrix system:
   $$A \vc x = b$$
 
-  Where $A$ is symmetric positive definite.
+  Where $A$ is symmetric positive definite (s.p.d.).
 
-  A common source of problems like this is from numerical
-  discretizations of elliptic partial differential equations:
+  \vspace{1em}
+
+  Often resulting from discretizations of elliptic PDEs:
 
   $$
   \begin{cases}
@@ -98,10 +109,216 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
     u = 0 &, \text{ on } \partial \Omega
   \end{cases}
   $$
+  or with a diffusion coefficient
+  $$
+  \begin{cases}
+    -\nabla \cdot (\beta \nabla u) = f &,\text{ in } \Omega\\ 
+    u=0 &,\text{ on } \partial \Omega
+  \end{cases}
+  $$
 
 \end{frame}
 
-\subsection{Algebraic vs Geometric Multigrid}
+\subsection{Stationary Iteration Theory}
+\begin{frame}
+  \frametitle{Stationary Iteration Algorithm}
+  \DontPrintSemicolon
+  \KwData{Matrix \(A\), method matrix \(B\), vector \(b\), initial guess \(x\), convergence tolerance \(\varepsilon\), maximum iterations \(max\_iter\)}
+  \KwResult{Approximate solution to \(Ax = b\)}
+  \BlankLine
+  $r \gets b - Ax$ \tcp*{Initial residual}
+  $r_{norm} \gets \|r\|$\\
+  $i \gets 0$\\
+  \While{\(i < max\_iter\)}{
+    \(r \gets b - Ax\) \tcp*{Current residual}
+    \If{\(\|r\| / r_{norm} < \varepsilon\)}{
+      \KwRet \(x\) \tcp*{Convergence achieved}
+    }
+    \(x \gets x + B^{-1}r\) \tcp*{Update step}
+    \(i \gets i + 1\)\\
+    }
+    \KwRet \(x\) \tcp*{Max iterations reached}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Stationary Iteration Analysis}
+  \begin{align*}
+    x_{i+1} &= x_i + B^{-1} r_i\\
+    &= x_i + B^{-1} (b - Ax_i)\\
+    &= B^{-1} b + (I - B^{-1}A) x_i
+  \end{align*}
+  We call $E := I - B^{-1}A$ the iteration matrix. 
+
+  \vspace{1em}
+
+  This functional iteration has a closed form of:
+  $$x_i = E^i x_0 + C(b)$$
+
+\end{frame}
+
+\begin{frame}
+  \frametitle{Stationary Iteration Analysis}
+  $$x_{i+1} = E x_i + B^{-1}b$$
+  The solution $x$ is a fixed point of this functional iteration
+  $$x = Ex + B^{-1}b$$
+
+  Subtracting these two equations gives that,
+  $$e_{i+1} = E e_i$$
+
+  hence,
+  $$e_m = E^m e_0$$
+
+  Choosing a vector norm and its induced matrix norm,
+  $$\|e_m\| \leq \|E\|^m \|e_0\|$$
+\end{frame}
+
+\begin{frame}
+  \frametitle{Stationary Iteration Analysis}
+  $$\|e_m\| \leq \|E\|^m \|e_0\|$$
+  Choosing the $L^2$ vector norm gives the spectral radius of $E$,
+  $$\|E\|_2 = \max |\lambda(E)|$$
+  which clearly must be less than $1$ for the method to be convergent.
+  In the context of iterative methods this is called the \textbf{Asymptotic Convergence Factor}.
+
+  \vspace{1em}
+
+  $$-\log_{10} \|E\|_2$$ is called the \textbf{Asymptotic Convergence Rate} and its recipricol is
+  the maximum number of iterations to reduce the error by an order of magnitude.
+\end{frame}
+
+\subsection{Motivating Example}
+\begin{frame}
+  \frametitle{Simple Example (1d centered finite difference)}
+  Consider $\Omega = (0,1)$ and 
+  $$\begin{cases}
+    -u'' = f & \text{in}\; \Omega\\ 
+    u(0) = u(1) = 0
+  \end{cases}$$
+
+  The classic centered finite difference discretization ($n$ elements of length $h$) 
+  yields the familiar $n-1 \times n-1$ matrix system $Ax=b$:
+  \[
+A = \begin{pmatrix}
+2      & -1     &        &        &                \\
+-1     & 2      & -1     &        &                \\
+       & \ddots & \ddots & \ddots &               \\
+        &        & -1     & 2      & -1    \\
+        &        &        & -1     & 2      
+\end{pmatrix},\; x=u_h,\; b = h^2 f_h
+\]
+
+  \small{Example adapted from \cite{mg-tutorial}}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Simple Example (weighted Jacobi method)}
+  Let $D$ be the diagonal of $A$. Choose 
+  $$B^{-1} := \frac{2}{3} D^{-1} = \frac{1}{3}$$ 
+  as the method matrix. 
+  The resulting iteration matrix is
+  $$E = \left(I - \frac{1}{3}A\right)$$
+  %Clearly, $E$ has the same eigenvectors as $A$ and the eigenvalues are related to $A$'s by 
+  %$$\lambda(E) = 1 - \frac{\lambda(A)}{3}$$
+  %\vspace{1em}
+
+  The $k$th eigenvalue of $E$ is
+  $$\lambda_k(E) = 1 - \frac{4}{3} \sin^2 \left(\frac{k \pi}{2 n} \right), \quad 1 \leq k \leq n-1$$
+  and the $j$th component of the associated eigenvector is 
+  $$Q_{j,k} = \sin (x_j k \pi)$$
+
+  Notice that as $h \to 0$ we get $\|E\|_2 \to 1$
+\end{frame}
+
+\begin{frame}
+  \frametitle{Simple Example (spectral / convergence analysis)}
+  \begin{align*}
+    \lambda_k(E) &= 1 - \frac{4}{3} \sin^2 \left(\frac{k \pi}{2 n} \right), \quad 1 \leq k \leq n-1\\
+    Q_{j,k} &= \sin (x_j k \pi)
+  \end{align*}
+
+  Let $w_k$ be the $k$th eigenvector (column of $Q$).
+
+  \begin{align*}
+    e_0 &= \sum_{k=1}^{n-1} c_k w_k\\ 
+    e_m &= E^m e_0
+    = \sum_{k=1}^{n-1} c_k E^m w_k
+    = \sum_{k=1}^{n-1} c_k \lambda_k^m w_k
+  \end{align*}
+
+  \textbf{The $k$th mode of $e_0$ is reduced by a factor of $\lambda_k^m$ after $m$ steps}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Simple Example (spectrum visualization)}
+  \begin{figure}
+    \includegraphics[width=\textwidth]{spectrum.png}
+  \end{figure}
+  The $k$th eigenvector is the discretization of $\sin(k\pi)$
+\end{frame}
+
+\begin{frame}
+  \frametitle{Simple Example (geometric multigrid solution)}
+  Discretize with small $h$ and iterate weighted Jacobi $i$ times.
+  \begin{align*}
+    r_i &= b - Ax_i\\ 
+    A^{-1} r_i &= A^{-1} b - x_i\\
+    &= e_i \approx \sum_{k=1}^{n/4} c_k w_k \\
+    r_i & \approx  \sum_{k=1}^{n/4} c_k \lambda_k(A) w_k 
+  \end{align*}
+
+  Main ideas of geometric multigrid:
+  \begin{itemize}
+    \item If we solve $Ae_i = r_i$, then $b = x_i + e_i$
+    \item $r_i$ and $e_i$ are linear combinations of \textbf{smooth eigenvectors} 
+    \item Smooth eigenvectors are accurately represented on coarse grids
+  \end{itemize}
+\end{frame}
+
+\subsection{Elements of Multigrid Methods}
+\begin{frame}
+  \frametitle{Anatomy of Multigrid}
+
+  A multigrid method with $\ell$ levels has some basic components:
+
+  \begin{itemize}
+    \item Hierarchy of vector spaces, operators, and solvers
+      $$\{V_i\}_{i=1}^\ell, \quad \{A_i\}_{i=1}^\ell, \quad \{B_i\}_{i=1}^\ell$$
+    \item Interpolation (or prolongation) Operators 
+      $$\{P_i\}_{i=1}^{\ell-1},\quad P_i : V_{i+1} \to V_i$$
+    \item Restriction Operators 
+      $$\{R_i\}_{i=1}^{\ell-1},\quad R_i : V_i \to V_{i+1}$$
+  \end{itemize}
+  
+  In our case, all operators are matrices:
+  \begin{itemize}
+    \item $R_i := P_i^T$
+    \item $A_i : V_i \to V_i$
+    \item $A_{i+1} := P_i^T A_i P_i$ 
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{V---Cycle Algorithm (recursive definition)}
+  Initial call: $x_{i+1} \gets V(x_i, b, 1)$\\
+  \vspace{1em}
+
+  \DontPrintSemicolon
+  \setcounter{AlgoLine}{0}
+  \KwData{Levels $\ell$, hierarchy $A = \{A_i\}_{i=1}^\ell$, smoothers $B = \{B_i\}_{i=1}^\ell$, interpolation operators $P = \{P_i\}_{i=1}^{\ell-1}$, current iterate $x$, rhs vector $b$, smoothing steps $s$, current level $k$}
+  \KwResult{Next Iterate (or update) $x_{new} \gets V(x, b, k)$}
+  \BlankLine
+  \If{$k \not= \ell$}{
+    Relax for $s$ iterations on $A_k x = b$ with $B_k^{-1}$ (stationary algorithm)\\
+    $r \gets b - A_k x$\\
+    $r_c = P_k^T r$\\
+    $k \gets k + 1$\\
+    $c \gets V(\boldsymbol{0}, r_c, k)$\\ 
+    $x \gets x + P_k c$\\
+  }
+  Relax for $s$ iterations on $A_k x = b$ with $B_k^{-1}$\\
+  \KwRet $x$
+\end{frame}
+
 \begin{frame}
   \frametitle{Algebraic vs Geometric Multigrid}
 
@@ -109,22 +326,30 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
   \begin{itemize}
     \item Requires a hierarchy of refinements ($h$ or $p$)
     \item Interpolation and restriction operators come from this hierarchy
+    \item For `nice' problems iteration scaling is $\mathcal{O}(1)$
+    \item Analysis is fairly simple and well understood
   \end{itemize}
+
+  \vspace{0.3em}
 
   \textbf{Algebraic Multigrid}
   \begin{itemize}
     \item No knowledge of problem structure/nature required
-    \item `Black Box' for the end user
-    \item Takes a matrix and algebraically finds the interpolation and restriction operators
+      \begin{itemize}
+        \item can be utilized for heuristics
+      \end{itemize}
+    \item `Black Box' for the end user with varying levels of tuning
+    \item `Algebraically' finds $R$ and $P$ matrices from $A$
+    \item Solver construction and application can be expensive
+    \item General analysis is difficult
   \end{itemize}
 \end{frame}
 
-\subsection{Anisotropy}
+\subsection{Shortcomings of Geometric Multigrid}
 \begin{frame}
   \frametitle{Anisotropy}
   
   Let $\Omega \subset \RR^3$.\\
-  We can modify our original PDE to be of the form:
   $$
   \begin{cases}
     -\nabla \cdot (\beta \nabla u) = f &,\text{ on } \Omega\\ 
@@ -132,17 +357,21 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
   \end{cases}
   $$
 
-  Where 
-  $$\beta = \e I + \vc b \vc b^T$$
+  $$\beta := \e I + \vc b \vc b^T$$
   for small $\e > 0$ and
-  $$\vc b = \begin{bmatrix} \cos \theta \cos \phi\\ \sin \theta 
+  $$\vc b := \begin{bmatrix} \cos \theta \cos \phi\\ \sin \theta 
   \cos \phi \\ \sin \phi \end{bmatrix}$$
 
 \end{frame}
 
-\subsection{Heterogeneous Coefficients}
 \begin{frame}
-  \frametitle{Heterogeneous Coefficients}
+  \frametitle{Anisotropy --- Algebraic Smoothness}
+
+  \includegraphics[width=\textwidth]{near_null5.png}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Heterogeneous Coefficients (SPE10)}
   
   $$
   \begin{cases}
@@ -150,92 +379,243 @@ Portland State University,  ajn6@pdx.edu, panayot@pdx.edu
     u=0 &,\text{ on } \partial \Omega
   \end{cases}
   $$
+  In this case, $\beta$ (called the permiability) is a piecewise constant diagonal matrix coefficient (constant on each element).
 
     \begin{center} 
-      \includegraphics[width=\textwidth]{spe10perm.jpg}
+      \textbf{$\|\beta\|_2$ on each element}
+      \includegraphics[width=0.7\textwidth]{spe10_perm.png}
     \end{center} 
 
 \end{frame}
 
-\section{Algorithm}
+\begin{frame}
+  \frametitle{SPE10 Clipped Cross Section (High Permeability)}
+    \includegraphics[width=0.95\textwidth]{spe10_permiable.png}
+\end{frame}
+
+\section{Algorithms}
+
+\subsection{Adaptivity Algorithm Overview}
 \begin{frame}
   \frametitle{Adaptivity Algorithm}
-  Start with the `identity' preconditioner, $B = I$.
-  \begin{itemize}
-    \item Finding `Near Null' Vectors
-      \begin{itemize}
-        \item Search for an `algebraically smooth' error vector
-          by iterating on the system $A \vc x = 0$ with a random
-          starting guess with the preconditioner $B$.
-        \item When the convergence stalls, $A \vc x \approx 0$
-          and $\vc x$ is a linear combination of eigenvectors of 
-          $A$ associated with small eigenvalues.
-        \item If the test converged, i.e
-          $$\frac{\|x\|_A}{\|x_{init}\|_A} < \e$$
-          then return the current preconditioner $B$.
-        \item Normalize this iterate to create the weight vector:
-          $$\vc w = \frac{\vc x}{\|\vc x\|_A}$$
-      \end{itemize}
-    \item Construct the weighted matrix
-      $\overline{A} = (\overline{a}_{ij})^n_{i,j=1}$ where
-      $\overline{a}_{ij} = -w_i a_{ij} w_j$. Note that if
-      $\vc w$ is `good enough' then $\overline{A}$ has positive
-      row sums:
-      $$r_i \equiv \sum_j \overline{a}_{ij} \approx a_{ii} w_i^2 \geq 0 \text{ since } a_{ii} > 0$$
+  \DontPrintSemicolon
+  \setcounter{AlgoLine}{0}
+  \KwData{Matrix \(A\), desired convergence factor \(\rho\), max components \(m\), smoother type \(B\)}
+  \KwResult{Adaptive Solver \(\overline{B}\)}
+  \BlankLine
+  $\overline{B} \gets \CreateSolver (B, A)$\\ 
+  $i, cf \gets 1$\\
+  \While{\(\rho < cf\) and $i < m$}{
+    $w, cf \gets \TestHomogeneous(A, \overline{B})$\\
+    $w = w / \|w\|_2$\\ 
+    $B_{new} \gets \AdaptiveSolver(B, A, w)$\\ 
+    $\overline{B} \gets \SymmetricComposition(\overline{B}, B_{new})$\\ 
+    $i \gets i + 1$
+  }
+\end{frame}
 
-  \end{itemize}
+\subsection{Composition of Solvers}
+\begin{frame}
+  \frametitle{Composition of Solvers}
+%Given two solvers $B_0$ and $B_1$ (and $B^T_1$ in the nonsymmetric case), the product iteration matrix defines a new solver $B$
+\begin{equation}\label{symmetric composition of two solvers: iteration matrix}
+I- B^{-1} A = (I-B^{-T}_1 A) (I-B^{-1}_0A)(I-B^{-1}_1 A).
+\end{equation}
 
+\begin{equation}\label{symmetric composition of two solvers}
+B^{-1} = {\overline B}^{-1}_1 + (I-B^{-T}_1A) B^{-1}_0 (I-AB^{-1}_1).
+\end{equation}
+${\overline B}_1$ is a symmetrization of $B_1$ (if needed)
+\begin{equation}\label{symmetrized B_1}
+{\overline B}_1 = B_1 (B_1+B^T_1-A)^{-1} B^T_1.
+\end{equation}
+
+  \begin{lemma}\label{lemma: properties of composite solvers}
+    If $B_0$ is s.p.d. and $B_0$ and $B_1$ are $A$-convergent solvers, then their composition defined in \eqref{symmetric composition of two solvers: iteration matrix} or equivalently, in \eqref{symmetric composition of two solvers}, is s.p.d. and $B$ is also $A$-convergent. Also, if the symmetrized solver ${\overline B}_1$ (see \eqref{symmetrized B_1}) satisfies 
+    $\|{\overline B}_1\| \le c_0\|A\|$ for some constant $c_0 >0$, then the same inequality holds for $B$, i.e., $\|B\| \le c_0\|A\|$.
+    Finally, if $B_1$ is s.p.d. and satisfies the inequalities
+    $\bv^T B_1 \bv \ge \bv^T A \bv$ and $\|B_1\| \le c_0 \|A\|$, we have $\|B\| \le \|{\overline B}_1\| \le \|B_1\| \le c_0 \|A\|$.
+    \end{lemma}
+\end{frame}
+
+\subsection{Identifying the Near-nullspace}
+\begin{frame}
+  \frametitle{Algebraically Smooth Error is Near-nullspace of $A$}
+
+\begin{equation}\label{iteration with B}
+  A \bx = 0, \text{ gives} \quad B (\bx_k -\bx_{k-1}) = - A \bx_{k-1}
+\end{equation}
+%\begin{equation*}
+%\frac{\|\bx_k\|_A}{\|\bx_{k-1}\|_A} \ge 0.999...
+%\end{equation*}
+
+\begin{theorem}\label{theorem: near null component}
+Let $B$ define an s.p.d. $A$-convergent iterative method such
+  that $\frac{\bv^T A \bv}{\bv^T B \bv} < 1$ and $\|B\| \simeq \|A\|$, i.e., $\|B\| \le c_0 \|A\|$ for a constant $c_0 \ge 1$. 
+Consider any vector $\bw$ such that the iteration process \eqref{iteration with B}
+with $B$ stalls for it, i.e.,
+\begin{equation}\label{stall inequality}
+ 1 \ge \frac{\|(I- B^{-1}A)\bw\|^2_A}{\|\bw\|^2_A} \ge 1-\delta,
+\end{equation}
+ for some small $\delta \in (0,1)$. Then, the following estimate holds $\|A\bw\|^2 \le c_0 \|A\|\;\delta \|\bw\|^2_A.$
+\end{theorem}
+\end{frame}
+
+\subsection{Hierarchy Construction with Modularity}
+\begin{frame}
+  \frametitle{Strength of Connectivity Graph}
+Since $A \bw \approx 0$ componentwise by construction, we have for each $i$
+\begin{equation*}
+    0 \approx w_i  \sum\limits_j a_{ij} w_j,
+\end{equation*}
+    or equivalently 
+\begin{equation*}
+    0 \le a_{ii} w^2_i \approx \sum\limits_{j\ne i} (-w_i a_{ij} w_j).
+\end{equation*}
+
+Then, ${\overline A} =({\overline a}_{ij})$ with non-zero entries ${\overline a}_{ij} = - w_i a_{ij} w_j$, $(i \not = j)$ has positive row-sums. 
+
+  \vspace{1em}
+
+  $\overline A$ is the sparse adjacency matrix associated with the connectivity strength graph $G$.
 \end{frame}
 
 \begin{frame}
-  \frametitle{Adaptivity Algorithm}
-  \begin{itemize}
-    \item With positive row sums we can perform clustering of $A$
-      through pairwise aggregation iterations on the modularity
-      matrix, $B = (b_{ij})_{i,j=1}^n$, 
-      associated with $\overline{A}$:
+  \frametitle{Modularity Matching (Coarsening) for AMG Hierarchy}
+Let $\bone = (1) \in {\mathbb R}^n$ be the unity constant vector,
+$\br = A \bone$, and $T = \sum\limits_i r_i = \bone^T A \bone$.
 
-      Let $\vc r = (r_i)_{i=1}^n$ and $T = \sum_{i=1}^n r_i$.
-      $$B = \overline{A} - \frac{1}{T} \vc r \vc r^T$$
-    \item Performing these actions recursively gives a hierarchy
-      aggregations, $\{P_k\}_{k=1}^\ell$, which in turn define a
-      hierarchy of matrices, $\{A_k\}_{k=1}^{\ell+1}$:
-      $$A_1 = A, \quad A_{k+1} = P_k^T A_k P_k $$
-  \end{itemize}
+  \vspace{1em}
 
+The {\em Modularity Matrix} \cite{Newman}
+\begin{equation*}
+    B = A - \frac{1}{T}\br \br^T.
+\end{equation*}
+By construction, we have that
+\begin{equation}\label{zero row sums of B}
+B\bone =0.
+\end{equation}
+
+  The {\em Modularity Functional} \cite{Quiring2019}
+\begin{equation*}
+    Q = \frac{1}{T}\sum\limits_\A \sum\limits_{i,\;j \in \A} b_{ij}
+    = \frac{1}{T}\sum\limits_\A \sum\limits_{i,\;j \in \A} \left(a_{ij} - \frac{r_ir_j}{T}\right).
+\end{equation*}
 \end{frame}
 
 \begin{frame}
-  \frametitle{Adaptivity Algorithm}
-  \begin{itemize}
-    \item Now we put $\vc w$ into the range of $P_1$,
-      specifically such that $\vc w = P_1 \vc 1_2$. We
-      do this by scaling row $i$ of $P_1$ by $w_i$.
-
-    \item Using this modified hierarchy of aggregation operators
-      and the resulting hierarchy of matrices we define an
-      AMG V-cycle, denoted $B_{new}$.
-    \item Create the composite preconditioner by composing
-      $B$ with $B_{new}$ with the following algorithm:
-
-      Initialize: $\vc x = 0$.
-      \begin{itemize}
-        \item $\vc x = \vc x + B \vc r$
-        \item $\vc r = \vc r - A \vc x$
-        \item $\vc x = \vc x + B_{new} \vc r$
-        \item $\vc r = \vc r - A \vc x$
-        \item $\vc x = \vc x + B \vc r$
-      \end{itemize}
-      Output $\vc x$.
-    \item Define the new preconditioner, $B$ as the steps above.
-    \item Return to the first step to search for new near null.
-  \end{itemize}
-
+  \frametitle{Hierarchy Visualization for 2d Anisotropy}
+  \includegraphics[width=0.45\textwidth]{hierarchy_level0.png}
+  \includegraphics[width=0.45\textwidth]{hierarchy_level1.png}
 \end{frame}
 
 \section{Results}
+
 \begin{frame}
-  \frametitle{Results}
+  \frametitle{2d Anisotropy (top) and SPE10 (bottom)}
+  \begin{columns}
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+    \textbf{Stationary}
+    
+    \includegraphics[width=0.95\textwidth]{anisotropic-2d_stationary.png }
+    \includegraphics[width=0.95\textwidth]{spe10_stationary.png}
+    \end{figure}
+    \end{column}
+
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+    \textbf{Tester}
+    
+    \includegraphics[width=0.95\textwidth]{anisotropic-2d_tester_CF-16.png}
+    \includegraphics[width=0.95\textwidth]{spe10_tester_CF-16.png}
+    \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{G3-circuit (top) and Janna-Flan (bottom)}
+  \begin{columns}
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+    \textbf{Stationary}
+    
+    \includegraphics[width=0.95\textwidth]{G3_circuit_stationary.png}
+    \includegraphics[width=0.95\textwidth]{Flan_1565_stationary.png}
+    \end{figure}
+    \end{column}
+
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+    \textbf{Tester}
+    
+    \includegraphics[width=0.95\textwidth]{G3_circuit_tester_CF-16.png}
+    \includegraphics[width=0.95\textwidth]{Flan_1565_tester_CF-16.png}
+    \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{As Preconditioner for Conjugate Gradient}
+  \begin{columns}
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+    \textbf{2d Anisotropy}
+    
+    \includegraphics[width=0.9\textwidth]{anisotropic-2d_pcg.png}
+
+    \textbf{G3-circuit}
+
+    \includegraphics[width=0.9\textwidth]{G3_circuit_pcg.png}
+    \end{figure}
+    \end{column}
+
+    \begin{column}{0.49\textwidth}
+    \begin{figure}
+    \centering
+      \textbf{SPE10 (inverted coefficient)}
+    
+    \includegraphics[width=0.9\textwidth]{spe10_pcg.png}
+
+    \textbf{Janna-Flan}
+
+    \includegraphics[width=0.9\textwidth]{Flan_1565_pcg.png}
+    \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Future Work}
+
+  \begin{itemize}
+    \item We suspect the interpolation technique is limiting the solver / PC performance 
+    \item Study the algorithmic and implementation scalability
+    \item Study more advanced relaxation techniques
+    \item Study applications to eigensolvers
+  \end{itemize}
+  \vspace{1em}
+
+  Submitted work to a student paper competition (with presentation) for:
+  \vspace{1em}
+
+18th Copper Mountain Conference On Iterative Methods
+
+Sunday April 14 - Friday April 19, 2024
+\end{frame}
+
+\section{References}
+\begin{frame}[allowframebreaks]
+        \frametitle{References}
+        \bibliographystyle{amsalpha}
+        \bibliography{references.bib}
 \end{frame}
 
 \end{document}

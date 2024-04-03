@@ -1,7 +1,8 @@
-/*
+use std::{rc::Rc, time::Duration};
+
 use amg_match::{
-    adaptive::build_adaptive,
-    solver::{pcg, stationary},
+    adaptive::AdaptiveBuilder,
+    solver::{Iterative, IterativeMethod, LogInterval},
     utils::{load_system, random_vec},
 };
 use nalgebra::DVector;
@@ -12,61 +13,94 @@ extern crate log;
 fn main() {
     pretty_env_logger::init();
 
-    let cf = 4.0;
     let epsilon = 1e-6;
-    let project_first_only = true;
-    let mut results: Vec<(usize, usize, usize, usize)> = Vec::new();
-    let num_components = 1;
+    //let mut results: Vec<(usize, usize, usize)> = Vec::new();
+    let mut results: Vec<(usize, usize)> = Vec::new();
+    let method = IterativeMethod::StationaryIteration;
 
-    for i in 0..9 {
+    for i in 0..8 {
         let prefix = format!("data/laplace/{}", i);
-        let (mat, _b, _coords, _projector) = load_system(&prefix);
+        let (mat, b, _coords, _projector) = load_system(&prefix);
         let dim = mat.nrows();
+        //let cf = dim as f64 / 100.0;
+        let cf = 4.0;
+        let max_iter = 5000;
         info!("Starting: {}", i);
 
-        let rand: DVector<f64> = random_vec(dim);
-        let b: DVector<f64> = random_vec(dim);
-        //let rand: DVector<f64> = DVector::from_element(b.len(), 0.0);
+        //let rand: DVector<f64> = DVector::from_element(b.len(), 1.0).normalize();
+        //let b: DVector<f64> = random_vec(dim);
 
-        let (mut multi_level, _, _) = build_adaptive(
-            mat.clone(),
-            cf,
-            10,
-            0.01,
-            num_components,
-            Some(15),
-            project_first_only,
-        );
-        let mut x: DVector<f64> = rand.clone();
-        let (converged_multi, ratio_multi, iters_multi) =
-            stationary(&mat, &b, &mut x, 10000, epsilon, &multi_level, Some(3));
-        if !converged_multi {
-            warn!("multi level didn't converge with ratio: {}", ratio_multi);
+        let adaptive_builder = AdaptiveBuilder::new(mat.clone())
+            .with_max_components(1)
+            .with_coarsening_factor(cf);
+        let (multi_pc, _, _) = adaptive_builder.build();
+        let multi_pc = Rc::new(multi_pc);
+
+        /*
+                let adaptive_builder = AdaptiveBuilder::new(mat.clone())
+                    .with_max_components(1)
+                    .with_max_level(2)
+                    .with_coarsening_factor(cf);
+                let (two_pc, _, _) = adaptive_builder.build();
+                let two_pc = Rc::new(two_pc);
+        */
+
+        let avg = 1;
+
+        let mut multi_sum = 0;
+        //let mut two_sum = 0;
+
+        for _ in 0..avg {
+            let x: DVector<f64> = random_vec(dim);
+            let multi_solver = Iterative::new(mat.clone(), Some(x))
+                .with_tolerance(epsilon)
+                .with_max_iter(max_iter)
+                .with_solver(method)
+                .with_preconditioner(multi_pc.clone())
+                .with_log_interval(LogInterval::Time(Duration::from_secs(30)));
+            let (_, multi_solve_result) = multi_solver.solve(&b);
+
+            if !multi_solve_result.converged {
+                warn!(
+                    "multi level didn't converge with ratio: {}",
+                    multi_solve_result.final_relative_residual_norm
+                );
+            }
+            multi_sum += multi_solve_result.iterations;
+
+            /*
+                        let x: DVector<f64> = random_vec(dim);
+                        let two_solver = Iterative::new(mat.clone(), Some(x))
+                            .with_tolerance(epsilon)
+                            .with_max_iter(max_iter)
+                            .with_solver(method)
+                            .with_preconditioner(two_pc.clone())
+                            .with_log_interval(LogInterval::Time(Duration::from_secs(30)));
+                        let (_, two_solve_result) = two_solver.solve(&b);
+
+                        if !two_solve_result.converged {
+                            warn!(
+                                "two level didn't converge with ratio: {}",
+                                two_solve_result.final_relative_residual_norm
+                            );
+                        }
+                        two_sum += two_solve_result.iterations;
+            */
         }
-        let levels = multi_level.components()[0].get_hierarchy().levels();
 
-        let pc = &mut multi_level.components_mut()[0];
-        while pc.hierarchy.levels() > 2 {
-            pc.hierarchy.matrices.pop();
-        }
-        //let (two_level, _) = build_adaptive(mat.clone(), cf, 2, 0.01, num_components, &prefix);
-        let mut x: DVector<f64> = rand.clone();
-        let (converged_2, ratio_2, iters_2) =
-            stationary(&mat, &b, &mut x, 10000, epsilon, &multi_level, Some(3));
-        if !converged_2 {
-            warn!("2 level didn't converge with ratio: {}", ratio_2);
-        }
+        //results.push((dim, two_sum / avg, multi_sum / avg));
+        results.push((dim, multi_sum / avg));
+        //results.push((dim, two_sum, 0));
 
-        results.push((dim, iters_2, iters_multi, levels));
-
-        println!(
-            "{:>15} {:>15} {:>15} {:>15}",
-            "size", "2-level", "multi-level", "levels"
-        );
-        for (dim, two, multi, levels) in results.iter() {
-            println!("{:15} {:15} {:15} {:15}", dim, two, multi, levels);
+        /*
+                println!("{:>15} {:>15} {:>15}", "size", "2-level", "multi-level");
+                for (dim, two, multi) in results.iter() {
+                    println!("{:15} {:15} {:15}", dim, two, multi);
+                }
+        */
+        println!("{:>15} {:>15}", "size", "multi-level");
+        for (dim, multi) in results.iter() {
+            println!("{:15} {:15}", dim, multi);
         }
     }
 }
-*/
-fn main() {}

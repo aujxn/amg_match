@@ -27,7 +27,7 @@ pub fn load_system(
 ) -> (
     Rc<CsrMatrix<f64>>,
     DVector<f64>,
-    Vec<(f64, f64)>,
+    Vec<Vec<f64>>,
     CsrMatrix<f64>,
 ) {
     let matfile = format!("{}.mtx", prefix);
@@ -49,27 +49,22 @@ pub fn load_system(
     b /= factor;
     */
     (std::rc::Rc::new(mat), b, coords, projector)
+    //(std::rc::Rc::new(mat), b, Vec::new(), CsrMatrix::identity(1))
 }
 
 // TODO add coords file for spe10
-pub fn load_coords<P: AsRef<Path> + Display>(path: P) -> Vec<(f64, f64)> {
+pub fn load_coords<P: AsRef<Path> + Display>(path: P) -> Vec<Vec<f64>> {
     let file = File::open(&path);
     match file {
-        Ok(file) => {
-            let reader = BufReader::new(file);
-            let mut data = Vec::new();
-
-            for line in reader.lines() {
-                let line = line.unwrap();
-                let numbers: Vec<f64> = line
+        Ok(file) => BufReader::new(file)
+            .lines()
+            .map(|line| {
+                line.unwrap()
                     .split_whitespace()
                     .filter_map(|s| s.parse().ok())
-                    .collect();
-
-                data.push((numbers[0], numbers[1]));
-            }
-            data
-        }
+                    .collect()
+            })
+            .collect(),
         Err(_) => {
             error!("File not found: {}", path);
             // TODO make this better?
@@ -111,7 +106,7 @@ pub fn delete_boundary(
     dofs: Vec<usize>,
     mat: CsrMatrix<f64>,
     vec: DVector<f64>,
-    coords: &mut Vec<(f64, f64)>,
+    coords: &mut Vec<Vec<f64>>,
 ) -> (CsrMatrix<f64>, DVector<f64>, CsrMatrix<f64>) {
     let n = mat.nrows();
     let new_n = n - dofs.len();
@@ -159,7 +154,9 @@ pub fn delete_boundary(
 
 pub fn norm(vec: &DVector<f64>, mat: &CsrMatrix<f64>) -> f64 {
     let temp = mat * vec;
-    return vec.dot(&temp).sqrt();
+    let temp = vec.dot(&temp).sqrt();
+    assert!(!temp.is_nan());
+    temp
 }
 
 pub fn inner_product(

@@ -1,5 +1,7 @@
 /target
 /notes
+/slides
+/images
 /data
 /venv
 *.html

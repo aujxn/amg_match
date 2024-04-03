@@ -16,6 +16,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <mfem/fem/bilininteg.hpp>
 
 using namespace std;
 using namespace mfem;
@@ -46,6 +47,7 @@ int main(int argc, char *argv[]) {
 
     BilinearForm a(&fespace);
     a.AddDomainIntegrator(new DiffusionIntegrator);
+    //a.AddDomainIntegrator(new MassIntegrator);
     a.Assemble();
 
     SparseMatrix A;

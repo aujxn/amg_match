@@ -120,6 +120,7 @@ int main(int argc, char *argv[]) {
   FiniteElementSpace fes2(&mesh, &fec, mesh.SpaceDimension());
   GridFunction nodes(&fes2);
   mesh.GetNodes(nodes);
+  // nodes.Save(coordsfile);
 
   const int nNodes = nodes.Size() / dim;
   double coord[dim]; // coordinates of a node

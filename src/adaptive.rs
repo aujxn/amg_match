@@ -4,8 +4,8 @@ use crate::{
     io::plot_convergence_history,
     partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy},
     preconditioner::{Composite, LinearOperator, Multilevel, L1},
-    solver::{IterativeMethod, IterativeSolver, LogInterval},
-    utils::{inner_product, norm, normalize, random_vec},
+    solver::{Iterative, IterativeMethod},
+    utils::{norm, random_vec},
 };
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -21,6 +21,7 @@ pub struct AdaptiveBuilder {
     target_convergence: Option<f64>,
     max_components: Option<usize>,
     test_iters: Option<usize>,
+    // TODO max test duration?
     project_first_only: bool,
 }
 
@@ -77,6 +78,16 @@ impl AdaptiveBuilder {
         self
     }
 
+    pub fn with_max_test_iters(mut self, test_iters: usize) -> Self {
+        self.test_iters = Some(test_iters);
+        self
+    }
+
+    pub fn without_max_test_iters(mut self) -> Self {
+        self.test_iters = None;
+        self
+    }
+
     pub fn with_project_first_only(mut self) -> Self {
         self.project_first_only = true;
         self
@@ -94,12 +105,21 @@ impl AdaptiveBuilder {
         let dim = self.mat.nrows();
         let mut near_null_history = Vec::<DVector<f64>>::new();
         let mut test_data = Vec::new();
+        //let solve_exactly = self.max_level.unwrap_or(0) == 2;
+
+        // TODO arg all 3 of these?
+        let solve_exactly = true;
+        //let smoother = crate::preconditioner::SmootherType::GaussSeidel;
+        let smoother = crate::preconditioner::SmootherType::L1;
+        let sweeps = 5;
 
         // Find initial near null to get the iterations started
         let fine_l1 = Rc::new(L1::new(&self.mat));
-        let stationary = IterativeSolver::new(self.mat.clone(), None)
+        //let mut near_null: DVector<f64> = DVector::from_element(dim, 1.0); //.normalize();
+        let guess: DVector<f64> = DVector::from_element(dim, 1.0); //.normalize();
+        let stationary = Iterative::new(self.mat.clone(), Some(guess))
             .with_solver(IterativeMethod::StationaryIteration)
-            .with_tolerance(1e-6)
+            .with_tolerance(1e-3)
             .with_max_iter(1000)
             //.with_log_interval(LogInterval::Iterations(1001))
             .with_preconditioner(fine_l1.clone());
@@ -107,14 +127,17 @@ impl AdaptiveBuilder {
         let mut near_null = stationary.apply(&zeros);
 
         loop {
-            normalize(&mut near_null, &self.mat);
-            //near_null.normalize_mut();
+            //normalize(&mut near_null, &self.mat);
+            near_null.normalize_mut();
+            let test = &*self.mat * &near_null;
+            trace!("Near-Null score: {:.2e}", test.norm());
 
             // Sanity check that each near null is orthogonal to the last.
             // Could move into test suite down the line.
             let ortho_check: String = near_null_history
                 .iter()
-                .map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
+                //.map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
+                .map(|old| format!("{:.1e}, ", near_null.dot(old)))
                 .collect();
             near_null_history.push(near_null.clone());
             if !near_null_history.is_empty() {
@@ -137,6 +160,15 @@ impl AdaptiveBuilder {
                             break;
                         }
                     }
+                    if hierarchy
+                        .get_matrices()
+                        .last()
+                        .unwrap_or(&hierarchy.get_mat(0))
+                        .nrows()
+                        < 100
+                    {
+                        break;
+                    }
                     near_null = {
                         let current_a = hierarchy
                             .get_matrices()
@@ -145,24 +177,33 @@ impl AdaptiveBuilder {
                             .clone();
 
                         let dim = current_a.nrows();
-                        let start = hierarchy.get_interpolations().last().unwrap() * near_null;
+                        //let start = hierarchy.get_interpolations().last().unwrap() * near_null;
+                        let start = DVector::from(vec![1.0; dim]);
                         let l1 = Rc::new(L1::new(&current_a));
                         let zeros = DVector::from(vec![0.0; dim]);
 
-                        let stationary = IterativeSolver::new(current_a.clone(), Some(start))
+                        let stationary = Iterative::new(current_a.clone(), Some(start))
                             .with_solver(IterativeMethod::StationaryIteration)
                             .with_tolerance(1e-4)
                             .with_max_iter(1000)
                             .with_preconditioner(l1);
                         let mut near_null = stationary.apply(&zeros);
-                        normalize(&mut near_null, &current_a);
+                        //normalize(&mut near_null, &current_a);
+                        near_null.normalize_mut();
                         near_null
                     };
                 }
                 hierarchy
             };
 
-            let ml1 = Rc::new(Multilevel::new(hierarchy, Some(fine_l1.clone())));
+            let ml1 = Rc::new(Multilevel::new(
+                hierarchy,
+                Some(fine_l1.clone()),
+                //None,
+                solve_exactly,
+                smoother,
+                sweeps,
+            ));
             preconditioner.push(ml1);
             if let Some(max_components) = self.max_components {
                 if preconditioner.components().len() >= max_components {
@@ -213,7 +254,7 @@ fn find_near_null(
     let mut error_ratio = f64::MAX;
 
     loop {
-        let stationary = IterativeSolver::new(mat.clone(), Some(near_null.clone()))
+        let stationary = Iterative::new(mat.clone(), Some(near_null.clone()))
             .with_solver(IterativeMethod::StationaryIteration)
             .with_preconditioner(Rc::new(composite_preconditioner.clone()))
             .with_max_iter(1)
@@ -222,7 +263,7 @@ fn find_near_null(
         iter += 1;
         let current_error = norm(&near_null, &*mat);
         let previous_error_ratio = error_ratio;
-        error_ratio = (current_error / old_error_norm).sqrt();
+        error_ratio = current_error / old_error_norm;
         old_error_norm = current_error;
 
         // TODO fix this maybe
@@ -231,14 +272,13 @@ fn find_near_null(
         let elapsed_secs = elapsed as f64 / 1000.0;
 
         let convergence = current_error / starting_error;
-        let relative_error = convergence.sqrt();
-        if relative_error < 1e-16 {
+        if convergence < 1e-12 {
             warn!("find_near_null converged during search");
             return None;
         }
-        convergence_history.push(relative_error);
-        convergence_rate_per_second = convergence.powf(1.0 / (elapsed_secs * 2.0));
-        convergence_rate_per_iter = convergence.powf(1.0 / (iter as f64 * 2.0));
+        convergence_history.push(convergence);
+        convergence_rate_per_second = convergence.powf(1.0 / elapsed_secs);
+        convergence_rate_per_iter = convergence.powf(1.0 / iter as f64);
         // TODO use rayleigh quotient?
         let ratio_change = (previous_error_ratio - error_ratio).abs();
 
@@ -250,7 +290,7 @@ fn find_near_null(
                 convergence_rate_per_second,
                 convergence_rate_per_iter,
                 error_ratio,
-                relative_error,
+                convergence,
                 ratio_change
             );
             last_log = now;
@@ -260,7 +300,7 @@ fn find_near_null(
             if iter == iters {
                 info!(
                     "{} components:\n\tconvergence rate: {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.2e}",
-                    composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5)
+                    composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence
                 );
                 return Some((convergence_rate_per_iter, convergence_history));
             }
@@ -271,7 +311,7 @@ fn find_near_null(
             //} else if error_ratio > 0.90 {
             info!(
                 "{} components:\n\tconvergence rate: {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.2e}\n\tasymptotic rate: {:.3}",
-                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence.powf(0.5), error_ratio
+                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence, error_ratio
             );
             return Some((convergence_rate_per_iter, convergence_history));
         }

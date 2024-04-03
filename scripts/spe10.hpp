@@ -34,7 +34,7 @@ struct SPE10Data {
         for (int j = 0; j < ny; j++) {
           for (int i = 0; i < nx; i++) {
             permfile >> *ptr;
-            *ptr = 1.0 / (*ptr);
+            //*ptr = 1.0 / (*ptr);
             ptr++;
           }
           for (int i = 0; i < 60 - nx; i++) {

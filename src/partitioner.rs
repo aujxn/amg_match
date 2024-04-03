@@ -125,6 +125,252 @@ impl Hierarchy {
         self.interpolation_matrices.push(p_transpose);
     }
 
+    /// More advanced interpolation than piecewise constants.
+    pub fn add_classical_interpolant(
+        &mut self,
+        partition_mat: CsrMatrix<f64>,
+        near_null: &DVector<f64>,
+    ) {
+        let fine_mat: &CsrMatrix<f64>;
+
+        if self.matrices.is_empty() {
+            fine_mat = self.mat.borrow();
+        } else {
+            fine_mat = self.matrices.last().unwrap().borrow();
+        }
+
+        let n = fine_mat.nrows();
+        let p_transpose = partition_mat.transpose();
+        let mut strong_neighbors: Vec<IndexSet<usize>> = vec![IndexSet::new(); n];
+        let mut delta_i = vec![0.0; n];
+        let mut all_coarse = IndexSet::new();
+
+        for agg in p_transpose.row_iter() {
+            let mut coarse_vertices = IndexSet::new();
+            let agg_vertices: IndexSet<usize> = agg.col_indices().iter().cloned().collect();
+            let mut remaining: IndexSet<usize> = agg_vertices.clone();
+            for i in agg_vertices.iter() {
+                if near_null[*i] == 0.0 {
+                    coarse_vertices.insert(*i);
+                } else {
+                    let mut neighbors: IndexSet<usize> = fine_mat
+                        .row(*i)
+                        .col_indices()
+                        .iter()
+                        .filter(|j| **j != *i)
+                        .cloned()
+                        .collect();
+                    neighbors = neighbors.intersection(&agg_vertices).cloned().collect();
+                    if neighbors
+                        .iter()
+                        .map(|j| fine_mat.index_entry(*i, *j).into_value() * near_null[*j])
+                        .all(|prod| prod.abs() < 1e-12)
+                    {
+                        coarse_vertices.insert(*i);
+                        for neighbor in neighbors.iter() {
+                            remaining.swap_remove(neighbor);
+                        }
+                    }
+                }
+            }
+
+            loop {
+                if remaining.is_empty() {
+                    break;
+                }
+                let new_coarse_vertex = remaining.pop().unwrap();
+                coarse_vertices.insert(new_coarse_vertex);
+                for neighbor in fine_mat.row(new_coarse_vertex).col_indices() {
+                    remaining.swap_remove(neighbor);
+                }
+            }
+
+            for i in agg_vertices.iter() {
+                if coarse_vertices.contains(i) {
+                    continue;
+                }
+
+                let neighborhood = fine_mat.row(*i);
+                let mut negative_strengths = Vec::new();
+                let mut total_strength = 0.0;
+                for (a_ij, j) in neighborhood
+                    .values()
+                    .iter()
+                    .zip(neighborhood.col_indices())
+                    .filter(|(_, j)| **j != *i)
+                {
+                    if agg_vertices.contains(j) {
+                        let strength = -a_ij * near_null[*j] / near_null[*i];
+                        // todo if strength is massive then problems
+                        if strength > 1e8 {
+                            //warn!("Massive strength detected");
+                        }
+                        if strength > 0.0 {
+                            strong_neighbors[*i].insert(*j);
+                            total_strength += strength;
+                        } else {
+                            negative_strengths.push((j, strength));
+                        }
+                    }
+                }
+                if strong_neighbors[*i].is_empty() {
+                    coarse_vertices.insert(*i);
+                } else {
+                    negative_strengths.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    loop {
+                        if negative_strengths.is_empty() {
+                            break;
+                        }
+                        let (j, strength) = negative_strengths.pop().unwrap();
+                        total_strength += strength;
+                        if total_strength < 0.0 {
+                            break;
+                        }
+                        strong_neighbors[*i].insert(*j);
+                    }
+                    assert_eq!(delta_i[*i], 0.0);
+                    for j in strong_neighbors[*i].iter() {
+                        delta_i[*i] += fine_mat.index_entry(*i, *j).into_value() * near_null[*j];
+                    }
+                    delta_i[*i] /= -near_null[*i];
+                }
+            }
+            for i in agg_vertices.iter() {
+                if near_null[*i] == 0.0 {
+                    continue;
+                }
+                if coarse_vertices.contains(i) {
+                    continue;
+                }
+                if coarse_vertices.is_disjoint(&strong_neighbors[*i]) {
+                    coarse_vertices.insert(*i);
+                }
+            }
+
+            fn fix_si(
+                agg_vertices: &IndexSet<usize>,
+                coarse_vertices: &mut IndexSet<usize>,
+                strong_neighbors: &Vec<IndexSet<usize>>,
+                fine_mat: &CsrMatrix<f64>,
+                near_null: &DVector<f64>,
+            ) -> bool {
+                for i in agg_vertices.iter() {
+                    if coarse_vertices.contains(i) {
+                        continue;
+                    }
+
+                    let si = &strong_neighbors[*i];
+                    let aci: IndexSet<usize> = coarse_vertices.intersection(si).cloned().collect();
+                    let si_minus_aci: IndexSet<usize> = si.difference(&aci).cloned().collect();
+
+                    for j in si_minus_aci {
+                        let mut sum = 0.0;
+                        for jc in aci.iter() {
+                            sum +=
+                                (fine_mat.index_entry(j, *jc).into_value() * near_null[*jc]).abs();
+                        }
+                        if sum == 0.0 {
+                            coarse_vertices.insert(j);
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            let mut warn_counter = 0;
+            loop {
+                if fix_si(
+                    &agg_vertices,
+                    &mut coarse_vertices,
+                    &strong_neighbors,
+                    fine_mat,
+                    near_null,
+                ) {
+                    break;
+                }
+                warn_counter += 1;
+            }
+            if warn_counter > 0 {
+                //warn!("had to correct {} divide by 0's", warn_counter);
+            }
+
+            for new_coarse in coarse_vertices {
+                all_coarse.insert(new_coarse);
+            }
+        }
+
+        let coarse_size = all_coarse.len();
+        let mut interpolation = CooMatrix::new(n, coarse_size);
+        for (coarse_idx, idx) in all_coarse.iter().enumerate() {
+            interpolation.push(*idx, coarse_idx, 1.0);
+        }
+        let new_p = CsrMatrix::from(&interpolation);
+        let new_pt = new_p.transpose();
+
+        for i in 0..n {
+            if all_coarse.contains(&i) || near_null[i] == 0.0 {
+                continue;
+            }
+            let aci: IndexSet<usize> = strong_neighbors[i]
+                .intersection(&all_coarse)
+                .cloned()
+                .collect();
+            assert!(!aci.is_empty());
+
+            for ic in aci.iter() {
+                let mut value = fine_mat.index_entry(i, *ic).into_value();
+                for j in strong_neighbors[i].difference(&aci) {
+                    let sign = if near_null[*ic] > 0.0 {
+                        1.0
+                    } else if near_null[*ic] < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    let numerator = fine_mat.index_entry(i, *j).into_value()
+                        * near_null[*j]
+                        * fine_mat.index_entry(*j, *ic).into_value().abs()
+                        * sign;
+                    let mut denom = 0.0;
+                    for jc in aci.iter() {
+                        denom +=
+                            (fine_mat.index_entry(*j, *jc).into_value() * near_null[*jc]).abs();
+                    }
+                    assert!(denom != 0.0);
+                    /*
+                    if denom == 0.0 {
+                        error!("divide by 0!");
+                    }
+                    */
+                    value += numerator / denom;
+                }
+                value /= -delta_i[i];
+                assert!(!value.is_nan());
+                let jc = all_coarse.get_index_of(ic).unwrap();
+                interpolation.push(i, jc, value);
+            }
+        }
+
+        let interpolation = CsrMatrix::from(&interpolation);
+        let wc = &new_pt * near_null;
+        let reconstruction = &interpolation * wc;
+
+        let err = reconstruction - near_null;
+        let err_norm = err.norm();
+        info!(
+            "Near-null reconstruction relative error norm: {:.2e}",
+            err_norm / near_null.norm()
+        );
+
+        let p_transpose = interpolation.transpose();
+        let coarse_mat = &p_transpose * &(fine_mat * &interpolation);
+        self.matrices.push(Rc::new(coarse_mat));
+        //self.partition_matrices.push(new_p);
+        //self.interpolation_matrices.push(new_pt);
+        self.partition_matrices.push(interpolation);
+        self.interpolation_matrices.push(p_transpose);
+    }
+
     /// Get a single P matrix from the hierarchy.
     pub fn get_partition(&self, level: usize) -> &CsrMatrix<f64> {
         &self.partition_matrices[level]
@@ -191,7 +437,8 @@ pub fn modularity_matching_add_level(
                 partition_mat = &partition_mat * &new_partition;
 
                 if starting_vertex_count / coarse_vertex_count > coarsening_factor {
-                    hierarchy.push_p_scaled_by_w(partition_mat, near_null);
+                    //hierarchy.push_p_scaled_by_w(partition_mat, near_null);
+                    hierarchy.add_classical_interpolant(partition_mat, near_null);
                     trace!(
                         "added level: {}. num vertices coarse: {} nnz: {}",
                         hierarchy.levels(),
@@ -462,7 +709,8 @@ fn fix_bad_clusters(
 
     let abs = near_null.abs();
     let max = abs.max();
-    let threshold = 1.0e-8_f64;
+    // TODO study how this value changes performance of solver
+    let threshold = 1e-15_f64;
     let almost_zero: IndexSet<_> = abs
         .iter()
         .enumerate()
