@@ -19,21 +19,15 @@ log = "0"
 strum = "0"
 strum_macros = "0"
 rayon = "1"
-reqwest = { version = "0", features = ["stream", "gzip"] }
-soup = "0"
-flate2 = "1"
-tar = "0"
-tokio = { version = "1", features = ["full"] }
-plotly = "0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0"
-plotters = "0.3.5"
-vtkio = "0.6.3"
+plotters = "0.3.3"
+#vtkio = "0.6.3"
 # TODO add anyhow and fix all error handling
 
-[dependencies.nalgebra-lapack]
-version = "0"
+#[dependencies.nalgebra-lapack]
+#version = "0"
 
 [dev-dependencies]
 test-generator = "0"

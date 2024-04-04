@@ -2,7 +2,7 @@ use nalgebra_sparse::CsrMatrix;
 use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
 
-extern crate vtkio;
+//extern crate vtkio;
 /*
 *
 * Visualizations:

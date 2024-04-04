@@ -38,5 +38,4 @@ pub mod parallel_ops;
 pub mod partitioner;
 pub mod preconditioner;
 pub mod solver;
-pub mod suitesparse_dl;
 pub mod utils;

@@ -168,14 +168,8 @@ fn test_solve(
     step_size: usize,
 ) {
     let epsilon = 1e-12;
-    let num_tests = 3;
-    let mut results = vec![Vec::new(); num_tests];
-    let methods = [
-        IterativeMethod::StationaryIteration,
-        IterativeMethod::StationaryIteration,
-        IterativeMethod::ConjugateGradient,
-    ];
-    assert_eq!(num_tests, methods.len());
+    let num_tests = 4;
+    let mut all_results = vec![Vec::new(); num_tests];
     let max_minutes = 15;
 
     let dim = mat.nrows();
@@ -237,9 +231,15 @@ fn test_solve(
     while pc.components().len() > 0 {
         // todo do additive?
         let applications = [Application::Multiplicative, Application::Random];
-        for (method, mut result) in methods.iter().zip(results.iter_mut()) {
+        let methods = [
+            IterativeMethod::StationaryIteration,
+            IterativeMethod::ConjugateGradient,
+        ];
+        let mut counter = 0;
+        for method in methods.iter() {
             for application in applications.iter() {
-                solve(*method, &mut result, *application, &mut pc);
+                solve(*method, &mut all_results[counter], *application, &mut pc);
+                counter += 1
             }
         }
 

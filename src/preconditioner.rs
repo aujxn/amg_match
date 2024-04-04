@@ -7,7 +7,6 @@ use crate::solver::{lsolve, usolve, Direct, Iterative, IterativeMethod, Solver};
 use nalgebra::base::DVector;
 use nalgebra_sparse::CsrMatrix;
 use rand::seq::SliceRandom;
-use std::process::Output;
 use std::rc::Rc;
 
 pub trait LinearOperator {
