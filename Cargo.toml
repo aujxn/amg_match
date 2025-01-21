@@ -1,6 +1,6 @@
 [package]
 name = "amg_match"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Research iterative solver utilities"
@@ -31,8 +31,6 @@ regex = "1"
 metis = { version = "0.2.1", features = ["vendored"] }
 bytemuck = "1.21.0"
 npyz = "0.8.3"
-#vtkio = "0.6.3"
-# TODO add anyhow and fix all error handling
 
 #[dependencies.nalgebra-lapack]
 #version = "0"
