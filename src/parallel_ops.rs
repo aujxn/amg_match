@@ -6,6 +6,7 @@ use nalgebra_sparse::CsrMatrix;
 use rayon::prelude::*;
 
 pub fn spmm(a: &CsrMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
+    assert_eq!(a.ncols(), b.len());
     let mut c = DVector::<f64>::zeros(a.nrows());
     c.as_mut_slice()
         .par_iter_mut()

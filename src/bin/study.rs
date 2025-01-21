@@ -1,4 +1,5 @@
-use std::{fs::File, io::Write, rc::Rc, time::Duration};
+use std::sync::Arc;
+use std::{borrow::Borrow, fs::File, io::Write, time::Duration};
 
 use amg_match::{
     adaptive::AdaptiveBuilder,
@@ -7,6 +8,7 @@ use amg_match::{
     utils::{format_duration, load_system, random_vec},
 };
 use nalgebra::DVector;
+use nalgebra_sparse::io::save_to_matrix_market_file as write_mm;
 use nalgebra_sparse::{io::load_coo_from_matrix_market_file as load_mm, CsrMatrix};
 use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,10 +23,13 @@ use structopt::StructOpt;
 * TODO
 * - redo cg tests with new convergence norm
 * - SGS implementation
-* - slides for rtg
-* - paper edits
 * - check spd
-* - reschedule presentation jan 30 - feb 2
+*
+* - FOR CMIM
+*   - 2 slides for interpolants (piecewise constant interpolation vs classical AMG interpolation)
+*       (Show block form for classical, both recover near null (in different ways, equations),
+*       operator complexity of classical for all examples (geometric complexity is size of vectors
+*       CF)
 */
 
 #[macro_use]
@@ -69,8 +74,6 @@ struct Opt {
  *  - spe10 visualization (slice of errors, coefficient, etc)
  *  - compare with boomeramg?
  *
- *  - FIX L1 SMOOTHER
- *
  */
 
 fn main() {
@@ -78,24 +81,30 @@ fn main() {
 
     let mfem_mats = [
         ("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
-        ("data/spe10/spe10_0", "spe10"),
+        //("data/spe10/spe10_0", "spe10"),
+        //("data/elasticity/elasticity_3d", "elasticity"),
     ];
 
     for (prefix, name) in mfem_mats {
         study_mfem(prefix, &name);
     }
 
-    let suitesparse_mats = ["G3_circuit", "Flan_1565"];
+    //let suitesparse_mats = ["G3_circuit", "Flan_1565"];
     //let suitesparse_mats = ["Flan_1565"];
     //let suitesparse_mats = ["G3_circuit"];
-    for name in suitesparse_mats {
-        let mat_path = format!("data/suitesparse/{}/{}.mtx", name, name);
-        study_suitesparse(&mat_path, &name);
-    }
+    /*
+        let suitesparse_mats = ["boneS10", "G3_circuit", "Flan_1565"];
+        for name in suitesparse_mats {
+            let mat_path = format!("data/suitesparse/{}/{}.mtx", name, name);
+            study_suitesparse(&mat_path, &name);
+        }
+    */
 }
 
 fn study_mfem(prefix: &str, name: &str) {
     let (mat, b, _coords, _projector) = load_system(prefix);
+    //let mat_ref: &CsrMatrix<f64> = mat.borrow();
+    //write_mm(mat_ref, "anis_2d.mtx").expect("failed");
     let _pc = study(mat, b, name);
 
     /*
@@ -109,21 +118,24 @@ fn study_mfem(prefix: &str, name: &str) {
 }
 
 fn study_suitesparse(mat_path: &str, name: &str) {
-    let mat = { std::rc::Rc::new(CsrMatrix::from(&load_mm(mat_path).unwrap())) };
+    let mat = { Arc::new(CsrMatrix::from(&load_mm(mat_path).unwrap())) };
     let dim = mat.nrows();
     let b: DVector<f64> = random_vec(dim);
     study(mat, b, name);
 }
 
-fn study(mat: Rc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
+fn study(mat: Arc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
     info!("nrows: {} nnz: {}", mat.nrows(), mat.nnz());
-    let max_components = 30;
-    let coarsening_factor = 32.0;
+    let max_components = 16;
+    let coarsening_factor = 9.0;
+    let test_iters = 30;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
-        .with_max_test_iters(30);
+        //.with_project_first_only()
+        //.with_max_level(2)
+        .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
     let timer = std::time::Instant::now();
@@ -147,8 +159,10 @@ fn study(mat: Rc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
         .collect();
     */
 
-    let components_title = format!("{}_tester_CF-{:.0}", name, coarsening_factor);
-    plot_convergence_history(&components_title, &convergence_hist, step_size);
+    /*
+        let components_title = format!("{}_tester_CF-{:.0}", name, coarsening_factor);
+        plot_convergence_history(&components_title, &convergence_hist, step_size);
+    */
 
     test_solve(name, mat.clone(), &b, pc.clone(), step_size);
     pc
@@ -162,26 +176,29 @@ struct SolveResults {
 
 fn test_solve(
     name: &str,
-    mat: Rc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix<f64>>,
     b: &DVector<f64>,
     mut pc: Composite,
     step_size: usize,
 ) {
     let epsilon = 1e-12;
-    let num_tests = 4;
+    //let epsilon = 1e-8;
+    let num_tests = 2;
+    //let num_tests = 4;
     let mut all_results = vec![Vec::new(); num_tests];
-    let max_minutes = 15;
+    let max_minutes = 30;
 
     let dim = mat.nrows();
     info!("Solving {}", name);
 
-    let guess: DVector<f64> = random_vec(dim);
+    //let guess: DVector<f64> = random_vec(dim).normalize();
+    let guess: DVector<f64> = DVector::zeros(dim);
 
     let log_result = |solver_type: IterativeMethod,
                       solve_results: &Vec<SolveResults>,
                       application: Application| {
         info!("{:?} Results", solver_type);
-        info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles");
+        info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles",);
         for result in solve_results.iter() {
             info!(
                 "{:15} {:15} {:15}",
@@ -191,7 +208,7 @@ fn test_solve(
                     Application::Multiplicative =>
                         result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1),
                     Application::Random => result.solve_info.iterations,
-                }
+                },
             );
         }
     };
@@ -200,13 +217,13 @@ fn test_solve(
                  results: &mut Vec<SolveResults>,
                  application: Application,
                  pc: &mut Composite| {
-        let base_solver = |mat: Rc<CsrMatrix<f64>>, pc: Composite, guess: DVector<f64>| {
+        let base_solver = |mat: Arc<CsrMatrix<f64>>, pc: Composite, guess: DVector<f64>| {
             Iterative::new(mat.clone(), Some(guess))
                 .with_tolerance(epsilon)
-                .with_max_iter(10000)
+                //.with_max_iter(10000)
                 .with_max_duration(Duration::from_secs(60 * max_minutes))
                 .with_solver(IterativeMethod::ConjugateGradient)
-                .with_preconditioner(Rc::new(pc))
+                .with_preconditioner(Arc::new(pc))
                 .with_log_interval(LogInterval::Time(Duration::from_secs(30)))
         };
         let num_components = pc.components().len();
@@ -215,26 +232,39 @@ fn test_solve(
             Application::Multiplicative => 2000 / ((2 * (num_components - 1)) + 1),
             Application::Random => 2000,
         };
-        let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
-            .with_solver(method)
-            .with_max_iter(max_iter);
+        let solver = base_solver(mat.clone(), pc.clone(), guess.clone()).with_solver(method);
+        //.with_max_iter(max_iter);
+        let complexity = pc
+            .components()
+            .iter()
+            .map(|ml| ml.hierarchy.op_complexity())
+            .sum::<f32>();
+        info!(
+            "Starting solve with {} components and {:.2} complexity",
+            pc.components().len(),
+            complexity
+        );
         let (_, solve_info) = solver.solve(&b);
         results.push(SolveResults {
             num_components,
             solve_info,
         });
         log_result(method, &results, application);
-        let title = format!("{}_{:?}_{:?}", name, method, &application);
+        let title = format!("{}_{:?}_{:?}_notonlypos", name, method, &application);
         plot_test_solve(&title, &results, application);
     };
 
     while pc.components().len() > 0 {
         // todo do additive?
-        let applications = [Application::Multiplicative, Application::Random];
+        //let applications = [Application::Multiplicative, Application::Random];
+        let applications = [Application::Multiplicative];
+
         let methods = [
             IterativeMethod::StationaryIteration,
             IterativeMethod::ConjugateGradient,
         ];
+
+        //let methods = [IterativeMethod::StationaryIteration];
         let mut counter = 0;
         for method in methods.iter() {
             for application in applications.iter() {
@@ -479,6 +509,7 @@ fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: usize)
     chart
         .configure_series_labels()
         .position(SeriesLabelPosition::LowerLeft)
+        .label_font(("sans-serif", 18))
         .margin(10)
         .background_style(&WHITE.mix(0.8))
         .border_style(&BLACK)

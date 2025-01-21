@@ -1,21 +1,19 @@
 //! Implementation of various sparse matrix solvers for the
 //! system `Ax=b`.
 
-//use crate::parallel_ops::spmm_csr_dense;
+use crate::parallel_ops::spmm;
+use crate::utils::norm;
 use crate::{
-    parallel_ops::spmm,
     preconditioner::{Identity, LinearOperator},
     utils::{format_duration, random_vec},
 };
 use nalgebra::{base::DVector, Dyn, FullPivLU};
 use nalgebra_sparse::{convert::serial::convert_csr_dense, csr::CsrMatrix};
 use serde::{Deserialize, Serialize};
-use std::{
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 pub enum IterativeMethod {
     ConjugateGradient,
     StationaryIteration,
@@ -37,6 +35,9 @@ pub enum Solver {
     Direct(Direct),
 }
 
+// TODO this is so janky with handling iterative and direct with a new struct.
+// The LinearOperator trait should probably have a way to set the initial guess...
+// Even if this doesn't make sense for all linear operators.
 impl Solver {
     pub fn solve_with_guess(
         &self,
@@ -51,14 +52,15 @@ impl Solver {
 }
 
 pub struct Iterative {
-    mat: Rc<CsrMatrix<f64>>, // maybe eventually this becomes linear operator also
+    mat: Arc<CsrMatrix<f64>>, // maybe eventually this becomes linear operator also
     solver: IterativeMethod,
-    preconditioner: Rc<dyn LinearOperator>,
+    preconditioner: Arc<dyn LinearOperator + Send + Sync>,
     max_iter: Option<usize>,
     max_duration: Option<Duration>,
     tolerance: f64,
     initial_guess: DVector<f64>,
     log_interval: Option<LogInterval>,
+    //optimized: bool,
 }
 
 pub struct Direct {
@@ -66,7 +68,7 @@ pub struct Direct {
 }
 
 impl Direct {
-    pub fn new(mat: &Rc<CsrMatrix<f64>>) -> Self {
+    pub fn new(mat: &Arc<CsrMatrix<f64>>) -> Self {
         let dense = convert_csr_dense(mat);
         let lu = FullPivLU::new(dense);
         Self { lu }
@@ -89,18 +91,24 @@ impl LinearOperator for Direct {
 }
 
 impl Iterative {
-    pub fn new(mat: Rc<CsrMatrix<f64>>, initial_guess: Option<DVector<f64>>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix<f64>>, initial_guess: Option<DVector<f64>>) -> Self {
         let initial_guess = initial_guess.unwrap_or(random_vec(mat.ncols()));
         Self {
             mat,
             solver: IterativeMethod::ConjugateGradient,
-            preconditioner: Rc::new(Identity),
+            preconditioner: Arc::new(Identity),
             max_iter: None,
             max_duration: None,
             tolerance: 1e-12,
             initial_guess,
             log_interval: None,
+            //optimized: false,
         }
+    }
+
+    pub fn set_op(mut self, mat: Arc<CsrMatrix<f64>>) -> Self {
+        self.mat = mat;
+        self
     }
 
     pub fn with_solver(mut self, solver: IterativeMethod) -> Self {
@@ -108,7 +116,10 @@ impl Iterative {
         self
     }
 
-    pub fn with_preconditioner(mut self, preconditioner: Rc<dyn LinearOperator>) -> Self {
+    pub fn with_preconditioner(
+        mut self,
+        preconditioner: Arc<dyn LinearOperator + Send + Sync>,
+    ) -> Self {
         self.preconditioner = preconditioner;
         self
     }
@@ -153,8 +164,36 @@ impl Iterative {
         self
     }
 
+    /*
+    pub fn optimized(mut self) -> Self {
+        // TODO problably want to check for conflicting settings...
+        self.optimized = true;
+        self
+    }
+
+    pub fn featured(mut self) -> Self {
+        self.optimized = false;
+        self
+    }
+    */
+
     pub fn solve(&self, rhs: &DVector<f64>) -> (DVector<f64>, SolveInfo) {
         self.solve_with_guess(rhs, &self.initial_guess)
+    }
+
+    pub fn solve_optimized(&self, rhs: &DVector<f64>) -> DVector<f64> {
+        let mut solution = self.initial_guess.clone();
+        self.solve_optimized_with_guess(rhs, &mut solution);
+        solution
+    }
+
+    pub fn solve_optimized_with_guess(&self, rhs: &DVector<f64>, solution: &mut DVector<f64>) {
+        match self.solver {
+            IterativeMethod::ConjugateGradient => self.pcg_optimized_serial(rhs, solution),
+            IterativeMethod::StationaryIteration => {
+                self.stationary_optimized_threaded(rhs, solution)
+            }
+        };
     }
 
     pub fn solve_with_guess(
@@ -195,18 +234,16 @@ impl Iterative {
 // This implementation could be way better to avoid allocations
 impl LinearOperator for Iterative {
     fn apply_mut(&self, vec: &mut DVector<f64>) {
-        let (solution, _solve_info) = self.solve(vec);
+        let solution = self.solve_optimized(vec);
         vec.copy_from(&solution);
     }
 
     fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
-        let (solution, _solve_info) = self.solve(vec);
-        solution
+        self.solve_optimized(vec)
     }
 
     fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
-        let (solution, _solve_info) = self.solve(in_vec);
-        out_vec.copy_from(&solution);
+        self.solve_optimized_with_guess(in_vec, out_vec);
     }
 }
 
@@ -258,9 +295,12 @@ impl Iterative {
     fn stationary(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - &(mat * &*x);
-        let r0 = r.dot(&r);
-        let convergence_criterion = r0 * self.tolerance * self.tolerance;
-        let norm0 = r0.sqrt();
+        let mut r0 = r.clone();
+        self.preconditioner.apply_mut(&mut r0);
+        //let r0 = r.dot(&r);
+        let norm0 = r0.norm();
+        //let r0 = r0.dot(&r0);
+        //let convergence_criterion = r0 * self.tolerance * self.tolerance;
 
         if self.log_interval.is_some() {
             trace!("Initial Residual Norm : {norm0:.3e}");
@@ -273,22 +313,20 @@ impl Iterative {
 
         loop {
             self.preconditioner.apply_mut(&mut r);
+            let r_norm = r.norm();
+            let ratio = r_norm / norm0;
             *x += &r;
             r = rhs - spmm(mat, &*x);
+            //r = rhs - (mat * &*x);
             iter += 1;
 
-            let r_norm_squared = r.dot(&r);
-            let ratio = (r_norm_squared / r0).sqrt();
-            self.check_log_interval(
-                iter,
-                &mut last_log,
-                &start_time,
-                r_norm_squared.sqrt(),
-                ratio,
-            );
-            convergence_history.push(ratio);
+            //let ratio = (r_norm_squared / r0).sqrt();
+            self.check_log_interval(iter, &mut last_log, &start_time, r_norm, ratio);
+            if iter > 1 {
+                convergence_history.push(ratio);
+            }
 
-            if r_norm_squared < convergence_criterion {
+            if ratio < self.tolerance {
                 return SolveInfo {
                     converged: true,
                     initial_residual_norm: norm0,
@@ -303,12 +341,33 @@ impl Iterative {
                 return SolveInfo {
                     converged: false,
                     initial_residual_norm: norm0,
-                    final_relative_residual_norm: ratio.sqrt(),
+                    final_relative_residual_norm: ratio,
                     iterations: iter,
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
                 };
             }
+        }
+    }
+
+    fn stationary_optimized_threaded(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) {
+        let mat = &*self.mat;
+        //let mut r = rhs - &(mat * &*x);
+        let mut r = rhs - spmm(mat, &*x);
+
+        let max_iter = self.max_iter.unwrap();
+        let mut iter: usize = 0;
+
+        loop {
+            self.preconditioner.apply_mut(&mut r);
+            *x += &r;
+            iter += 1;
+            if iter >= max_iter {
+                return;
+            }
+
+            r = rhs - spmm(mat, &*x);
+            //r = rhs - (mat * &*x);
         }
     }
 
@@ -319,12 +378,28 @@ impl Iterative {
     fn pcg(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - spmm(mat, &*x);
+        //let mut r = rhs - (mat * &*x);
 
         let mut r_bar = r.clone();
         self.preconditioner.apply_mut(&mut r_bar);
         let mut d = r.dot(&r_bar);
         let d0 = d;
+        if d0 < 1e-16 {
+            return SolveInfo {
+                converged: true,
+                initial_residual_norm: d0,
+                final_relative_residual_norm: 1.0,
+                iterations: 0,
+                time: Duration::ZERO,
+                relative_residual_norm_history: Vec::new(),
+            };
+        }
         let converged_criterion = d0 * self.tolerance * self.tolerance;
+        /*
+        if converged_criterion < 1e-16 {
+            warn!("Convergence criterion for PCG is very small... initial residual ((Br,r) = {:.3e}) might be nearly 0.0", d0);
+        }
+        */
         let norm0 = d0.sqrt();
         if self.log_interval.is_some() {
             trace!("Initial (Br, r): {:.3e}", d0)
@@ -339,6 +414,7 @@ impl Iterative {
         loop {
             if self.check_max_conditions(iter, start_time) {
                 let r_final = rhs - spmm(mat, &*x);
+                //let r_final = rhs - (mat * &*x);
                 let relative_residual_norm = (r_final.dot(&r_final) / d0).sqrt();
                 return SolveInfo {
                     converged: false,
@@ -353,6 +429,7 @@ impl Iterative {
             iter += 1;
 
             let mut g = spmm(mat, &p);
+            //let mut g = mat * &p;
             let alpha = d / p.dot(&g);
             if alpha < 0.0 {
                 error!("alpha is negative: {alpha}");
@@ -393,6 +470,46 @@ impl Iterative {
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
                 };
+            }
+
+            let beta = d / d_old;
+            p *= beta;
+            p += &r_bar;
+        }
+    }
+
+    fn pcg_optimized_serial(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) {
+        let mat = &*self.mat;
+        let mut r = rhs - (mat * &*x);
+
+        let mut r_bar = r.clone();
+        self.preconditioner.apply_mut(&mut r_bar);
+        let mut d = r.dot(&r_bar);
+        let d0 = d;
+        if d0 < 1e-16 {
+            return;
+        }
+        let converged_criterion = d0 * self.tolerance * self.tolerance;
+        let mut p = r_bar.clone();
+
+        loop {
+            let mut g = mat * &p;
+            let alpha = d / p.dot(&g);
+            g *= alpha;
+            //x += &(alpha * &p);
+            x.iter_mut()
+                .zip(p.iter())
+                .for_each(|(x_i, p_i)| *x_i += *p_i * alpha);
+
+            r -= &g;
+
+            r_bar.copy_from(&r);
+            self.preconditioner.apply_mut(&mut r_bar);
+            let d_old = d;
+            d = r.dot(&r_bar);
+
+            if d < converged_criterion {
+                return;
             }
 
             let beta = d / d_old;

@@ -7,12 +7,12 @@ use nalgebra::DVector;
 use nalgebra_sparse::{
     coo::CooMatrix, csr::CsrMatrix, io::load_coo_from_matrix_market_file as load_mm,
 };
+use std::sync::Arc;
 use std::{
     fmt::Display,
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
-    rc::Rc,
     time::Duration,
 };
 
@@ -25,7 +25,7 @@ pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
 pub fn load_system(
     prefix: &str,
 ) -> (
-    Rc<CsrMatrix<f64>>,
+    Arc<CsrMatrix<f64>>,
     DVector<f64>,
     Vec<Vec<f64>>,
     CsrMatrix<f64>,
@@ -48,8 +48,8 @@ pub fn load_system(
     let factor = normalize_mat(&mut mat);
     b /= factor;
     */
-    (std::rc::Rc::new(mat), b, coords, projector)
-    //(std::rc::Rc::new(mat), b, Vec::new(), CsrMatrix::identity(1))
+    (Arc::new(mat), b, coords, projector)
+    //(Arc::new(mat), b, Vec::new(), CsrMatrix::identity(1))
 }
 
 // TODO add coords file for spe10
@@ -148,6 +148,7 @@ pub fn delete_boundary(
 
     let p_t = p_mat.transpose();
     let new_mat = &p_t * &(mat * &p_mat);
+    let new_mat = new_mat.filter(|_, _, v| *v != 0.0);
     let new_vec = &p_t * &vec;
     (new_mat, new_vec, p_mat)
 }
@@ -167,7 +168,7 @@ pub fn inner_product(
     //let mut workspace = DVector::from(vec![0.0; vec_right.nrows()]);
     //spmm_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec_right);
     let workspace = mat * vec_right;
-    return vec_left.dot(&workspace);
+    vec_left.dot(&workspace)
 }
 
 pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
@@ -203,11 +204,15 @@ pub fn normalize_mat(mat: &mut CsrMatrix<f64>) -> f64 {
 }
 
 pub fn format_duration(duration: &Duration) -> String {
-    let seconds = duration.as_secs();
+    let milis = duration.as_millis();
+    let seconds = milis / 1000;
     let minutes = seconds / 60;
     let hours = minutes / 60;
     let minutes = minutes % 60;
     let seconds = seconds % 60;
 
-    format!("{} hours, {} minutes, {} seconds", hours, minutes, seconds)
+    format!(
+        "{} hours, {} minutes, {} seconds, {} ms",
+        hours, minutes, seconds, milis
+    )
 }

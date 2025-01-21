@@ -1,32 +1,32 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
 use crate::{
-    io::plot_convergence_history,
-    partitioner::{modularity_matching, modularity_matching_add_level, Hierarchy},
-    preconditioner::{Composite, LinearOperator, Multilevel, L1},
+    partitioner::{modularity_matching_add_level, Hierarchy, InterpolationType},
+    preconditioner::{Composite, LinearOperator, Multilevel, SmootherType, L1},
     solver::{Iterative, IterativeMethod},
-    utils::{norm, random_vec},
+    utils::{inner_product, norm, random_vec},
 };
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
-use std::{
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub struct AdaptiveBuilder {
-    mat: std::rc::Rc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix<f64>>,
     coarsening_factor: f64,
     max_level: Option<usize>,
     target_convergence: Option<f64>,
     max_components: Option<usize>,
     test_iters: Option<usize>,
     // TODO max test duration?
-    project_first_only: bool,
+    solve_coarsest_exactly: bool,
+    smoothing_steps: usize,
+    smoother_type: SmootherType,
+    interpolation_type: InterpolationType,
 }
 
 impl AdaptiveBuilder {
-    pub fn new(mat: Rc<CsrMatrix<f64>>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix<f64>>) -> Self {
         AdaptiveBuilder {
             mat,
             coarsening_factor: 8.0,
@@ -34,11 +34,14 @@ impl AdaptiveBuilder {
             target_convergence: None,
             max_components: Some(10),
             test_iters: None,
-            project_first_only: false,
+            solve_coarsest_exactly: true,
+            smoothing_steps: 1,
+            smoother_type: SmootherType::BlockGaussSeidel,
+            interpolation_type: InterpolationType::SmoothedAggregation(1),
         }
     }
 
-    pub fn with_matrix(mut self, mat: Rc<CsrMatrix<f64>>) -> Self {
+    pub fn with_matrix(mut self, mat: Arc<CsrMatrix<f64>>) -> Self {
         self.mat = mat;
         self
     }
@@ -88,15 +91,32 @@ impl AdaptiveBuilder {
         self
     }
 
-    pub fn with_project_first_only(mut self) -> Self {
-        self.project_first_only = true;
+    pub fn with_smoother(mut self, smoother: SmootherType) -> Self {
+        self.smoother_type = smoother;
         self
     }
 
-    pub fn with_project_all_levels(mut self) -> Self {
-        self.project_first_only = false;
+    pub fn with_smoothing_steps(mut self, steps: usize) -> Self {
+        self.smoothing_steps = steps;
         self
     }
+
+    pub fn solve_coarsest_exactly(mut self) -> Self {
+        self.solve_coarsest_exactly = true;
+        self
+    }
+
+    pub fn smooth_coarsest(mut self) -> Self {
+        self.solve_coarsest_exactly = false;
+        self
+    }
+
+    pub fn with_interpolator(mut self, interpolation: InterpolationType) -> Self {
+        self.interpolation_type = interpolation;
+        self
+    }
+
+    //TODO from yaml config??
 
     //TODO log intervals and max time?
     pub fn build(&self) -> (Composite, Vec<Vec<f64>>, Vec<DVector<f64>>) {
@@ -105,222 +125,181 @@ impl AdaptiveBuilder {
         let dim = self.mat.nrows();
         let mut near_null_history = Vec::<DVector<f64>>::new();
         let mut test_data = Vec::new();
-        //let solve_exactly = self.max_level.unwrap_or(0) == 2;
-
-        // TODO arg all 3 of these?
-        let solve_exactly = true;
-        //let smoother = crate::preconditioner::SmootherType::GaussSeidel;
-        let smoother = crate::preconditioner::SmootherType::L1;
-        let sweeps = 5;
 
         // Find initial near null to get the iterations started
-        let fine_l1 = Rc::new(L1::new(&self.mat));
-        //let mut near_null: DVector<f64> = DVector::from_element(dim, 1.0); //.normalize();
-        let guess: DVector<f64> = DVector::from_element(dim, 1.0); //.normalize();
+        let fine_l1 = Arc::new(L1::new(&self.mat));
+        info!("built smoother");
+        let guess: DVector<f64> = DVector::from_element(dim, 1.0);
         let stationary = Iterative::new(self.mat.clone(), Some(guess))
             .with_solver(IterativeMethod::StationaryIteration)
-            .with_tolerance(1e-3)
-            .with_max_iter(1000)
-            //.with_log_interval(LogInterval::Iterations(1001))
+            .with_max_iter(3)
             .with_preconditioner(fine_l1.clone());
         let zeros = DVector::from(vec![0.0; dim]);
         let mut near_null = stationary.apply(&zeros);
 
         loop {
-            //normalize(&mut near_null, &self.mat);
-            near_null.normalize_mut();
-            let test = &*self.mat * &near_null;
-            trace!("Near-Null score: {:.2e}", test.norm());
+            trace!("Near-Null score: {:.2e}", norm(&near_null, &*self.mat));
 
             // Sanity check that each near null is orthogonal to the last.
             // Could move into test suite down the line.
             let ortho_check: String = near_null_history
                 .iter()
-                //.map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
-                .map(|old| format!("{:.1e}, ", near_null.dot(old)))
+                .map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
                 .collect();
             near_null_history.push(near_null.clone());
             if !near_null_history.is_empty() {
                 trace!("Near null component inner product with history: {ortho_check}");
             }
 
-            let hierarchy = if self.project_first_only {
-                modularity_matching(self.mat.clone(), &near_null, self.coarsening_factor)
-            } else {
-                let mut hierarchy = Hierarchy::new(self.mat.clone());
-                let mut levels = 1;
-                while modularity_matching_add_level(
+            let mut hierarchy = Hierarchy::new(self.mat.clone());
+            let mut levels = 1;
+
+            loop {
+                near_null = modularity_matching_add_level(
                     &near_null,
                     self.coarsening_factor,
                     &mut hierarchy,
-                ) {
-                    levels += 1;
-                    if let Some(max_level) = self.max_level {
-                        if levels == max_level {
-                            break;
-                        }
-                    }
-                    if hierarchy
-                        .get_matrices()
-                        .last()
-                        .unwrap_or(&hierarchy.get_mat(0))
-                        .nrows()
-                        < 100
-                    {
+                    self.interpolation_type,
+                );
+
+                levels += 1;
+                if let Some(max_level) = self.max_level {
+                    if levels == max_level {
                         break;
                     }
-                    near_null = {
-                        let current_a = hierarchy
-                            .get_matrices()
-                            .last()
-                            .unwrap_or(&hierarchy.get_mat(0))
-                            .clone();
-
-                        let dim = current_a.nrows();
-                        let start = hierarchy.get_interpolations().last().unwrap() * near_null;
-                        //let start = DVector::from(vec![1.0; dim]);
-                        let l1 = Rc::new(L1::new(&current_a));
-                        let zeros = DVector::from(vec![0.0; dim]);
-
-                        let stationary = Iterative::new(current_a.clone(), Some(start))
-                            .with_solver(IterativeMethod::StationaryIteration)
-                            .with_tolerance(1e-4)
-                            .with_max_iter(1000)
-                            .with_preconditioner(l1);
-                        let mut near_null = stationary.apply(&zeros);
-                        //normalize(&mut near_null, &current_a);
-                        near_null.normalize_mut();
-                        near_null
-                    };
                 }
-                hierarchy
-            };
-            info!("Hierarchy info: {:?}", hierarchy);
+                if hierarchy
+                    .get_matrices()
+                    .last()
+                    .unwrap_or(&hierarchy.get_mat(0))
+                    .nrows()
+                    < 100
+                {
+                    break;
+                }
 
-            let ml1 = Rc::new(Multilevel::new(
+                let current_a = hierarchy
+                    .get_matrices()
+                    .last()
+                    .unwrap_or(&hierarchy.get_mat(0))
+                    .clone();
+
+                let dim = current_a.nrows();
+                let l1 = Arc::new(L1::new(&current_a));
+                let zeros = DVector::from(vec![0.0; dim]);
+
+                let stationary = Iterative::new(current_a.clone(), Some(near_null))
+                    .with_solver(IterativeMethod::StationaryIteration)
+                    .with_max_iter(3)
+                    .with_preconditioner(l1.clone());
+                near_null = stationary.apply(&zeros);
+                //normalize(&mut near_null, &current_a);
+                near_null.normalize_mut();
+            }
+            //hierarchy.consolidate(self.coarsening_factor);
+            info!("Hierarchy info*: {:?}", hierarchy);
+
+            let ml1 = Arc::new(Multilevel::new(
                 hierarchy,
-                Some(fine_l1.clone()),
-                //None,
-                solve_exactly,
-                smoother,
-                sweeps,
+                self.solve_coarsest_exactly,
+                self.smoother_type,
+                self.smoothing_steps,
             ));
+            trace!("Multilevel pc constructed");
             preconditioner.push(ml1);
+
+            near_null = random_vec(dim);
+            let (convergence_rate, convergence_history) = find_near_null(
+                self.mat.clone(),
+                &preconditioner,
+                &mut near_null,
+                self.test_iters,
+            );
+
+            for (i, (cf, cf_next)) in convergence_history
+                .iter()
+                .copied()
+                .zip(convergence_history.iter().skip(1).copied())
+                .enumerate()
+            {
+                if cf > cf_next || cf >= 1.0 {
+                    error!("Monotonicity or convergence properties violated in homogeneous problem at iter: {}, cf_i: {:.2}, cf_i+1: {:.2}\nConvergence history: {:?}", i, cf, cf_next, convergence_history);
+                }
+            }
+
+            test_data.push(convergence_history);
+            //plot_convergence_history("in_progress", &test_data, 1);
             if let Some(max_components) = self.max_components {
                 if preconditioner.components().len() >= max_components {
                     return (preconditioner, test_data, near_null_history);
                 }
             }
-
-            near_null = random_vec(dim);
-            if let Some((convergence_rate, convergence_history)) = find_near_null(
-                self.mat.clone(),
-                &preconditioner,
-                &mut near_null,
-                self.test_iters,
-            ) {
-                test_data.push(convergence_history);
-                plot_convergence_history("in_progress", &test_data, 1);
-                if let Some(target_convergence) = self.target_convergence {
-                    if convergence_rate < target_convergence {
-                        return (preconditioner, test_data, near_null_history);
-                    }
+            if let Some(target_convergence) = self.target_convergence {
+                if convergence_rate < target_convergence {
+                    return (preconditioner, test_data, near_null_history);
                 }
-            } else {
-                // TODO keep last convergence history if tester converges (low prio)
-                return (preconditioner, test_data, near_null_history);
             }
         }
     }
 }
 
-//TODO log intervals and max time?
 fn find_near_null(
-    mat: Rc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix<f64>>,
     composite_preconditioner: &Composite,
     near_null: &mut DVector<f64>,
     test_iters: Option<usize>,
-) -> Option<(f64, Vec<f64>)> {
-    trace!("searching for near null");
+) -> (f64, Vec<f64>) {
     let mut iter = 0;
+    let max_iter = test_iters.unwrap_or(usize::MAX);
     let start = Instant::now();
     let mut last_log = start;
     let log_interval = Duration::from_secs(10);
-    let starting_error = norm(&near_null, &*mat);
-    let mut convergence_history: Vec<f64> = Vec::new();
-    let mut old_error_norm = f64::MAX;
-    let mut convergence_rate_per_second;
-    let mut convergence_rate_per_iter;
     let zeros = DVector::from(vec![0.0; near_null.nrows()]);
-    let mut error_ratio = f64::MAX;
+    let mut old_convergence_factor = 0.0;
+    let mut history = Vec::new();
 
     loop {
+        near_null.normalize_mut();
         let stationary = Iterative::new(mat.clone(), Some(near_null.clone()))
             .with_solver(IterativeMethod::StationaryIteration)
-            .with_preconditioner(Rc::new(composite_preconditioner.clone()))
-            .with_max_iter(1)
-            .with_tolerance(1e-16);
+            .with_preconditioner(Arc::new(composite_preconditioner.clone()))
+            .with_max_iter(1);
         *near_null = stationary.apply(&zeros);
         iter += 1;
-        let current_error = norm(&near_null, &*mat);
-        let previous_error_ratio = error_ratio;
-        error_ratio = current_error / old_error_norm;
-        old_error_norm = current_error;
+        let convergence_factor = near_null.norm();
+        history.push(convergence_factor);
 
-        // TODO fix this maybe
         let now = Instant::now();
         let elapsed = (now - start).as_millis();
         let elapsed_secs = elapsed as f64 / 1000.0;
 
-        let convergence = current_error / starting_error;
-        if convergence < 1e-12 {
-            warn!("find_near_null converged during search");
-            return None;
-        }
-        convergence_history.push(convergence);
-        convergence_rate_per_second = convergence.powf(1.0 / elapsed_secs);
-        convergence_rate_per_iter = convergence.powf(1.0 / iter as f64);
-        // TODO use rayleigh quotient?
-        let ratio_change = (previous_error_ratio - error_ratio).abs();
-
+        let cycles = ((composite_preconditioner.components().len() * 2) - 1) as f64;
         if now - last_log > log_interval {
             trace!(
-                "iteration {}:\n\ttotal search time: {:.0}s\n\tconvergence per second: {:.3}\n\tconvergence per iteration: {:.3}\n\terror ratio to previous iteration: {:.3}\n\trelative error (A-norm): {:.2e}\n\tratio change: {:.2e}",
+                "iteration {}:\n\ttotal search time: {:.0}s\n\tConvergence Factor: {:.3}\n\t CF per cycle: {:.3}",
                 iter,
                 elapsed_secs,
-                convergence_rate_per_second,
-                convergence_rate_per_iter,
-                error_ratio,
-                convergence,
-                ratio_change
+                convergence_factor,
+                convergence_factor.powf(1.0 / cycles)
             );
             last_log = now;
         }
 
-        if let Some(iters) = test_iters {
-            if iter == iters {
-                info!(
-                    "{} components:\n\tconvergence rate: {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.2e}",
-                    composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence
-                );
-                return Some((convergence_rate_per_iter, convergence_history));
-            }
-            // Basically when the convergence rate stops slowing down we have hit the asymptotic
-            // rate (TODO: maybe make sure the last few error ratios are all about the same? since
-            // we are doing stationary iterations though this might not really matter)
-        } else if ratio_change < 1e-3 {
-            //} else if error_ratio > 0.90 {
+        if old_convergence_factor / convergence_factor > 0.999 || iter >= max_iter {
             info!(
-                "{} components:\n\tconvergence rate: {:.3}/iter on iteration {} after {} seconds\n\tsquared error: {:.3e}\n\trelative error: {:.2e}\n\tasymptotic rate: {:.3}",
-                composite_preconditioner.components().len(), convergence_rate_per_iter, iter, (now - start).as_secs(), current_error, convergence, error_ratio
+                "{} components:\n\tconvergence factor: {:.3}\n\tconvergence factor per cycle: {:.3}\n\tsearch iters: {}",
+                composite_preconditioner.components().len(),
+                convergence_factor,
+                convergence_factor.powf(1.0 / cycles),
+                iter
             );
-            return Some((convergence_rate_per_iter, convergence_history));
+            return (convergence_factor, history);
         }
+        old_convergence_factor = convergence_factor;
     }
 }
 
 /*
-
 #[cfg(test)]
 mod tests {
     use crate::{adaptive::build_adaptive, preconditioner::Preconditioner, random_vec};

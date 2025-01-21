@@ -1,13 +1,18 @@
 //! Definition of the `LinearOperator` trait as well as implementors
 //! of said trait.
 
+use std::sync::Arc;
+
 use crate::parallel_ops::spmm;
-use crate::partitioner::Hierarchy;
-use crate::solver::{lsolve, usolve, Direct, Iterative, IterativeMethod, Solver};
+use crate::partitioner::{metis_n, Hierarchy};
+use crate::solver::{lsolve, usolve, Direct, Iterative, IterativeMethod};
 use nalgebra::base::DVector;
-use nalgebra_sparse::CsrMatrix;
+//use nalgebra::{Cholesky, DMatrix, Dyn};
+use nalgebra_sparse::factorization::CscCholesky;
+use nalgebra_sparse::{CooMatrix, CscMatrix, CsrMatrix};
 use rand::seq::SliceRandom;
-use std::rc::Rc;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 
 pub trait LinearOperator {
     fn apply_mut(&self, vec: &mut DVector<f64>);
@@ -15,10 +20,12 @@ pub trait LinearOperator {
     fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>);
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum SmootherType {
     L1,
     GaussSeidel,
+    BlockL1,
+    BlockGaussSeidel,
 }
 
 pub struct Identity;
@@ -92,12 +99,325 @@ impl L1 {
         */
 
         let l1_inverse: DVector<f64> = DVector::from(l1_inverse);
+        //trace!("{:?}", l1_inverse.max());
         Self { l1_inverse }
     }
 }
 
+pub struct BlockL1 {
+    // probably should be Arc to avoid dup with Hierarchy, or even better should probably be a two way
+    // map aggs -> indices and indices -> aggs.
+    restriction: Arc<CsrMatrix<f64>>,
+    //blocks: Vec<Cholesky<f64, Dyn>>,
+    blocks: Vec<CscCholesky<f64>>,
+}
+
+impl BlockL1 {
+    // include tau?
+    pub fn new(mat: &CsrMatrix<f64>, restriction: Arc<CsrMatrix<f64>>) -> Self {
+        //let blocks: Vec<Cholesky<f64, Dyn>> = (0..restriction.nrows()).into_par_iter().map(|agg_idx| {
+        let blocks: Vec<CscCholesky<f64>> = (0..restriction.nrows()).into_par_iter().map(|agg_idx| {
+            let r_row = restriction.row(agg_idx);
+            let agg = r_row.col_indices();
+            let block_size = agg.len();
+            //let mut block = DMatrix::<f64>::zeros(block_size, block_size);
+            let mut block = CooMatrix::<f64>::new(block_size, block_size);
+
+            for (ic, i) in agg.iter().copied().enumerate() {
+                let mat_row_i = mat.row(i);
+                let a_ii = mat.get_entry(i, i).unwrap().into_value();
+                for (j, val) in mat_row_i
+                    .col_indices()
+                    .iter()
+                    .copied()
+                    .zip(mat_row_i.values().iter().copied())
+                {
+                    match agg.binary_search(&j) {
+                        Ok(jc) => {
+                            /*
+                            // only need lower triangular for cholesky
+                            if ic >= jc {
+                                block[(ic, jc)] +=  val; 
+                            }
+                            */
+                            block.push(ic, jc, val);
+                        }
+                        Err(_) => {
+                            let a_jj = mat.get_entry(j, j).unwrap().into_value();
+                            //block[(ic, ic)] += (a_ii / a_jj).sqrt() * val.abs();
+                            block.push(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                        }
+                    }
+                }
+            }
+            //let cholesky = Cholesky::new(block).expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+            let csc = CscMatrix::from(&block);
+            let cholesky = CscCholesky::factor(&csc).expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+
+            let n_tri = ((csc.nnz() - block_size) / 2) + block_size;
+            let sparsity_reduction = (cholesky.l().nnz() as f64) / (n_tri as f64);
+            trace!("sparsity reduction: {:.2}", sparsity_reduction);
+
+            cholesky
+        }).collect();
+
+        Self {
+            restriction,
+            blocks,
+        }
+    }
+}
+
+impl LinearOperator for BlockL1 {
+    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
+        out_vec.copy_from(in_vec);
+        self.apply_mut(out_vec);
+    }
+
+    fn apply_mut(&self, r: &mut DVector<f64>) {
+        // probably can do this without an alloc of a bunch of DVectors with unsafe
+        let smoothed_parts: Vec<DVector<f64>> = (0..self.restriction.nrows())
+            .into_par_iter()
+            .map(|i| {
+                let row = self.restriction.row(i);
+                let agg = row.col_indices();
+                let mut r_part =
+                    DVector::from_iterator(agg.len(), agg.iter().copied().map(|i| r[i]));
+                self.blocks[i].solve_mut(&mut r_part);
+                r_part
+            })
+            .collect();
+
+        // Could make this par if reverse agg map was available... not sure if this is taking
+        // meaningful time though
+        for (smoothed_part, row) in smoothed_parts.iter().zip(self.restriction.row_iter()) {
+            let agg = row.col_indices();
+            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
+                r[i] = *r_i;
+            }
+        }
+    }
+
+    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
+        let mut out_vec = vec.clone();
+        self.apply_mut(&mut out_vec);
+        out_vec
+    }
+}
+
+// TODO abstract all to block smoother?? not sure what I would gain since there are only a couple
+// block smoothers to consider for now.
+pub struct BlockGaussSeidel {
+    // should probably be a two way map: aggs -> indices and indices -> aggs.
+    restriction: Arc<CsrMatrix<f64>>,
+    //blocks: Vec<Arc<CsrMatrix<f64>>>,
+    blocks: Vec<SymmetricGaussSeidel>,
+    //forward: bool,
+}
+
+impl BlockGaussSeidel {
+    // include tau?
+    pub fn new(mat: &CsrMatrix<f64>, restriction: Arc<CsrMatrix<f64>>) -> Self {
+        let blocks: Vec<Arc<CsrMatrix<f64>>> = (0..restriction.nrows())
+            .into_par_iter()
+            .map(|agg_idx| {
+                let r_row = restriction.row(agg_idx);
+                let agg = r_row.col_indices();
+                let block_size = agg.len();
+                let mut block = CooMatrix::<f64>::new(block_size, block_size);
+
+                for (ic, i) in agg.iter().copied().enumerate() {
+                    let mat_row_i = mat.row(i);
+                    let a_ii = mat.get_entry(i, i).unwrap().into_value();
+                    for (j, val) in mat_row_i
+                        .col_indices()
+                        .iter()
+                        .copied()
+                        .zip(mat_row_i.values().iter().copied())
+                    {
+                        match agg.binary_search(&j) {
+                            Ok(jc) => {
+                                block.push(ic, jc, val);
+                            }
+                            Err(_) => {
+                                let a_jj = mat.get_entry(j, j).unwrap().into_value();
+                                block.push(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                            }
+                        }
+                    }
+                }
+                let block = CsrMatrix::from(&block);
+                Arc::new(block)
+            })
+            .collect();
+
+        Self {
+            restriction,
+            //blocks,
+            // TODO forward then backward is better...
+            blocks: blocks
+                .into_iter()
+                .map(|mat| SymmetricGaussSeidel::new(mat))
+                .collect(),
+            //forward: true,
+        }
+    }
+
+    /*
+    pub fn set_forward(&mut self, val: bool) {
+        self.forward = val;
+    }
+    */
+}
+
+impl LinearOperator for BlockGaussSeidel {
+    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
+        out_vec.copy_from(in_vec);
+        self.apply_mut(out_vec);
+    }
+
+    fn apply_mut(&self, r: &mut DVector<f64>) {
+        // probably can do this without an alloc of a bunch of DVectors with unsafe
+        let smoothed_parts: Vec<DVector<f64>> = (0..self.restriction.nrows())
+            .into_par_iter()
+            .map(|i| {
+                let row = self.restriction.row(i);
+                let agg = row.col_indices();
+                let mut r_part =
+                    DVector::from_iterator(agg.len(), agg.iter().copied().map(|i| r[i]));
+                self.blocks[i].apply_mut(&mut r_part);
+                /*
+                if self.forward {
+                    let gs = ForwardGaussSeidel::new(self.blocks[i].clone());
+                    gs.apply_mut(&mut r_part);
+                } else {
+                    let gs = BackwardGaussSeidel::new(self.blocks[i].clone());
+                    gs.apply_mut(&mut r_part);
+                }
+                */
+                r_part
+            })
+            .collect();
+
+        // Could make this par if reverse agg map was available... not sure if this is taking
+        // meaningful time though
+        for (smoothed_part, row) in smoothed_parts.iter().zip(self.restriction.row_iter()) {
+            let agg = row.col_indices();
+            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
+                r[i] = *r_i;
+            }
+        }
+    }
+
+    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
+        let mut out_vec = vec.clone();
+        self.apply_mut(&mut out_vec);
+        out_vec
+    }
+}
+pub struct BlockL1Iterative {
+    restriction: Arc<CsrMatrix<f64>>, // probably should be Arc to avoid dup with Hierarchy
+    blocks: Vec<Iterative>,
+}
+
+impl BlockL1Iterative {
+    // include tau?
+    pub fn new(mat: &CsrMatrix<f64>, restriction: Arc<CsrMatrix<f64>>) -> Self {
+        let blocks: Vec<CsrMatrix<f64>> = (0..restriction.nrows())
+            .into_par_iter()
+            .map(|agg_idx| {
+                let r_row = restriction.row(agg_idx);
+                let agg = r_row.col_indices();
+                let block_size = agg.len();
+                let mut block = CooMatrix::new(block_size, block_size);
+
+                for (ic, i) in agg.iter().copied().enumerate() {
+                    let mat_row_i = mat.row(i);
+                    let a_ii = mat.get_entry(i, i).unwrap().into_value();
+                    for (j, val) in mat_row_i
+                        .col_indices()
+                        .iter()
+                        .copied()
+                        .zip(mat_row_i.values().iter().copied())
+                    {
+                        match agg.binary_search(&j) {
+                            Ok(jc) => {
+                                block.push(ic, jc, val);
+                            }
+                            Err(_) => {
+                                let a_jj = mat.get_entry(j, j).unwrap().into_value();
+                                block.push(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                            }
+                        }
+                    }
+                }
+                CsrMatrix::<f64>::from(&block)
+            })
+            .collect();
+
+        let blocks = blocks
+            .into_iter()
+            .map(|csr| {
+                let block_size = csr.ncols();
+                let pc = L1::new(&csr);
+                let ptr = Arc::new(csr);
+                let epsilon = 1e-3;
+                let solver = Iterative::new(ptr, Some(DVector::zeros(block_size)))
+                    .with_tolerance(epsilon)
+                    .with_max_iter(150)
+                    .with_solver(IterativeMethod::ConjugateGradient)
+                    //.with_log_interval(crate::solver::LogInterval::Iterations(51))
+                    .with_preconditioner(Arc::new(pc));
+                solver
+            })
+            .collect();
+
+        Self {
+            restriction,
+            blocks,
+        }
+    }
+}
+
+impl LinearOperator for BlockL1Iterative {
+    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
+        out_vec.copy_from(in_vec);
+        self.apply_mut(out_vec);
+    }
+
+    fn apply_mut(&self, r: &mut DVector<f64>) {
+        // probably can do this without an alloc of a bunch of DVectors with unsafe
+        let smoothed_parts: Vec<DVector<f64>> = (0..self.restriction.nrows())
+            .into_par_iter()
+            .map(|i| {
+                let row = self.restriction.row(i);
+                let agg = row.col_indices();
+                let mut r_part =
+                    DVector::from_iterator(agg.len(), agg.iter().copied().map(|i| r[i]));
+                self.blocks[i].apply_mut(&mut r_part);
+                r_part
+            })
+            .collect();
+
+        // Could make this par if reverse agg map was available... not sure if this is taking
+        // meaningful time though
+        for (smoothed_part, row) in smoothed_parts.iter().zip(self.restriction.row_iter()) {
+            let agg = row.col_indices();
+            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
+                r[i] = *r_i;
+            }
+        }
+    }
+
+    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
+        let mut out_vec = vec.clone();
+        self.apply_mut(&mut out_vec);
+        out_vec
+    }
+}
+
 pub struct ForwardGaussSeidel {
-    mat: Rc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix<f64>>,
 }
 
 impl LinearOperator for ForwardGaussSeidel {
@@ -117,13 +437,13 @@ impl LinearOperator for ForwardGaussSeidel {
 }
 
 impl ForwardGaussSeidel {
-    pub fn new(mat: Rc<CsrMatrix<f64>>) -> ForwardGaussSeidel {
+    pub fn new(mat: Arc<CsrMatrix<f64>>) -> ForwardGaussSeidel {
         Self { mat }
     }
 }
 
 pub struct BackwardGaussSeidel {
-    mat: Rc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix<f64>>,
 }
 
 impl LinearOperator for BackwardGaussSeidel {
@@ -143,49 +463,49 @@ impl LinearOperator for BackwardGaussSeidel {
 }
 
 impl BackwardGaussSeidel {
-    pub fn new(mat: Rc<CsrMatrix<f64>>) -> BackwardGaussSeidel {
+    pub fn new(mat: Arc<CsrMatrix<f64>>) -> BackwardGaussSeidel {
         Self { mat }
     }
 }
 
-/*
 pub struct SymmetricGaussSeidel {
     diag: DVector<f64>,
-    upper_triangle: CsrMatrix<f64>,
-    lower_triangle: CsrMatrix<f64>,
+    mat: Arc<CsrMatrix<f64>>,
 }
 
 impl LinearOperator for SymmetricGaussSeidel {
-    fn apply(&self, r: &mut DVector<f64>) {
-        lsolve(&self.lower_triangle, r);
+    fn apply_mut(&self, r: &mut DVector<f64>) {
+        lsolve(&self.mat, r);
         r.component_mul_assign(&self.diag);
-        usolve(&self.upper_triangle, r);
+        usolve(&self.mat, r);
+    }
+    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
+        let mut out = vec.clone();
+        self.apply_mut(&mut out);
+        out
+    }
+    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
+        out_vec.copy_from(in_vec);
+        self.apply_mut(out_vec);
     }
 }
 
 impl SymmetricGaussSeidel {
-    pub fn new(mat: &CsrMatrix<f64>) -> SymmetricGaussSeidel {
+    pub fn new(mat: Arc<CsrMatrix<f64>>) -> SymmetricGaussSeidel {
         let (_, _, diag) = mat.diagonal_as_csr().disassemble();
         let diag = DVector::from(diag);
 
-        let lower_triangle = mat.lower_triangle();
-        let upper_triangle = mat.upper_triangle();
-        Self {
-            diag,
-            upper_triangle,
-            lower_triangle,
-        }
+        Self { diag, mat }
     }
 }
-*/
 
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
 //      - test spd of precon again
 pub struct Multilevel {
     pub hierarchy: Hierarchy,
-    forward_smoothers: Vec<Solver>,
-    backward_smoothers: Option<Vec<Solver>>,
+    forward_smoothers: Vec<Arc<dyn LinearOperator + Sync + Send>>,
+    backward_smoothers: Option<Vec<Arc<dyn LinearOperator + Sync + Send>>>,
 }
 
 impl LinearOperator for Multilevel {
@@ -207,66 +527,100 @@ impl Multilevel {
     // TODO builder pattern for Multilevel
     pub fn new(
         hierarchy: Hierarchy,
-        fine_smoother: Option<Rc<dyn LinearOperator>>,
         solve_coarsest_exactly: bool,
         smoother: SmootherType,
         sweeps: usize,
     ) -> Self {
+        trace!("constructing new ML component");
         let fine_mat = hierarchy.get_mat(0);
-        // TODO make this an arg?
         let stationary = IterativeMethod::StationaryIteration;
+        let pcg = IterativeMethod::ConjugateGradient;
 
-        let build_smoother = |mat: Rc<CsrMatrix<f64>>,
+        let build_smoother = |mat: Arc<CsrMatrix<f64>>,
                               smoother: SmootherType,
+                              restriction: Arc<CsrMatrix<f64>>,
                               transpose: bool|
-         -> Rc<dyn LinearOperator> {
+         -> Arc<dyn LinearOperator + Send + Sync> {
             match smoother {
-                SmootherType::L1 => Rc::new(L1::new(&mat)),
+                SmootherType::L1 => Arc::new(L1::new(&mat)),
+                // TODO no clone... use Arc
+                SmootherType::BlockL1 => Arc::new(BlockL1Iterative::new(&mat, restriction.clone())),
                 SmootherType::GaussSeidel => {
                     if transpose {
-                        Rc::new(BackwardGaussSeidel::new(mat))
+                        Arc::new(BackwardGaussSeidel::new(mat))
                     } else {
-                        Rc::new(ForwardGaussSeidel::new(mat))
+                        Arc::new(ForwardGaussSeidel::new(mat))
                     }
+                }
+                SmootherType::BlockGaussSeidel => {
+                    let block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
+                    Arc::new(block_gs)
+                    /*
+                    if transpose {
+                        let mut block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
+                        block_gs.set_forward(false);
+                        Arc::new(block_gs)
+                    } else {
+                        let block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
+                        Arc::new(block_gs)
+                    }
+                    */
                 }
             }
         };
-        let fine_smoother =
-            fine_smoother.unwrap_or(build_smoother(fine_mat.clone(), smoother, false));
+
+        let r = metis_n(&hierarchy.near_nulls[0], &fine_mat, 16);
+
+        let fine_smoother = build_smoother(fine_mat.clone(), smoother, Arc::new(r), false);
         let zeros = DVector::from(vec![0.0; fine_mat.ncols()]);
-        let forward_solver = Solver::Iterative(
-            Iterative::new(fine_mat.clone(), Some(zeros.clone()))
-                .with_solver(stationary)
-                .with_max_iter(sweeps)
-                .with_preconditioner(fine_smoother)
-                .with_tolerance(1e-12),
-        );
-        let mut forward_smoothers: Vec<Solver> = vec![forward_solver];
-        let mut backward_smoothers = match smoother {
-            SmootherType::L1 => None,
-            SmootherType::GaussSeidel => {
-                let backward_smoother = Rc::new(BackwardGaussSeidel::new(fine_mat.clone()));
-                let backward_solver = Solver::Iterative(
-                    Iterative::new(fine_mat.clone(), Some(zeros))
+        let forward_solver = Iterative::new(fine_mat.clone(), Some(zeros.clone()))
+            .with_solver(stationary)
+            .with_max_iter(sweeps)
+            .with_preconditioner(fine_smoother)
+            .with_tolerance(1e-12);
+        let mut forward_smoothers: Vec<Arc<dyn LinearOperator + Send + Sync>> =
+            vec![Arc::new(forward_solver)];
+
+        let backward_smoothers = None;
+        /*
+        let mut backward_smoothers: Option<Vec<Arc<dyn LinearOperator + Send + Sync>>> =
+            match smoother {
+                SmootherType::L1 => None,
+                SmootherType::BlockL1 => None,
+                SmootherType::GaussSeidel => {
+                    let backward_smoother = Arc::new(BackwardGaussSeidel::new(fine_mat.clone()));
+                    let backward_solver = Iterative::new(fine_mat.clone(), Some(zeros))
                         .with_solver(stationary)
                         .with_max_iter(sweeps)
                         .with_preconditioner(backward_smoother)
-                        .with_tolerance(1e-12),
-                );
-                Some(vec![backward_solver])
-            }
-        };
+                        .with_tolerance(1e-12);
+                    Some(vec![Arc::new(backward_solver)])
+                }
+                SmootherType::BlockGaussSeidel => None,
+            };
+        */
 
         let coarse_index = hierarchy.get_matrices().len() - 1;
         forward_smoothers.extend(hierarchy.get_matrices().iter().enumerate().map(|(i, mat)| {
-            let smoother = build_smoother(mat.clone(), smoother, false);
-            let zeros = DVector::from(vec![0.0; mat.ncols()]);
-
-            let solver: Solver;
+            let solver: Arc<dyn LinearOperator + Send + Sync>;
             if i == coarse_index && solve_coarsest_exactly {
-                solver = Solver::Direct(Direct::new(&mat));
+                if mat.nrows() < 1000 {
+                    solver = Arc::new(Direct::new(&mat));
+                } else {
+                    let pc = Arc::new(L1::new(mat));
+                    solver = Arc::new(
+                        Iterative::new(mat.clone(), Some(DVector::zeros(mat.ncols())))
+                            .with_solver(pcg)
+                            .with_max_iter(10000)
+                            .with_preconditioner(pc)
+                            .with_tolerance(1e-8),
+                    );
+                }
             } else {
-                solver = Solver::Iterative(
+                let r = metis_n(&hierarchy.near_nulls[i + 1], &mat, 16);
+                let smoother = build_smoother(mat.clone(), smoother, Arc::new(r), false);
+                let zeros = DVector::from(vec![0.0; mat.ncols()]);
+                solver = Arc::new(
                     Iterative::new(mat.clone(), Some(zeros))
                         .with_solver(stationary)
                         .with_max_iter(sweeps)
@@ -277,6 +631,7 @@ impl Multilevel {
             solver
         }));
 
+        /*
         if let Some(ref mut smoothers) = &mut backward_smoothers {
             smoothers.extend(
                 hierarchy
@@ -284,11 +639,16 @@ impl Multilevel {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i < coarse_index)
-                    .map(|(_, mat)| {
-                        let smoother = build_smoother(mat.clone(), smoother, true);
+                    .map(|(i, mat)| {
+                        let smoother = build_smoother(
+                            mat.clone(),
+                            smoother,
+                            Arc::new(hierarchy.restriction_matrices[i + 1].clone()),
+                            true,
+                        );
                         let zeros = DVector::from(vec![0.0; mat.ncols()]);
 
-                        Solver::Iterative(
+                        Arc::new(
                             Iterative::new(mat.clone(), Some(zeros))
                                 .with_solver(stationary)
                                 .with_max_iter(sweeps)
@@ -298,6 +658,7 @@ impl Multilevel {
                     }),
             );
         }
+        */
 
         Self {
             hierarchy,
@@ -312,8 +673,10 @@ impl Multilevel {
 
     fn init_w_cycle(&self, r: &mut DVector<f64>) {
         let mut v = DVector::from(vec![0.0; r.nrows()]);
+        // TODO mu params in builder
+        let mu = 3;
         if self.hierarchy.levels() > 2 {
-            self.w_cycle_recursive(&mut v, &*r, 0, 1);
+            self.w_cycle_recursive(&mut v, &*r, 0, mu);
         } else {
             self.w_cycle_recursive(&mut v, &*r, 0, 1);
         }
@@ -323,17 +686,16 @@ impl Multilevel {
     fn w_cycle_recursive(&self, v: &mut DVector<f64>, f: &DVector<f64>, level: usize, mu: usize) {
         let levels = self.hierarchy.levels() - 1;
         if level == levels {
-            let solution = self.forward_smoothers[level].solve_with_guess(f, v);
-            v.copy_from(&solution);
+            self.forward_smoothers[level].apply_input(f, v);
         } else {
             let p = self.hierarchy.get_partition(level);
             let pt = self.hierarchy.get_interpolation(level);
             let a = &*self.hierarchy.get_mat(level);
 
-            let solution = self.forward_smoothers[level].solve_with_guess(f, v);
-            v.copy_from(&solution);
+            self.forward_smoothers[level].apply_input(f, v);
 
             let f_coarse = spmm(pt, &(f - &spmm(a, v)));
+            //let f_coarse = pt * &(f - &(a * &*v));
             let mut v_coarse = DVector::from(vec![0.0; f_coarse.nrows()]);
             for _ in 0..mu {
                 self.w_cycle_recursive(&mut v_coarse, &f_coarse, level + 1, mu);
@@ -345,22 +707,22 @@ impl Multilevel {
             }
 
             let interpolated = spmm(p, &v_coarse);
+            //let interpolated = p * &v_coarse;
             *v += interpolated;
-            let solution = if let Some(backward_smoothers) = &self.backward_smoothers {
-                backward_smoothers[level].solve_with_guess(f, v)
+            if let Some(backward_smoothers) = &self.backward_smoothers {
+                backward_smoothers[level].apply_input(f, v)
             } else {
-                self.forward_smoothers[level].solve_with_guess(f, v)
+                self.forward_smoothers[level].apply_input(f, v)
             };
-            v.copy_from(&solution);
         }
     }
 }
 
-// clone should be fine here since everything is Rc
+// clone should be fine here since everything is Arc
 #[derive(Clone)]
 pub struct Composite {
-    mat: Rc<CsrMatrix<f64>>,
-    components: Vec<Rc<Multilevel>>,
+    mat: Arc<CsrMatrix<f64>>,
+    components: Vec<Arc<Multilevel>>,
     pub application: Application,
 }
 
@@ -397,7 +759,7 @@ impl LinearOperator for Composite {
 }
 
 impl Composite {
-    pub fn new(mat: Rc<CsrMatrix<f64>>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix<f64>>) -> Self {
         Self {
             mat,
             components: Vec::new(),
@@ -405,7 +767,7 @@ impl Composite {
         }
     }
 
-    pub fn new_with_components(mat: Rc<CsrMatrix<f64>>, components: Vec<Rc<Multilevel>>) -> Self {
+    pub fn new_with_components(mat: Arc<CsrMatrix<f64>>, components: Vec<Arc<Multilevel>>) -> Self {
         Self {
             mat,
             components,
@@ -421,12 +783,14 @@ impl Composite {
             for _ in 0..num_steps {
                 x = x + component.apply(&r);
                 r = &*v - spmm(&self.mat, &x);
+                //r = &*v - (&*self.mat * &x);
             }
         }
         for component in self.components.iter().rev().skip(1) {
             for _ in 0..num_steps {
                 x = x + component.apply(&r);
                 r = &*v - spmm(&self.mat, &x);
+                //r = &*v - (&*self.mat * &x);
             }
         }
         v.copy_from(&x);
@@ -439,7 +803,7 @@ impl Composite {
             .apply_mut(v)
     }
 
-    pub fn push(&mut self, component: Rc<Multilevel>) {
+    pub fn push(&mut self, component: Arc<Multilevel>) {
         self.components.push(component);
     }
 
@@ -447,11 +811,11 @@ impl Composite {
         self.components.remove(0);
     }
 
-    pub fn components(&self) -> &Vec<Rc<Multilevel>> {
+    pub fn components(&self) -> &Vec<Arc<Multilevel>> {
         &self.components
     }
 
-    pub fn components_mut(&mut self) -> &mut Vec<Rc<Multilevel>> {
+    pub fn components_mut(&mut self) -> &mut Vec<Arc<Multilevel>> {
         &mut self.components
     }
 }

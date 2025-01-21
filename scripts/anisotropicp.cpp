@@ -2,6 +2,8 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <mfem/general/tic_toc.hpp>
+#include <mfem/linalg/solvers.hpp>
 
 using namespace std;
 using namespace mfem;
@@ -9,7 +11,7 @@ using namespace mfem;
 int main(int argc, char *argv[]) {
   Mpi::Init(argc, argv);
   Hypre::Init();
-  const char *mesh_file = "../meshes/star.mesh";
+  const char *mesh_file = "../data/meshes/star.mesh";
   int order = 1;
   int refinements = 1;
 
@@ -46,7 +48,8 @@ int main(int argc, char *argv[]) {
   b.AddDomainIntegrator(new DomainLFIntegrator(one));
   b.Assemble();
 
-  double epsilon = 1e-6;
+  // double epsilon = 1e-6;
+  double epsilon = 1e-4;
   double theta = (60.0 / 180.0) * 3.1415;
   double phi = (27.0 / 180.0) * 3.1415;
 
@@ -90,26 +93,42 @@ int main(int argc, char *argv[]) {
   HypreParMatrix A;
   Vector B, X;
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
+
+  StopWatch timer;
   if (Mpi::Root()) {
     cout << "Size of linear system: " << A.Height() << endl;
+    timer.Start();
   }
 
   HypreBoomerAMG M(A);
 
-  // CGSolver cg(MPI_COMM_WORLD);
-  SLISolver cg(MPI_COMM_WORLD);
-  M.SetRelaxType(18);
-  M.SetCycleNumSweeps(15, 15);
-  cg.SetRelTol(1e-12);
-  cg.SetMaxIter(10000);
-  cg.SetPrintLevel(1);
-  cg.SetOperator(A);
-  cg.SetPreconditioner(M);
-  cg.Mult(B, X);
-
+  MPI_Barrier(MPI_COMM_WORLD);
   if (Mpi::Root()) {
-    cout << "final relative norm: " << cg.GetFinalRelNorm();
+    cout << "Preconditioner constructed in: " << timer.RealTime() << endl;
+    ;
+    timer.Clear();
+    timer.Start();
   }
 
+  // CGSolver solver(MPI_COMM_WORLD);
+  SLISolver solver(MPI_COMM_WORLD);
+  M.SetRelaxType(18);
+  M.SetCycleNumSweeps(3, 3);
+  solver.SetRelTol(1e-12);
+  solver.SetMaxIter(10000);
+  mfem::IterativeSolver::PrintLevel pl;
+  solver.SetPrintLevel(pl.Summary());
+  solver.SetOperator(A);
+  solver.SetPreconditioner(M);
+  solver.Mult(B, X);
+
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  if (Mpi::Root()) {
+    cout << "final relative norm: " << solver.GetFinalRelNorm() << endl
+         << " Solve time: " << timer.RealTime() << endl;
+  }
+
+  MPI_Barrier(MPI_COMM_WORLD);
   return 0;
 }

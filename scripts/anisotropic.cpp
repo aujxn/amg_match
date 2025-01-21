@@ -21,7 +21,7 @@ using namespace std;
 using namespace mfem;
 
 int main(int argc, char *argv[]) {
-  const char *mesh_file = "../meshes/star.mesh";
+  const char *mesh_file = "../data/meshes/star.mesh";
   int order = 1;
   int refinements = 1;
 
@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
   b.AddDomainIntegrator(new DomainLFIntegrator(one));
   b.Assemble();
 
-  double epsilon = 0.001;
+  double epsilon = 1e-4;
   double theta = (60.0 / 180.0) * 3.1415;
   double phi = (27.0 / 180.0) * 3.1415;
 
@@ -99,23 +99,24 @@ int main(int argc, char *argv[]) {
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
   cout << "Size of linear system: " << A.Height() << endl;
 
-  std::ofstream matfile(std::format("../anisotropy/anisotropy_{}d.mtx", dim),
-                        std::ios::out);
+  std::ofstream matfile(
+      std::format("../data/anisotropy/anisotropy_{}d.mtx", dim), std::ios::out);
   A.PrintMM(matfile);
   matfile.close();
 
-  std::ofstream vecfile(std::format("../anisotropy/anisotropy_{}d.rhs", dim),
-                        std::ios::out);
+  std::ofstream vecfile(
+      std::format("../data/anisotropy/anisotropy_{}d.rhs", dim), std::ios::out);
   B.Print(vecfile);
   vecfile.close();
 
-  std::ofstream bdyfile(std::format("../anisotropy/anisotropy_{}d.bdy", dim),
-                        std::ios::out);
+  std::ofstream bdyfile(
+      std::format("../data/anisotropy/anisotropy_{}d.bdy", dim), std::ios::out);
   boundary_dofs.Save(bdyfile);
   bdyfile.close();
 
   std::ofstream coordsfile(
-      std::format("../anisotropy/anisotropy_{}d.coords", dim), std::ios::out);
+      std::format("../data/anisotropy/anisotropy_{}d.coords", dim),
+      std::ios::out);
 
   FiniteElementSpace fes2(&mesh, &fec, mesh.SpaceDimension());
   GridFunction nodes(&fes2);

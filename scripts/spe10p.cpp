@@ -33,8 +33,8 @@ int main(int argc, char *argv[]) {
   // Mesh mesh = Mesh::MakeCartesian3D(x_dim, y_dim, z_dim, Element::HEXAHEDRON,
   // 1200, 2200, 170);
   Mesh serial_mesh = Mesh::MakeCartesian3D(
-      //60, 220, 85, Element::HEXAHEDRON, x_dim, y_dim, z_dim);
-      //60, 220, 85, Element::HEXAHEDRON);
+      // 60, 220, 85, Element::HEXAHEDRON, x_dim, y_dim, z_dim);
+      // 60, 220, 85, Element::HEXAHEDRON);
       x_dim, y_dim, z_dim, Element::HEXAHEDRON, 1200, 2200, 170);
   ParMesh mesh(MPI_COMM_WORLD, serial_mesh);
   serial_mesh.Clear(); // the serial mesh is no longer needed
@@ -62,30 +62,47 @@ int main(int argc, char *argv[]) {
   b.Assemble();
 
   SPE10Coefficient coef;
-  //ScalarSPE10Coefficient coef;
+  // ScalarSPE10Coefficient coef;
   ParBilinearForm a(&fespace);
   a.AddDomainIntegrator(new DiffusionIntegrator(coef));
-  //a.AddDomainIntegrator(new DiffusionIntegrator);
+  // a.AddDomainIntegrator(new DiffusionIntegrator);
   a.Assemble();
 
   HypreParMatrix A;
   Vector B, X;
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
 
+  StopWatch timer;
+  if (Mpi::Root()) {
+    cout << "Size of linear system: " << A.Height() << endl;
+    timer.Start();
+  }
+
   HypreBoomerAMG M(A);
+
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (Mpi::Root()) {
+    cout << "Preconditioner constructed in: " << timer.RealTime() << endl;
+    ;
+    timer.Clear();
+    timer.Start();
+  }
   // M.SetRelaxType(8);
-  //M.SetCycleType(2);
-  CGSolver cg(MPI_COMM_WORLD);
-  // SLISolver cg(MPI_COMM_WORLD);
-  cg.SetRelTol(1e-6);
-  cg.SetMaxIter(10000);
-  cg.SetPrintLevel(1);
-  cg.SetOperator(A);
-  cg.SetPreconditioner(M);
-  cg.Mult(B, X);
+  // M.SetCycleType(2);
+  CGSolver solver(MPI_COMM_WORLD);
+  // SLISolver solver(MPI_COMM_WORLD);
+  M.SetRelaxType(18);
+  M.SetCycleNumSweeps(3, 3);
+  solver.SetRelTol(1e-12);
+  solver.SetMaxIter(10000);
+  solver.SetPrintLevel(1);
+  solver.SetOperator(A);
+  solver.SetPreconditioner(M);
+  solver.Mult(B, X);
 
   if (Mpi::Root()) {
-    cout << "final relative norm: " << cg.GetFinalRelNorm();
+    cout << "final relative norm: " << solver.GetFinalRelNorm() << endl
+         << " Solve time: " << timer.RealTime() << endl;
   }
   // 12. Recover the solution x as a grid function and save to file. The output
   //     can be viewed using GLVis as follows: "glvis -np <np> -m mesh -g sol"
@@ -142,8 +159,8 @@ int main(int argc, char *argv[]) {
     }
     coordsfile << endl;
   }
-  // 9. Solve the system using PCG with symmetric Gauss-Seidel
-  // preconditioner. GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0);
+  // 9. Solve the system using Psolver with symmetric Gauss-Seidel
+  // preconditioner. GSSmoother M(A); Psolver(A, M, B, X, 1, 200, 1e-12, 0.0);
 
   // 10. Recover the solution x as a grid function and save to file. The
   // output

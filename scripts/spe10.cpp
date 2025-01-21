@@ -59,8 +59,8 @@ int main(int argc, char *argv[]) {
   SparseMatrix A;
   Vector B, X;
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
-  A.EliminateBC(boundary_dofs, mfem::Operator::DIAG_ZERO);
-  A.Threshold(1e-12);
+  //A.EliminateBC(boundary_dofs, mfem::Operator::DIAG_ZERO);
+  //A.Threshold(1e-12);
   cout << "Size of linear system: " << A.Height() << endl;
   cout << "Linear system nnz: " << A.NumNonZeroElems() << endl;
 
