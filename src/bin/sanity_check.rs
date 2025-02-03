@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use amg_match::{
     adaptive::AdaptiveBuilder,
+    partitioner::InterpolationType,
     solver::{Iterative, IterativeMethod, LogInterval},
     utils::{load_system, random_vec},
 };
@@ -32,6 +33,12 @@ fn main() {
 
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
+            .with_smoother(amg_match::preconditioner::SmootherType::L1)
+            //.with_smoother(SmootherType::BlockL1)
+            .with_interpolator(InterpolationType::SmoothedAggregation(1))
+            //.with_interpolator(InterpolationType::UnsmoothedAggregation)
+            .with_smoothing_steps(3)
+            .with_max_test_iters(50)
             .with_coarsening_factor(cf);
         let (multi_pc, _, _) = adaptive_builder.build();
         let multi_pc = Arc::new(multi_pc);
@@ -39,6 +46,12 @@ fn main() {
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
             .with_max_level(2)
+            .with_smoother(amg_match::preconditioner::SmootherType::L1)
+            //.with_smoother(SmootherType::BlockL1)
+            .with_interpolator(InterpolationType::SmoothedAggregation(1))
+            //.with_interpolator(InterpolationType::UnsmoothedAggregation)
+            .with_smoothing_steps(3)
+            .with_max_test_iters(50)
             .with_coarsening_factor(cf);
         let (two_pc, _, _) = adaptive_builder.build();
         let two_pc = Arc::new(two_pc);

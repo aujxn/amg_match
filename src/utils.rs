@@ -16,6 +16,15 @@ use std::{
     time::Duration,
 };
 
+use crate::hierarchy::Hierarchy;
+use crate::interpolation::InterpolationType;
+use crate::parallel_ops::spmm;
+use crate::partitioner::metis_n;
+use crate::preconditioner::{
+    build_smoother, Identity, Multilevel, SmootherType, SymmetricGaussSeidel, L1,
+};
+use crate::solver::{lobpcg, Iterative, IterativeMethod};
+
 pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
     let mut rng = rand::thread_rng();
     let distribution = rand::distributions::Uniform::new(-2.0_f64, 2.0_f64);
@@ -24,6 +33,7 @@ pub fn random_vec(size: usize) -> nalgebra::DVector<f64> {
 
 pub fn load_system(
     prefix: &str,
+    normalize_matrix: bool,
 ) -> (
     Arc<CsrMatrix<f64>>,
     DVector<f64>,
@@ -37,19 +47,23 @@ pub fn load_system(
 
     info!("Loading linear system...");
     let mat = CsrMatrix::from(&load_mm(matfile).unwrap());
+    let mat = mat.filter(|_, _, v| *v != 0.0);
 
-    let b = load_vec(rhsfile);
+    let b = load_vec(rhsfile).unwrap_or(DVector::from_element(mat.ncols(), 1.0).normalize());
+
     let dofs = load_boundary_dofs(doffile);
     let mut coords = load_coords(coordsfile);
 
-    let (mat, b, projector) = delete_boundary(dofs, mat, b, &mut coords);
-    /*
-    info!("Normalizing starting matrix...");
-    let factor = normalize_mat(&mut mat);
-    b /= factor;
-    */
+    // TODO optional here with Option(projector) return value
+    let (mut mat, mut b, projector) = delete_boundary(dofs, mat, b, &mut coords);
+    if normalize_matrix {
+        info!("Normalizing starting matrix...");
+        let factor = normalize_mat(&mut mat);
+        panic!();
+        b /= factor;
+    }
+
     (Arc::new(mat), b, coords, projector)
-    //(Arc::new(mat), b, Vec::new(), CsrMatrix::identity(1))
 }
 
 // TODO add coords file for spe10
@@ -73,13 +87,13 @@ pub fn load_coords<P: AsRef<Path> + Display>(path: P) -> Vec<Vec<f64>> {
     }
 }
 
-pub fn load_vec<P: AsRef<Path>>(path: P) -> DVector<f64> {
-    let file = File::open(path).unwrap();
+pub fn load_vec<P: AsRef<Path>>(path: P) -> Result<DVector<f64>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut data = Vec::new();
 
     for line in reader.lines() {
-        let line = line.unwrap();
+        let line = line?;
         let numbers: Vec<f64> = line
             .split_whitespace()
             .filter_map(|s| s.parse().ok())
@@ -88,7 +102,7 @@ pub fn load_vec<P: AsRef<Path>>(path: P) -> DVector<f64> {
         data.extend(numbers);
     }
 
-    DVector::from(data)
+    Ok(DVector::from(data))
 }
 
 pub fn load_boundary_dofs<P: AsRef<Path>>(path: P) -> Vec<usize> {
@@ -148,7 +162,6 @@ pub fn delete_boundary(
 
     let p_t = p_mat.transpose();
     let new_mat = &p_t * &(mat * &p_mat);
-    let new_mat = new_mat.filter(|_, _, v| *v != 0.0);
     let new_vec = &p_t * &vec;
     (new_mat, new_vec, p_mat)
 }
@@ -176,43 +189,85 @@ pub fn normalize(vec: &mut DVector<f64>, mat: &CsrMatrix<f64>) {
 }
 
 pub fn normalize_mat(mat: &mut CsrMatrix<f64>) -> f64 {
-    let nrows = mat.nrows();
-    let mut v = random_vec(nrows);
-    let ones = DVector::from_element(nrows, 1.0);
-    let mut i = 1;
+    let arc_mat = Arc::new(mat.clone());
+    let m = 30;
+    let mut xs = (0..m)
+        .into_iter()
+        .map(|_| random_vec(mat.ncols()))
+        .collect();
+    let tol = 1e-12;
+
+    let mut hierarchy = Hierarchy::new(arc_mat.clone());
+
+    let mut near_null = DVector::from_element(mat.ncols(), 1.0);
     loop {
-        let new_v = &*mat * &v;
-        let mut eigs = new_v.component_div(&v);
-        let eig = new_v.sum() / new_v.len() as f64;
-        eigs -= &(eig * &ones);
-        let converge = eigs.norm();
-        if converge < 1e-5 {
-            *mat /= eig;
-            info!("Normalized after {} iterations with norm {:.2e}", i, eig);
-            return eig;
+        near_null = hierarchy.add_level(
+            &near_null,
+            8.0,
+            InterpolationType::SmoothedAggregation((1, 0.66)),
+        );
+        if near_null.len() < 100 {
+            break;
         }
-        if i % 1000 == 0 {
-            info!(
-                "Convergence on normalization: {:.2e} at iter: {}",
-                converge, i
-            );
-        }
-        v.copy_from(&new_v);
-        v /= v.norm();
-        i += 1;
     }
+    let pc = Arc::new(Multilevel::new(hierarchy, true, SmootherType::L1, 3));
+
+    /*
+    let near_null = DVector::from_element(mat.ncols(), 1.0);
+    let r = metis_n(&near_null, arc_mat.clone(), 16);
+    let pc = build_smoother(
+        arc_mat.clone(),
+        SmootherType::BlockGaussSeidel,
+        r.into(),
+        false,
+    );
+    */
+
+    /*
+        let guess = DVector::zeros(mat.ncols());
+        let solver = Arc::new(
+            Iterative::new(arc_mat.clone(), Some(guess))
+                .with_tolerance(1e-12)
+                .with_solver(IterativeMethod::ConjugateGradient)
+                .with_preconditioner(pc),
+        );
+    */
+
+    let max_iter = 2000;
+    //let (eig, _) = lobpcg(mat, solver, x0, tol, max_iter);
+    let eigs = lobpcg(mat, None, Some(pc), &mut xs, tol, max_iter);
+    //let (eig, _) = lobpcg(mat, None, None, x0, tol, max_iter);
+
+    let mut indices = (0..m).collect::<Vec<_>>();
+    indices.sort_by(|idx_a, idx_b| eigs[*idx_b].partial_cmp(&eigs[*idx_a]).unwrap());
+    let biggest = indices[0];
+    let mat_norm: f64 = eigs[biggest];
+    let eigvec = xs.swap_remove(biggest);
+
+    trace!(
+        "matrix norm: {:.2e}, eigvec norm: {:.4}, ||v||_A^2 = (v, A v) = ||A v|| = {:.4}",
+        mat_norm,
+        eigvec.norm(),
+        eigvec.dot(&spmm(mat, &eigvec)),
+    );
+    *mat /= mat_norm;
+    mat_norm
 }
 
 pub fn format_duration(duration: &Duration) -> String {
-    let milis = duration.as_millis();
-    let seconds = milis / 1000;
+    let millis = duration.as_millis() % 1000;
+    let seconds = duration.as_secs();
     let minutes = seconds / 60;
     let hours = minutes / 60;
-    let minutes = minutes % 60;
-    let seconds = seconds % 60;
 
-    format!(
-        "{} hours, {} minutes, {} seconds, {} ms",
-        hours, minutes, seconds, milis
-    )
+    let seconds = seconds % 60;
+    let minutes = minutes % 60;
+
+    /*
+        format!(
+            "{} hours, {} minutes, {} seconds, {} ms",
+            hours, minutes, seconds, millis
+        )
+    */
+    format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
 }

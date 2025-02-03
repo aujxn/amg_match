@@ -33,6 +33,8 @@
 extern crate log;
 
 pub mod adaptive;
+pub mod hierarchy;
+pub mod interpolation;
 pub mod io;
 pub mod parallel_ops;
 pub mod partitioner;

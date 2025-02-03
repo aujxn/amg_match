@@ -1,6 +1,8 @@
 use std::sync::Arc;
-use std::{borrow::Borrow, fs::File, io::Write, time::Duration};
+use std::{fs::File, io::Write, time::Duration};
 
+use amg_match::interpolation::InterpolationType;
+use amg_match::preconditioner::SmootherType;
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::{Application, Composite},
@@ -8,7 +10,7 @@ use amg_match::{
     utils::{format_duration, load_system, random_vec},
 };
 use nalgebra::DVector;
-use nalgebra_sparse::io::save_to_matrix_market_file as write_mm;
+//use nalgebra_sparse::io::save_to_matrix_market_file as write_mm;
 use nalgebra_sparse::{io::load_coo_from_matrix_market_file as load_mm, CsrMatrix};
 use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -83,6 +85,7 @@ fn main() {
         ("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
         //("data/spe10/spe10_0", "spe10"),
         //("data/elasticity/elasticity_3d", "elasticity"),
+        //("data/laplace/3d/3d_laplace_1", "laplace-3d"),
     ];
 
     for (prefix, name) in mfem_mats {
@@ -102,7 +105,7 @@ fn main() {
 }
 
 fn study_mfem(prefix: &str, name: &str) {
-    let (mat, b, _coords, _projector) = load_system(prefix);
+    let (mat, b, _coords, _projector) = load_system(prefix, true);
     //let mat_ref: &CsrMatrix<f64> = mat.borrow();
     //write_mm(mat_ref, "anis_2d.mtx").expect("failed");
     let _pc = study(mat, b, name);
@@ -126,20 +129,25 @@ fn study_suitesparse(mat_path: &str, name: &str) {
 
 fn study(mat: Arc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
     info!("nrows: {} nnz: {}", mat.nrows(), mat.nnz());
-    let max_components = 16;
-    let coarsening_factor = 9.0;
-    let test_iters = 30;
+    let max_components = 20;
+    let coarsening_factor = 7.5;
+    let test_iters = 20;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
         //.with_project_first_only()
         //.with_max_level(2)
+        //.with_smoother(amg_match::preconditioner::SmootherType::L1)
+        //.with_smoother(SmootherType::BlockL1)
+        .with_smoother(SmootherType::BlockGaussSeidel)
+        .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
+        .with_smoothing_steps(1)
         .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
     let timer = std::time::Instant::now();
-    let (pc, convergence_hist, _near_nulls) = adaptive_builder.build();
+    let (pc, _convergence_hist, _near_nulls) = adaptive_builder.build();
     let mut step_size = pc.components().len() / 6;
     if step_size == 0 {
         step_size += 1;
@@ -225,6 +233,7 @@ fn test_solve(
                 .with_solver(IterativeMethod::ConjugateGradient)
                 .with_preconditioner(Arc::new(pc))
                 .with_log_interval(LogInterval::Time(Duration::from_secs(30)))
+            //.with_log_interval(LogInterval::Iterations(1))
         };
         let num_components = pc.components().len();
         pc.application = application;
@@ -232,13 +241,14 @@ fn test_solve(
             Application::Multiplicative => 2000 / ((2 * (num_components - 1)) + 1),
             Application::Random => 2000,
         };
-        let solver = base_solver(mat.clone(), pc.clone(), guess.clone()).with_solver(method);
-        //.with_max_iter(max_iter);
+        let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
+            .with_solver(method)
+            .with_max_iter(max_iter);
         let complexity = pc
             .components()
             .iter()
             .map(|ml| ml.hierarchy.op_complexity())
-            .sum::<f32>();
+            .sum::<f64>();
         info!(
             "Starting solve with {} components and {:.2} complexity",
             pc.components().len(),

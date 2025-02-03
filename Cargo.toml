@@ -1,6 +1,6 @@
 [package]
 name = "amg_match"
-version = "0.1.1"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Research iterative solver utilities"
@@ -12,8 +12,8 @@ readme = "README.md"
 #crate-type = ["cdylib"]
 
 [dependencies]
-nalgebra = { version = "0.32.6", features = ["rand"] }
-nalgebra-sparse = { version = "0.9", features = ["io", "serde-serialize"] }
+nalgebra = { version = "0.33", features = ["rand"] }
+nalgebra-sparse = { version = "0.10", features = ["io", "serde-serialize"] }
 image = "0"
 indexmap = "1"
 rand = "0"

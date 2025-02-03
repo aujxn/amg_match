@@ -1,44 +1,3 @@
-//                       MFEM Example 2 - Parallel Version
-//
-// Compile with: make ex2p
-//
-// Sample runs:  mpirun -np 4 ex2p -m ../data/beam-tri.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-quad.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-tet.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-hex.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-wedge.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-tri.mesh -o 2 -sys
-//               mpirun -np 4 ex2p -m ../data/beam-quad.mesh -o 3 -elast
-//               mpirun -np 4 ex2p -m ../data/beam-quad.mesh -o 3 -sc
-//               mpirun -np 4 ex2p -m ../data/beam-quad-nurbs.mesh
-//               mpirun -np 4 ex2p -m ../data/beam-hex-nurbs.mesh
-//
-// Description:  This example code solves a simple linear elasticity problem
-//               describing a multi-material cantilever beam.
-//
-//               Specifically, we approximate the weak form of -div(sigma(u))=0
-//               where sigma(u)=lambda*div(u)*I+mu*(grad*u+u*grad) is the stress
-//               tensor corresponding to displacement field u, and lambda and mu
-//               are the material Lame constants. The boundary conditions are
-//               u=0 on the fixed part of the boundary with attribute 1, and
-//               sigma(u).n=f on the remainder with f being a constant pull down
-//               vector on boundary elements with attribute 2, and zero
-//               otherwise. The geometry of the domain is assumed to be as
-//               follows:
-//
-//                                 +----------+----------+
-//                    boundary --->| material | material |<--- boundary
-//                    attribute 1  |    1     |    2     |     attribute 2
-//                    (fixed)      +----------+----------+     (pull down)
-//
-//               The example demonstrates the use of high-order and NURBS vector
-//               finite element spaces with the linear elasticity bilinear form,
-//               meshes with curved elements, and the definition of piece-wise
-//               constant and vector coefficient objects. Static condensation is
-//               also illustrated.
-//
-//               We recommend viewing Example 1 before viewing this example.
-
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
@@ -46,21 +5,22 @@
 using namespace std;
 using namespace mfem;
 
+// mpiexec -n 8 ./elasticityp -m ../data/meshes/beam-tet.mesh -r 4
 int main(int argc, char *argv[]) {
-  // 1. Initialize MPI and HYPRE.
   Mpi::Init(argc, argv);
   int num_procs = Mpi::WorldSize();
   int myid = Mpi::WorldRank();
   Hypre::Init();
 
-  // 2. Parse command-line options.
-  const char *mesh_file = "../data/beam-tri.mesh";
+  const char *mesh_file = "../data/meshes/beam-tet.mesh";
   int order = 1;
-  bool static_cond = false;
-  bool visualization = 1;
   bool amg_elast = 0;
-  bool reorder_space = false;
-  int refinements = 0;
+
+  // boomerAMG depends on nodal ordering which is byVDIM
+  auto ordering = Ordering::byVDIM;
+  //auto ordering = Ordering::byNODES;
+  
+  int refinements = 2;
   const char *device_config = "cpu";
 
   OptionsParser args(argc, argv);
@@ -71,13 +31,6 @@ int main(int argc, char *argv[]) {
                  "--amg-for-systems",
                  "Use the special AMG elasticity solver (GM/LN approaches), "
                  "or standard AMG for systems (unknown approach).");
-  args.AddOption(&static_cond, "-sc", "--static-condensation", "-no-sc",
-                 "--no-static-condensation", "Enable static condensation.");
-  args.AddOption(&visualization, "-vis", "--visualization", "-no-vis",
-                 "--no-visualization",
-                 "Enable or disable GLVis visualization.");
-  args.AddOption(&reorder_space, "-nodes", "--by-nodes", "-vdim", "--by-vdim",
-                 "Use byNODES ordering of vector space instead of byVDIM");
   args.AddOption(&device_config, "-d", "--device",
                  "Device configuration string, see Device::Configure().");
   args.AddOption(&refinements, "-r", "--refinements",
@@ -93,16 +46,13 @@ int main(int argc, char *argv[]) {
     args.PrintOptions(cout);
   }
 
-  // 3. Enable hardware devices such as GPUs, and programming models such as
+  //    Enable hardware devices such as GPUs, and programming models such as
   //    CUDA, OCCA, RAJA and OpenMP based on command line options.
   Device device(device_config);
   if (myid == 0) {
     device.Print();
   }
 
-  // 4. Read the (serial) mesh from the given mesh file on all processors.  We
-  //    can handle triangular, quadrilateral, tetrahedral, hexahedral, surface
-  //    and volume meshes with the same code.
   Mesh *mesh = new Mesh(mesh_file, 1, 1);
   int dim = mesh->Dimension();
 
@@ -114,70 +64,43 @@ int main(int argc, char *argv[]) {
     return 3;
   }
 
-  // 5. Select the order of the finite element discretization space. For NURBS
-  //    meshes, we increase the order by degree elevation.
-  if (mesh->NURBSext) {
-    mesh->DegreeElevate(order, order);
-  }
-
-  // 6. Refine the serial mesh on all processors to increase the resolution. In
-  //    this example we do 'ref_levels' of uniform refinement. We choose
-  //    'ref_levels' to be the largest number that gives a final mesh with no
-  //    more than 1,000 elements.
   {
     for (int l = 0; l < refinements; l++) {
       mesh->UniformRefinement();
     }
   }
-
-  // 7. Define a parallel mesh by a partitioning of the serial mesh. Refine
-  //    this mesh further in parallel to increase the resolution. Once the
-  //    parallel mesh is defined, the serial mesh can be deleted.
   ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
   delete mesh;
+    /*
   {
-    int par_ref_levels = 1;
-    for (int l = 0; l < par_ref_levels; l++) {
+    for (int l = 0; l < refinements; l++) {
       pmesh->UniformRefinement();
     }
   }
+    */
 
-  // 8. Define a parallel finite element space on the parallel mesh. Here we
+  //    Define a parallel finite element space on the parallel mesh. Here we
   //    use vector finite elements, i.e. dim copies of a scalar finite element
   //    space. We use the ordering by vector dimension (the last argument of
   //    the FiniteElementSpace constructor) which is expected in the systems
-  //    version of BoomerAMG preconditioner. For NURBS meshes, we use the
-  //    (degree elevated) NURBS space associated with the mesh nodes.
+  //    version of BoomerAMG preconditioner.
   FiniteElementCollection *fec;
   ParFiniteElementSpace *fespace;
-  const bool use_nodal_fespace = pmesh->NURBSext && !amg_elast;
-  if (use_nodal_fespace) {
-    fec = NULL;
-    fespace = (ParFiniteElementSpace *)pmesh->GetNodes()->FESpace();
-  } else {
-    fec = new H1_FECollection(order, dim);
-    if (reorder_space) {
-      fespace = new ParFiniteElementSpace(pmesh, fec, dim, Ordering::byNODES);
-    } else {
-      fespace = new ParFiniteElementSpace(pmesh, fec, dim, Ordering::byVDIM);
-    }
-  }
+  fec = new H1_FECollection(order, dim);
+  fespace = new ParFiniteElementSpace(pmesh, fec, dim, ordering);
+
   HYPRE_BigInt size = fespace->GlobalTrueVSize();
   if (myid == 0) {
     cout << "Number of finite element unknowns: " << size << endl
          << "Assembling: " << flush;
   }
 
-  // 9. Determine the list of true (i.e. parallel conforming) essential
-  //    boundary dofs. In this example, the boundary conditions are defined by
-  //    marking only boundary attribute 1 from the mesh as essential and
-  //    converting it to a list of true dofs.
   Array<int> ess_tdof_list, ess_bdr(pmesh->bdr_attributes.Max());
   ess_bdr = 0;
   ess_bdr[0] = 1;
   fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
-  // 10. Set up the parallel linear form b(.) which corresponds to the
+  //     Set up the parallel linear form b(.) which corresponds to the
   //     right-hand side of the FEM linear system. In this case, b_i equals the
   //     boundary integral of f*phi_i where f represents a "pull down" force on
   //     the Neumann part of the boundary and phi_i are the basis functions in
@@ -203,13 +126,10 @@ int main(int argc, char *argv[]) {
   }
   b->Assemble();
 
-  // 11. Define the solution vector x as a parallel finite element grid
-  //     function corresponding to fespace. Initialize x with initial guess of
-  //     zero, which satisfies the boundary conditions.
   ParGridFunction x(fespace);
   x = 0.0;
 
-  // 12. Set up the parallel bilinear form a(.,.) on the finite element space
+  //     Set up the parallel bilinear form a(.,.) on the finite element space
   //     corresponding to the linear elasticity integrator with piece-wise
   //     constants coefficient lambda and mu.
   Vector lambda(pmesh->attributes.Max());
@@ -224,7 +144,7 @@ int main(int argc, char *argv[]) {
   ParBilinearForm *a = new ParBilinearForm(fespace);
   a->AddDomainIntegrator(new ElasticityIntegrator(lambda_func, mu_func));
 
-  // 13. Assemble the parallel bilinear form and the corresponding linear
+  //     Assemble the parallel bilinear form and the corresponding linear
   //     system, applying any necessary transformations such as: parallel
   //     assembly, eliminating boundary conditions, applying conforming
   //     constraints for non-conforming AMR, static condensation, etc.
@@ -241,28 +161,24 @@ int main(int argc, char *argv[]) {
     cout << "Size of linear system: " << A.GetGlobalNumRows() << endl;
   }
 
-  // 14. Define and apply a parallel PCG solver for A X = B with the BoomerAMG
-  //     preconditioner from hypre.
   HypreBoomerAMG *amg = new HypreBoomerAMG(A);
-  if (amg_elast && !a->StaticCondensationIsEnabled()) {
-    amg->SetElasticityOptions(fespace);
-  } else {
-    amg->SetSystemsOptions(dim, reorder_space);
-  }
-  HyprePCG *solver = new HyprePCG(A);
-  // SLISolver solver(MPI_COMM_WORLD);
-  solver->SetTol(1e-8);
-  solver->SetMaxIter(500);
-  solver->SetPrintLevel(2);
-  solver->SetPreconditioner(*amg);
-  solver->Mult(B, X);
 
-  // 15. Recover the parallel grid function corresponding to X. This is the
-  //     local finite element solution on each processor.
+  amg->SetElasticityOptions(fespace);
+  // using this set system options seems to be ok though, still not a great PC though...
+  //amg->SetSystemsOptions(dim, Ordering::byVDIM==ordering);
+
+  //CGSolver solver(MPI_COMM_WORLD);
+  SLISolver solver(MPI_COMM_WORLD);
+  solver.SetRelTol(1e-8);
+  solver.SetMaxIter(300);
+  mfem::IterativeSolver::PrintLevel pl;
+  solver.SetPrintLevel(pl.Iterations());
+  solver.SetOperator(A);
+  solver.SetPreconditioner(*amg);
+  solver.Mult(B, X);
+
   a->RecoverFEMSolution(X, *b, x);
 
-  // 19. Free the used memory.
-  delete solver;
   delete amg;
   delete a;
   delete b;

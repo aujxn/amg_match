@@ -40,6 +40,7 @@
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
+#include <mfem/fem/fespace.hpp>
 
 using namespace std;
 using namespace mfem;
@@ -48,7 +49,6 @@ int main(int argc, char *argv[]) {
   // 1. Parse command-line options.
   const char *mesh_file = "../data/beam-tri.mesh";
   int order = 1;
-  bool static_cond = false;
   bool visualization = 1;
   int refinements = 0;
 
@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     fespace = mesh->GetNodes()->FESpace();
   } else {
     fec = new H1_FECollection(order, dim);
-    fespace = new FiniteElementSpace(mesh, fec, dim);
+    fespace = new FiniteElementSpace(mesh, fec, dim, Ordering::byVDIM);
   }
   cout << "Number of finite element unknowns: " << fespace->GetTrueVSize()
        << endl
@@ -170,9 +170,6 @@ int main(int argc, char *argv[]) {
   //     conditions, applying conforming constraints for non-conforming AMR,
   //     static condensation, etc.
   cout << "matrix ... " << flush;
-  if (static_cond) {
-    a->EnableStaticCondensation();
-  }
   a->Assemble();
 
   SparseMatrix A;

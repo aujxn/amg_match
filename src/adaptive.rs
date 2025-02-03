@@ -1,10 +1,12 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
 use crate::{
-    partitioner::{modularity_matching_add_level, Hierarchy, InterpolationType},
-    preconditioner::{Composite, LinearOperator, Multilevel, SmootherType, L1},
+    hierarchy::Hierarchy,
+    interpolation::InterpolationType,
+    partitioner::metis_n,
+    preconditioner::{build_smoother, Composite, LinearOperator, Multilevel, SmootherType, L1},
     solver::{Iterative, IterativeMethod},
-    utils::{inner_product, norm, random_vec},
+    utils::{format_duration, inner_product, norm, normalize, random_vec},
 };
 use nalgebra::base::DVector;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -37,7 +39,7 @@ impl AdaptiveBuilder {
             solve_coarsest_exactly: true,
             smoothing_steps: 1,
             smoother_type: SmootherType::BlockGaussSeidel,
-            interpolation_type: InterpolationType::SmoothedAggregation(1),
+            interpolation_type: InterpolationType::SmoothedAggregation((1, 0.66)),
         }
     }
 
@@ -138,10 +140,13 @@ impl AdaptiveBuilder {
         let mut near_null = stationary.apply(&zeros);
 
         loop {
-            trace!("Near-Null score: {:.2e}", norm(&near_null, &*self.mat));
+            let almost0 = &*self.mat * &near_null;
+            let score = almost0.norm();
+            trace!("Near-Null score: {:.2e}", score);
 
             // Sanity check that each near null is orthogonal to the last.
             // Could move into test suite down the line.
+            normalize(&mut near_null, &self.mat);
             let ortho_check: String = near_null_history
                 .iter()
                 .map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
@@ -155,10 +160,9 @@ impl AdaptiveBuilder {
             let mut levels = 1;
 
             loop {
-                near_null = modularity_matching_add_level(
+                near_null = hierarchy.add_level(
                     &near_null,
                     self.coarsening_factor,
-                    &mut hierarchy,
                     self.interpolation_type,
                 );
 
@@ -169,7 +173,7 @@ impl AdaptiveBuilder {
                     }
                 }
                 if hierarchy
-                    .get_matrices()
+                    .get_coarse_mats()
                     .last()
                     .unwrap_or(&hierarchy.get_mat(0))
                     .nrows()
@@ -179,13 +183,19 @@ impl AdaptiveBuilder {
                 }
 
                 let current_a = hierarchy
-                    .get_matrices()
+                    .get_coarse_mats()
                     .last()
                     .unwrap_or(&hierarchy.get_mat(0))
                     .clone();
 
+                let r = metis_n(&near_null, current_a.clone(), 16);
+                let coarse_smoother =
+                    build_smoother(current_a.clone(), self.smoother_type, r.into(), false);
+
+                //let l1 = Arc::new(L1::new(&current_a));
+                find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 5);
+                /*
                 let dim = current_a.nrows();
-                let l1 = Arc::new(L1::new(&current_a));
                 let zeros = DVector::from(vec![0.0; dim]);
 
                 let stationary = Iterative::new(current_a.clone(), Some(near_null))
@@ -193,8 +203,7 @@ impl AdaptiveBuilder {
                     .with_max_iter(3)
                     .with_preconditioner(l1.clone());
                 near_null = stationary.apply(&zeros);
-                //normalize(&mut near_null, &current_a);
-                near_null.normalize_mut();
+                */
             }
             //hierarchy.consolidate(self.coarsening_factor);
             info!("Hierarchy info*: {:?}", hierarchy);
@@ -215,17 +224,6 @@ impl AdaptiveBuilder {
                 &mut near_null,
                 self.test_iters,
             );
-
-            for (i, (cf, cf_next)) in convergence_history
-                .iter()
-                .copied()
-                .zip(convergence_history.iter().skip(1).copied())
-                .enumerate()
-            {
-                if cf > cf_next || cf >= 1.0 {
-                    error!("Monotonicity or convergence properties violated in homogeneous problem at iter: {}, cf_i: {:.2}, cf_i+1: {:.2}\nConvergence history: {:?}", i, cf, cf_next, convergence_history);
-                }
-            }
 
             test_data.push(convergence_history);
             //plot_convergence_history("in_progress", &test_data, 1);
@@ -259,19 +257,32 @@ fn find_near_null(
     let mut history = Vec::new();
 
     loop {
-        near_null.normalize_mut();
+        normalize(near_null, &mat);
+        //near_null.normalize_mut();
         let stationary = Iterative::new(mat.clone(), Some(near_null.clone()))
             .with_solver(IterativeMethod::StationaryIteration)
             .with_preconditioner(Arc::new(composite_preconditioner.clone()))
             .with_max_iter(1);
         *near_null = stationary.apply(&zeros);
         iter += 1;
-        let convergence_factor = near_null.norm();
+        //let convergence_factor = near_null.norm();
+        let convergence_factor = norm(near_null, &mat);
+        if convergence_factor > 1.0 {
+            error!(
+                "Not convergent method! Tester convergence factor: {:.2} on iteration {}",
+                convergence_factor, iter
+            );
+            //maybe panic?
+        }
+
+        if convergence_factor < old_convergence_factor {
+            warn!("Monotonicity properties violated in tester at iter: {}, cf_i: {:.2}, cf_i-1: {:.2}", iter, convergence_factor, old_convergence_factor);
+        }
         history.push(convergence_factor);
 
         let now = Instant::now();
-        let elapsed = (now - start).as_millis();
-        let elapsed_secs = elapsed as f64 / 1000.0;
+        let elapsed = now - start;
+        let elapsed_secs = elapsed.as_millis() as f64 / 1000.0;
 
         let cycles = ((composite_preconditioner.components().len() * 2) - 1) as f64;
         if now - last_log > log_interval {
@@ -285,13 +296,15 @@ fn find_near_null(
             last_log = now;
         }
 
-        if old_convergence_factor / convergence_factor > 0.999 || iter >= max_iter {
+        //if old_convergence_factor / convergence_factor > 0.999 || iter >= max_iter {
+        if iter >= max_iter {
             info!(
-                "{} components:\n\tconvergence factor: {:.3}\n\tconvergence factor per cycle: {:.3}\n\tsearch iters: {}",
+                "{} components:\n\tconvergence factor: {:.3}\n\tconvergence factor per cycle: {:.3}\n\tsearch iters: {}\n\tsearch time: {}",
                 composite_preconditioner.components().len(),
                 convergence_factor,
                 convergence_factor.powf(1.0 / cycles),
-                iter
+                iter,
+                format_duration(&elapsed)
             );
             return (convergence_factor, history);
         }
@@ -299,6 +312,41 @@ fn find_near_null(
     }
 }
 
+fn find_near_null_coarse(
+    mat: Arc<CsrMatrix<f64>>,
+    pc: Arc<dyn LinearOperator + Send + Sync>,
+    near_null: &mut DVector<f64>,
+    max_iter: usize,
+) -> f64 {
+    let mut iter = 0;
+    let zeros = DVector::from(vec![0.0; near_null.nrows()]);
+    let mut old_convergence_factor = 0.0;
+
+    loop {
+        normalize(near_null, &mat);
+        let stationary = Iterative::new(mat.clone(), Some(near_null.clone()))
+            .with_solver(IterativeMethod::StationaryIteration)
+            .with_preconditioner(pc.clone())
+            .with_max_iter(1);
+        *near_null = stationary.apply(&zeros);
+        iter += 1;
+        let convergence_factor = norm(near_null, &mat);
+        if convergence_factor > 1.0 {
+            error!(
+                "Not convergent method! Tester convergence factor: {:.2} on iteration {}",
+                convergence_factor, iter
+            );
+        }
+        if convergence_factor < old_convergence_factor {
+            warn!("Monotonicity properties violated in tester at iter: {}, cf_i: {:.2}, cf_i-1: {:.2}", iter, convergence_factor, old_convergence_factor);
+        }
+
+        if iter >= max_iter {
+            return convergence_factor;
+        }
+        old_convergence_factor = convergence_factor;
+    }
+}
 /*
 #[cfg(test)]
 mod tests {

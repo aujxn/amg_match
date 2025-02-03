@@ -2,12 +2,12 @@
 //! system `Ax=b`.
 
 use crate::parallel_ops::spmm;
-use crate::utils::norm;
 use crate::{
     preconditioner::{Identity, LinearOperator},
     utils::{format_duration, random_vec},
 };
 use nalgebra::{base::DVector, Dyn, FullPivLU};
+use nalgebra::{DMatrix, Matrix3, Matrix4, VectorView};
 use nalgebra_sparse::{convert::serial::convert_csr_dense, csr::CsrMatrix};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -352,22 +352,22 @@ impl Iterative {
 
     fn stationary_optimized_threaded(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) {
         let mat = &*self.mat;
-        //let mut r = rhs - &(mat * &*x);
-        let mut r = rhs - spmm(mat, &*x);
-
         let max_iter = self.max_iter.unwrap();
-        let mut iter: usize = 0;
 
-        loop {
-            self.preconditioner.apply_mut(&mut r);
-            *x += &r;
-            iter += 1;
-            if iter >= max_iter {
+        // TODO handle case where x=0 (forward pass ML) so extra spmm is avoided
+        for _ in 0..max_iter {
+            //let mut r = rhs - &(mat * &*x);
+            let mut r = rhs - spmm(mat, &*x);
+            // TODO remove this highly not optimal
+            if r.norm() < 1e-16 {
+                warn!(
+                    "Smoother application early termination because residual norm: {:.2e}",
+                    r.norm()
+                );
                 return;
             }
-
-            r = rhs - spmm(mat, &*x);
-            //r = rhs - (mat * &*x);
+            self.preconditioner.apply_mut(&mut r);
+            *x += &r;
         }
     }
 
@@ -569,4 +569,143 @@ impl Iterative {
             }
         }
     }
+}
+
+pub fn lobpcg(
+    mat: &CsrMatrix<f64>,
+    //a:  Arc<dyn LinearOperator + Sync + Send>,
+    b: Option<Arc<dyn LinearOperator + Sync + Send>>,
+    pc: Option<Arc<dyn LinearOperator + Sync + Send>>,
+    xs: &mut Vec<DVector<f64>>,
+    tol: f64,
+    max_iter: usize,
+) -> Vec<f64> {
+    let pc = pc.unwrap_or(Arc::new(Identity));
+    let b = b.unwrap_or(Arc::new(Identity));
+    let nrows = mat.ncols();
+    let m = xs.len();
+
+    let mut ps = vec![DVector::zeros(nrows); m];
+    let mut lambdas = vec![1.0; m];
+    let mut max_rnorm: f64 = 0.0;
+    let mut sum_rnorms: f64 = 0.0;
+
+    //let log_interval = max_iter / 50;
+    let log_interval = 1;
+
+    for iter in 0..max_iter {
+        let x_mat = DMatrix::from_columns(&xs);
+        let x_mat = x_mat.qr().q();
+        for (x_vec, normalized) in xs.iter_mut().zip(x_mat.column_iter()) {
+            x_vec.copy_from(&normalized);
+        }
+        let ax: Vec<DVector<f64>> = xs.iter().map(|x_vec| spmm(mat, x_vec)).collect();
+        let bx: Vec<DVector<f64>> = xs.iter().map(|x_vec| b.apply(x_vec)).collect();
+
+        lambdas = ax
+            .iter()
+            .zip(bx.iter())
+            .zip(xs.iter())
+            .map(|((ax_vec, bx_vec), x_vec)| {
+                let denom = x_vec.dot(bx_vec);
+                assert!((1.0 - denom).abs() < 1e-12);
+                x_vec.dot(ax_vec) / denom
+            })
+            .collect();
+
+        let rs: Vec<DVector<f64>> = ax
+            .iter()
+            .zip(xs.iter())
+            .zip(lambdas.iter().copied())
+            .map(|((ax_vec, x_vec), lambda)| ax_vec - (lambda * x_vec))
+            .collect();
+
+        let r_norms: Vec<f64> = rs.iter().map(|r_vec| r_vec.norm()).collect();
+
+        max_rnorm = r_norms
+            .iter()
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        sum_rnorms = r_norms.iter().sum();
+        if iter % log_interval == 0 {
+            trace!(
+                "Iter: {}, (sum, max) residual norm: ({:.2e}, {:.2e}), current max lambda: {:.2e}",
+                iter,
+                sum_rnorms,
+                max_rnorm,
+                lambdas[0]
+            );
+        }
+
+        if max_rnorm < tol {
+            trace!(
+                "LOBPCG converged in {} iters with final max residual norm {:.2e} and max lambda {:.2e}",
+                iter,
+                max_rnorm,
+                lambdas[0]
+            );
+            return lambdas;
+        }
+
+        let ws: Vec<DVector<f64>> = rs.iter().map(|r_vec| pc.apply(&r_vec)).collect();
+        let test_vectors: Vec<DVector<f64>> = rs
+            .into_iter()
+            .chain(ws.into_iter())
+            .chain(ps.iter().cloned())
+            .chain(xs.iter().cloned().into_iter())
+            .collect();
+
+        let rayleigh_space = DMatrix::from_columns(&test_vectors);
+        let rayleigh_space = rayleigh_space.qr().q();
+
+        let cols: Vec<DVector<f64>> = rayleigh_space
+            .column_iter()
+            .map(|col| spmm(mat, &DVector::from(col)))
+            .collect();
+        let temp = DMatrix::from_columns(&cols);
+
+        let mut projection = DMatrix::zeros(4 * m, 4 * m);
+        projection.gemm_tr(1.0, &rayleigh_space, &temp, 1.0);
+
+        let decomp = projection.symmetric_eigen();
+        let eigs = decomp.eigenvalues;
+        let eigvecs = decomp.eigenvectors;
+
+        let mut indices = (0..(4 * m)).collect::<Vec<_>>();
+        indices.sort_by(|idx_a, idx_b| eigs[*idx_b].partial_cmp(&eigs[*idx_a]).unwrap());
+
+        /* This is correct impl according to paper but for some reason just setting the `ps` to the
+        * previous `xs` works better
+        ps.iter_mut()
+            .zip(indices.iter().copied())
+            .for_each(|(p_vec, idx)| {
+                p_vec.copy_from(&DVector::from_element(nrows, 0.0));
+                p_vec.gemv(
+                    1.0,
+                    &rayleigh_space.columns(m, 3 * m),
+                    &eigvecs.column_part(idx, 3 * m),
+                    1.0,
+                );
+            });
+        */
+
+        ps = xs.to_vec();
+        xs.iter_mut()
+            .zip(indices.into_iter())
+            .for_each(|(x_vec, idx)| {
+                x_vec.copy_from(&DVector::from_element(nrows, 0.0));
+                x_vec.gemv(1.0, &rayleigh_space, &eigvecs.column(idx), 1.0);
+            });
+    }
+
+    warn!(
+        "LOBPCG didn't conver in {} iterations. Final (sum, max) residual norm: ({:.2e}, {:.2e}) and max lambda {:.2e}",
+                max_iter,
+                sum_rnorms,
+                max_rnorm,
+                lambdas[0]
+            );
+
+    lambdas
 }
