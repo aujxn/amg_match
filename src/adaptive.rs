@@ -1,22 +1,25 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
+use ndarray_linalg::Norm;
+use ndarray_rand::{rand_distr::Uniform, RandomExt};
+
 use crate::{
     hierarchy::Hierarchy,
     interpolation::InterpolationType,
     partitioner::metis_n,
     preconditioner::{build_smoother, Composite, LinearOperator, Multilevel, SmootherType, L1},
     solver::{Iterative, IterativeMethod},
-    utils::{format_duration, inner_product, norm, normalize, random_vec},
+    utils::{format_duration, inner_product, norm, normalize},
+    CsrMatrix, Vector,
 };
-use nalgebra::base::DVector;
-use nalgebra_sparse::csr::CsrMatrix;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub struct AdaptiveBuilder {
-    mat: Arc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix>,
     coarsening_factor: f64,
     max_level: Option<usize>,
+    mu: usize,
     target_convergence: Option<f64>,
     max_components: Option<usize>,
     test_iters: Option<usize>,
@@ -28,13 +31,14 @@ pub struct AdaptiveBuilder {
 }
 
 impl AdaptiveBuilder {
-    pub fn new(mat: Arc<CsrMatrix<f64>>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix>) -> Self {
         AdaptiveBuilder {
             mat,
             coarsening_factor: 8.0,
             max_level: None,
             target_convergence: None,
             max_components: Some(10),
+            mu: 1,
             test_iters: None,
             solve_coarsest_exactly: true,
             smoothing_steps: 1,
@@ -43,13 +47,18 @@ impl AdaptiveBuilder {
         }
     }
 
-    pub fn with_matrix(mut self, mat: Arc<CsrMatrix<f64>>) -> Self {
+    pub fn with_matrix(mut self, mat: Arc<CsrMatrix>) -> Self {
         self.mat = mat;
         self
     }
 
     pub fn with_coarsening_factor(mut self, coarsening_factor: f64) -> Self {
         self.coarsening_factor = coarsening_factor;
+        self
+    }
+
+    pub fn cycle_type(mut self, mu: usize) -> Self {
+        self.mu = mu;
         self
     }
 
@@ -121,23 +130,23 @@ impl AdaptiveBuilder {
     //TODO from yaml config??
 
     //TODO log intervals and max time?
-    pub fn build(&self) -> (Composite, Vec<Vec<f64>>, Vec<DVector<f64>>) {
+    pub fn build(&self) -> (Composite, Vec<Vec<f64>>, Vec<Vector>) {
         let mut preconditioner = Composite::new(self.mat.clone());
 
-        let dim = self.mat.nrows();
-        let mut near_null_history = Vec::<DVector<f64>>::new();
+        let dim = self.mat.rows();
+        let mut near_null_history = Vec::<Vector>::new();
         let mut test_data = Vec::new();
 
         // Find initial near null to get the iterations started
         let fine_l1 = Arc::new(L1::new(&self.mat));
         info!("built smoother");
-        let guess: DVector<f64> = DVector::from_element(dim, 1.0);
+        let guess: Vector = Vector::from_elem(dim, 1.0);
         let stationary = Iterative::new(self.mat.clone(), Some(guess))
             .with_solver(IterativeMethod::StationaryIteration)
             .with_max_iter(3)
             .with_preconditioner(fine_l1.clone());
-        let zeros = DVector::from(vec![0.0; dim]);
-        let mut near_null = stationary.apply(&zeros);
+        let zeros = Vector::from(vec![0.0; dim]);
+        let mut near_null: Vector = stationary.apply(&zeros);
 
         loop {
             let almost0 = &*self.mat * &near_null;
@@ -176,7 +185,7 @@ impl AdaptiveBuilder {
                     .get_coarse_mats()
                     .last()
                     .unwrap_or(&hierarchy.get_mat(0))
-                    .nrows()
+                    .rows()
                     < 100
                 {
                     break;
@@ -195,8 +204,8 @@ impl AdaptiveBuilder {
                 //let l1 = Arc::new(L1::new(&current_a));
                 find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 5);
                 /*
-                let dim = current_a.nrows();
-                let zeros = DVector::from(vec![0.0; dim]);
+                let dim = current_a.rows();
+                let zeros = Vector::from(vec![0.0; dim]);
 
                 let stationary = Iterative::new(current_a.clone(), Some(near_null))
                     .with_solver(IterativeMethod::StationaryIteration)
@@ -213,11 +222,12 @@ impl AdaptiveBuilder {
                 self.solve_coarsest_exactly,
                 self.smoother_type,
                 self.smoothing_steps,
+                self.mu,
             ));
             trace!("Multilevel pc constructed");
             preconditioner.push(ml1);
 
-            near_null = random_vec(dim);
+            near_null = Vector::random(dim, Uniform::new(-1., 1.));
             let (convergence_rate, convergence_history) = find_near_null(
                 self.mat.clone(),
                 &preconditioner,
@@ -242,9 +252,9 @@ impl AdaptiveBuilder {
 }
 
 fn find_near_null(
-    mat: Arc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix>,
     composite_preconditioner: &Composite,
-    near_null: &mut DVector<f64>,
+    near_null: &mut Vector,
     test_iters: Option<usize>,
 ) -> (f64, Vec<f64>) {
     let mut iter = 0;
@@ -252,7 +262,7 @@ fn find_near_null(
     let start = Instant::now();
     let mut last_log = start;
     let log_interval = Duration::from_secs(10);
-    let zeros = DVector::from(vec![0.0; near_null.nrows()]);
+    let zeros = Vector::from(vec![0.0; near_null.len()]);
     let mut old_convergence_factor = 0.0;
     let mut history = Vec::new();
 
@@ -313,13 +323,13 @@ fn find_near_null(
 }
 
 fn find_near_null_coarse(
-    mat: Arc<CsrMatrix<f64>>,
+    mat: Arc<CsrMatrix>,
     pc: Arc<dyn LinearOperator + Send + Sync>,
-    near_null: &mut DVector<f64>,
+    near_null: &mut Vector,
     max_iter: usize,
 ) -> f64 {
     let mut iter = 0;
-    let zeros = DVector::from(vec![0.0; near_null.nrows()]);
+    let zeros = Vector::from(vec![0.0; near_null.len()]);
     let mut old_convergence_factor = 0.0;
 
     loop {
@@ -347,54 +357,3 @@ fn find_near_null_coarse(
         old_convergence_factor = convergence_factor;
     }
 }
-/*
-#[cfg(test)]
-mod tests {
-    use crate::{adaptive::build_adaptive, preconditioner::Preconditioner, random_vec};
-    use nalgebra_sparse::CsrMatrix;
-    use test_generator::test_resources;
-
-    fn test_symmetry(preconditioner: &mut dyn Preconditioner, dim: usize) {
-        for _ in 0..5 {
-            let u = random_vec(dim);
-            let v = random_vec(dim);
-            let mut preconditioned_v = v.clone();
-            let mut preconditioned_u = u.clone();
-            preconditioner.apply(&mut preconditioned_v);
-            preconditioner.apply(&mut preconditioned_u);
-
-            let left: f64 = u.dot(&preconditioned_v);
-            let right: f64 = v.dot(&preconditioned_u);
-            let difference = (left - right).abs() / (left + right).abs();
-            assert!(
-                difference < 1e-3,
-                "\nLeft and right didn't match\nleft: {}\nright: {}\nrelative difference: {:+e}\n",
-                left,
-                right,
-                difference
-            );
-        }
-    }
-    */
-
-//#[test_resources("test_matrices/unit_tests/*")]
-/*
-    fn test_symmetry_adaptive(mat_path: &str) {
-        let mut mat = CsrMatrix::from(
-            &nalgebra_sparse::io::load_coo_from_matrix_market_file(mat_path).unwrap(),
-        );
-
-        let norm = mat
-            .values()
-            .iter()
-            .fold(0.0_f64, |acc, x| acc + x * x)
-            .sqrt();
-        mat /= norm;
-        let mat = mat;
-        let dim = mat.nrows();
-        let mut preconditioner = build_adaptive(&mat);
-        test_symmetry(&mut preconditioner, dim);
-    }
-}
-
-*/

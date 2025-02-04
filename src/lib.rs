@@ -29,15 +29,23 @@
 //! This cycle of testing, constructing, and composing is repeated until the
 //! method has a desired rate of convergence on the test problem.
 
+use ndarray::Array1;
+use sprs::{CsMatBase, TriMatBase};
+use sprs_ldl::LdlNumeric;
+
 #[macro_use]
 extern crate log;
 
 pub mod adaptive;
 pub mod hierarchy;
 pub mod interpolation;
-pub mod io;
 pub mod parallel_ops;
 pub mod partitioner;
 pub mod preconditioner;
 pub mod solver;
 pub mod utils;
+
+pub type CsrMatrix = CsMatBase<f64, usize, Vec<usize>, Vec<usize>, Vec<f64>, usize>;
+pub type CooMatrix = TriMatBase<Vec<usize>, Vec<f64>>;
+pub type Vector = Array1<f64>;
+pub type Cholesky = LdlNumeric<f64, usize>;

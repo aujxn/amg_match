@@ -6,7 +6,6 @@ use amg_match::{
     solver::{Iterative, IterativeMethod, LogInterval},
     utils::{load_system, random_vec},
 };
-use nalgebra::DVector;
 
 #[macro_use]
 extern crate log;
@@ -22,14 +21,14 @@ fn main() {
     for i in 2..8 {
         let prefix = format!("data/laplace/{}", i);
         let (mat, b, _coords, _projector) = load_system(&prefix);
-        let dim = mat.nrows();
+        let dim = mat.rows();
         //let cf = dim as f64 / 100.0;
         let cf = 8.0;
         let max_iter = 5000;
         info!("Starting: {}", i);
 
-        //let rand: DVector<f64> = DVector::from_element(b.len(), 1.0).normalize();
-        //let b: DVector<f64> = random_vec(dim);
+        //let rand: Vector = Vector::from_element(b.len(), 1.0).normalize();
+        //let b: Vector = random_vec(dim);
 
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
@@ -62,7 +61,7 @@ fn main() {
         let mut two_sum = 0;
 
         for _ in 0..avg {
-            let x: DVector<f64> = random_vec(dim);
+            let x: Vector = random_vec(dim);
             let multi_solver = Iterative::new(mat.clone(), Some(x))
                 .with_tolerance(epsilon)
                 .with_max_iter(max_iter)
@@ -79,7 +78,7 @@ fn main() {
             }
             multi_sum += multi_solve_result.iterations;
 
-            let x: DVector<f64> = random_vec(dim);
+            let x: Vector = random_vec(dim);
             let two_solver = Iterative::new(mat.clone(), Some(x))
                 .with_tolerance(epsilon)
                 .with_max_iter(max_iter)

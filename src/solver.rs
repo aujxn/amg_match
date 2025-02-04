@@ -1,14 +1,15 @@
 //! Implementation of various sparse matrix solvers for the
 //! system `Ax=b`.
-
-use crate::parallel_ops::spmm;
+use crate::parallel_ops::spmv;
 use crate::{
     preconditioner::{Identity, LinearOperator},
-    utils::{format_duration, random_vec},
+    utils::format_duration,
 };
-use nalgebra::{base::DVector, Dyn, FullPivLU};
-use nalgebra::{DMatrix, Matrix3, Matrix4, VectorView};
-use nalgebra_sparse::{convert::serial::convert_csr_dense, csr::CsrMatrix};
+use crate::{CsrMatrix, Vector};
+use ndarray::OwnedRepr;
+use ndarray_linalg::{cholesky::*, Norm};
+use ndarray_rand::rand_distr::Uniform;
+use ndarray_rand::RandomExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,60 +40,56 @@ pub enum Solver {
 // The LinearOperator trait should probably have a way to set the initial guess...
 // Even if this doesn't make sense for all linear operators.
 impl Solver {
-    pub fn solve_with_guess(
-        &self,
-        rhs: &DVector<f64>,
-        initial_guess: &DVector<f64>,
-    ) -> DVector<f64> {
+    pub fn solve_with_guess(&self, rhs: &Vector, initial_guess: &Vector) -> Vector {
         match self {
-            Self::Direct(solver) => solver.lu.solve(rhs).unwrap(),
+            Self::Direct(solver) => solver.cho_factor.solvec(rhs).unwrap(),
             Self::Iterative(solver) => solver.solve_with_guess(rhs, initial_guess).0,
         }
     }
 }
 
 pub struct Iterative {
-    mat: Arc<CsrMatrix<f64>>, // maybe eventually this becomes linear operator also
+    mat: Arc<CsrMatrix>, // maybe eventually this becomes linear operator also
     solver: IterativeMethod,
     preconditioner: Arc<dyn LinearOperator + Send + Sync>,
     max_iter: Option<usize>,
     max_duration: Option<Duration>,
     tolerance: f64,
-    initial_guess: DVector<f64>,
+    initial_guess: Vector,
     log_interval: Option<LogInterval>,
     //optimized: bool,
 }
 
 pub struct Direct {
-    lu: FullPivLU<f64, Dyn, Dyn>,
+    cho_factor: CholeskyFactorized<OwnedRepr<f64>>,
 }
 
 impl Direct {
-    pub fn new(mat: &Arc<CsrMatrix<f64>>) -> Self {
-        let dense = convert_csr_dense(mat);
-        let lu = FullPivLU::new(dense);
-        Self { lu }
+    pub fn new(mat: &Arc<CsrMatrix>) -> Self {
+        let cho_factor = mat.to_dense().factorizec(UPLO::Upper).unwrap();
+        Self { cho_factor }
     }
 }
 
 impl LinearOperator for Direct {
-    fn apply_mut(&self, vec: &mut DVector<f64>) {
-        assert!(self.lu.solve_mut(vec));
+    fn apply_mut(&self, vec: &mut Vector) {
+        self.cho_factor.solvec_inplace(vec).unwrap();
     }
 
-    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
-        self.lu.solve(vec).unwrap()
+    fn apply(&self, vec: &Vector) -> Vector {
+        self.cho_factor.solvec(vec).unwrap()
     }
 
-    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
-        let solution = self.lu.solve(in_vec).unwrap();
-        out_vec.copy_from(&solution);
+    fn apply_input(&self, in_vec: &Vector, out_vec: &mut Vector) {
+        out_vec.clone_from(in_vec);
+        self.cho_factor.solvec_inplace(out_vec).unwrap();
     }
 }
 
 impl Iterative {
-    pub fn new(mat: Arc<CsrMatrix<f64>>, initial_guess: Option<DVector<f64>>) -> Self {
-        let initial_guess = initial_guess.unwrap_or(random_vec(mat.ncols()));
+    pub fn new(mat: Arc<CsrMatrix>, initial_guess: Option<Vector>) -> Self {
+        let initial_guess =
+            initial_guess.unwrap_or(Vector::random(mat.cols(), Uniform::new(-1., 1.)));
         Self {
             mat,
             solver: IterativeMethod::ConjugateGradient,
@@ -106,7 +103,7 @@ impl Iterative {
         }
     }
 
-    pub fn set_op(mut self, mat: Arc<CsrMatrix<f64>>) -> Self {
+    pub fn set_op(mut self, mat: Arc<CsrMatrix>) -> Self {
         self.mat = mat;
         self
     }
@@ -149,7 +146,7 @@ impl Iterative {
         self
     }
 
-    pub fn with_initial_guess(mut self, initial_guess: DVector<f64>) -> Self {
+    pub fn with_initial_guess(mut self, initial_guess: Vector) -> Self {
         self.initial_guess = initial_guess;
         self
     }
@@ -177,17 +174,17 @@ impl Iterative {
     }
     */
 
-    pub fn solve(&self, rhs: &DVector<f64>) -> (DVector<f64>, SolveInfo) {
+    pub fn solve(&self, rhs: &Vector) -> (Vector, SolveInfo) {
         self.solve_with_guess(rhs, &self.initial_guess)
     }
 
-    pub fn solve_optimized(&self, rhs: &DVector<f64>) -> DVector<f64> {
+    pub fn solve_optimized(&self, rhs: &Vector) -> Vector {
         let mut solution = self.initial_guess.clone();
         self.solve_optimized_with_guess(rhs, &mut solution);
         solution
     }
 
-    pub fn solve_optimized_with_guess(&self, rhs: &DVector<f64>, solution: &mut DVector<f64>) {
+    pub fn solve_optimized_with_guess(&self, rhs: &Vector, solution: &mut Vector) {
         match self.solver {
             IterativeMethod::ConjugateGradient => self.pcg_optimized_serial(rhs, solution),
             IterativeMethod::StationaryIteration => {
@@ -196,11 +193,7 @@ impl Iterative {
         };
     }
 
-    pub fn solve_with_guess(
-        &self,
-        rhs: &DVector<f64>,
-        initial_guess: &DVector<f64>,
-    ) -> (DVector<f64>, SolveInfo) {
+    pub fn solve_with_guess(&self, rhs: &Vector, initial_guess: &Vector) -> (Vector, SolveInfo) {
         let mut solution = initial_guess.clone();
 
         let solve_info = match self.solver {
@@ -216,7 +209,7 @@ impl Iterative {
                     self.tolerance,
                     solve_info.iterations,
                     format_duration(&solve_info.time),
-                    self.mat.ncols()
+                    self.mat.cols()
                 );
             } else {
                 trace!(
@@ -233,16 +226,16 @@ impl Iterative {
 
 // This implementation could be way better to avoid allocations
 impl LinearOperator for Iterative {
-    fn apply_mut(&self, vec: &mut DVector<f64>) {
+    fn apply_mut(&self, vec: &mut Vector) {
         let solution = self.solve_optimized(vec);
-        vec.copy_from(&solution);
+        vec.clone_from(&solution);
     }
 
-    fn apply(&self, vec: &DVector<f64>) -> DVector<f64> {
+    fn apply(&self, vec: &Vector) -> Vector {
         self.solve_optimized(vec)
     }
 
-    fn apply_input(&self, in_vec: &DVector<f64>, out_vec: &mut DVector<f64>) {
+    fn apply_input(&self, in_vec: &Vector, out_vec: &mut Vector) {
         self.solve_optimized_with_guess(in_vec, out_vec);
     }
 }
@@ -253,46 +246,12 @@ pub enum LogInterval {
     Time(Duration),
 }
 
-/// Upper triangular solve for sparse matrices and dense rhs
-pub fn usolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
-    for i in (0..mat.nrows()).rev() {
-        let row = mat.row(i);
-        for (&j, val) in row
-            .col_indices()
-            .iter()
-            .rev()
-            .zip(row.values().iter().rev())
-        {
-            // TODO this is real bad
-            if i < j {
-                rhs[i] -= val * rhs[j];
-            } else if i == j {
-                rhs[i] /= val;
-            }
-        }
-    }
-}
-
-/// Lower triangular solve for sparse matrices and dense rhs
-pub fn lsolve(mat: &CsrMatrix<f64>, rhs: &mut DVector<f64>) {
-    for (i, row) in mat.row_iter().enumerate() {
-        for (&j, val) in row.col_indices().iter().zip(row.values().iter()) {
-            // TODO this is real bad
-            if i > j {
-                rhs[i] -= val * rhs[j];
-            } else if i == j {
-                rhs[i] /= val;
-            }
-        }
-    }
-}
-
 impl Iterative {
     /// Stationary iterative method based on the preconditioner. Solves the
     /// system Ax = b for x where 'mat' is A and 'rhs' is b. Common preconditioners
     /// include L1 smoother, forward/backward/symmetric Gauss-Seidel, and
     /// multilevel methods.
-    fn stationary(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) -> SolveInfo {
+    fn stationary(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - &(mat * &*x);
         let mut r0 = r.clone();
@@ -316,7 +275,7 @@ impl Iterative {
             let r_norm = r.norm();
             let ratio = r_norm / norm0;
             *x += &r;
-            r = rhs - spmm(mat, &*x);
+            r = rhs - spmv(mat, &*x);
             //r = rhs - (mat * &*x);
             iter += 1;
 
@@ -350,14 +309,14 @@ impl Iterative {
         }
     }
 
-    fn stationary_optimized_threaded(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) {
+    fn stationary_optimized_threaded(&self, rhs: &Vector, x: &mut Vector) {
         let mat = &*self.mat;
         let max_iter = self.max_iter.unwrap();
 
-        // TODO handle case where x=0 (forward pass ML) so extra spmm is avoided
+        // TODO handle case where x=0 (forward pass ML) so extra spmv is avoided
         for _ in 0..max_iter {
             //let mut r = rhs - &(mat * &*x);
-            let mut r = rhs - spmm(mat, &*x);
+            let mut r = rhs - spmv(mat, &*x);
             // TODO remove this highly not optimal
             if r.norm() < 1e-16 {
                 warn!(
@@ -375,9 +334,9 @@ impl Iterative {
     /// 'mat' is A and 'rhs' is b. The preconditioner is a function that takes
     /// a residual (vector) and returns the action of the inverse preconditioner
     /// on that residual.
-    fn pcg(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) -> SolveInfo {
+    fn pcg(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
-        let mut r = rhs - spmm(mat, &*x);
+        let mut r = rhs - spmv(mat, &*x);
         //let mut r = rhs - (mat * &*x);
 
         let mut r_bar = r.clone();
@@ -413,7 +372,7 @@ impl Iterative {
 
         loop {
             if self.check_max_conditions(iter, start_time) {
-                let r_final = rhs - spmm(mat, &*x);
+                let r_final = rhs - spmv(mat, &*x);
                 //let r_final = rhs - (mat * &*x);
                 let relative_residual_norm = (r_final.dot(&r_final) / d0).sqrt();
                 return SolveInfo {
@@ -428,7 +387,7 @@ impl Iterative {
 
             iter += 1;
 
-            let mut g = spmm(mat, &p);
+            let mut g = spmv(mat, &p);
             //let mut g = mat * &p;
             let alpha = d / p.dot(&g);
             if alpha < 0.0 {
@@ -442,7 +401,7 @@ impl Iterative {
 
             r -= &g;
 
-            r_bar.copy_from(&r);
+            r_bar.clone_from(&r);
             self.preconditioner.apply_mut(&mut r_bar);
             let d_old = d;
             d = r.dot(&r_bar);
@@ -478,7 +437,7 @@ impl Iterative {
         }
     }
 
-    fn pcg_optimized_serial(&self, rhs: &DVector<f64>, x: &mut DVector<f64>) {
+    fn pcg_optimized_serial(&self, rhs: &Vector, x: &mut Vector) {
         let mat = &*self.mat;
         let mut r = rhs - (mat * &*x);
 
@@ -503,7 +462,7 @@ impl Iterative {
 
             r -= &g;
 
-            r_bar.copy_from(&r);
+            r_bar.clone_from(&r);
             self.preconditioner.apply_mut(&mut r_bar);
             let d_old = d;
             d = r.dot(&r_bar);
@@ -571,56 +530,81 @@ impl Iterative {
     }
 }
 
+/*
 pub fn lobpcg(
-    mat: &CsrMatrix<f64>,
-    //a:  Arc<dyn LinearOperator + Sync + Send>,
+    a: Arc<dyn LinearOperator + Sync + Send>,
     b: Option<Arc<dyn LinearOperator + Sync + Send>>,
     pc: Option<Arc<dyn LinearOperator + Sync + Send>>,
-    xs: &mut Vec<DVector<f64>>,
+    xs: &mut Array2<f64>,
     tol: f64,
     max_iter: usize,
-) -> Vec<f64> {
+) -> Vector {
     let pc = pc.unwrap_or(Arc::new(Identity));
     let b = b.unwrap_or(Arc::new(Identity));
-    let nrows = mat.ncols();
-    let m = xs.len();
+    let nrows = xs.nrows();
+    let m = xs.ncols();
 
-    let mut ps = vec![DVector::zeros(nrows); m];
-    let mut lambdas = vec![1.0; m];
+    let mut ps = Array2::<f64>::zeros((nrows, m));
+    let mut lambdas = Vector::from_elem(m, 1.0);
     let mut max_rnorm: f64 = 0.0;
     let mut sum_rnorms: f64 = 0.0;
+    let mut ax = Array2::<f64>::zeros((nrows, m));
+    let mut bx = Array2::<f64>::zeros((nrows, m));
+    let mut ws = Array2::<f64>::zeros((nrows, m));
 
     //let log_interval = max_iter / 50;
     let log_interval = 1;
 
     for iter in 0..max_iter {
-        let x_mat = DMatrix::from_columns(&xs);
-        let x_mat = x_mat.qr().q();
-        for (x_vec, normalized) in xs.iter_mut().zip(x_mat.column_iter()) {
-            x_vec.copy_from(&normalized);
+        let mut mgs = MGS::new(nrows, 1e-12);
+        for col in xs.columns() {
+            mgs.append(col);
+            // if dependent then keep adding?? also eventually need to orthogonalize with B...
         }
-        let ax: Vec<DVector<f64>> = xs.iter().map(|x_vec| spmm(mat, x_vec)).collect();
-        let bx: Vec<DVector<f64>> = xs.iter().map(|x_vec| b.apply(x_vec)).collect();
+        *xs = mgs.get_q();
+
+        //ax.columns_mut()
+        //.into_iter()
+        ax.axis_iter_mut(Axis(0))
+            .zip(xs.axis_iter(Axis(0)))
+            .for_each(|(ax, x_vec)| {
+                // ndarray is so frustrating sometimes but optimize later if really bad...
+                // probably should make LinearOperator more abstract to apply to ArrayBase
+                let out = a.apply(&x_vec.to_owned());
+                ax.iter_mut().zip(out.iter()).for_each(|(a, b)| *a = *b);
+                // why this doesn't work we will never know
+                //par_azip!((a in ax, b in out) *a = b)
+            });
+
+        bx.columns_mut()
+            .into_iter()
+            .zip(xs.columns().into_iter())
+            .for_each(|(ax, x_vec)| {
+                let out = a.apply(&x_vec.to_owned());
+                ax.iter_mut().zip(out.iter()).for_each(|(a, b)| *a = *b);
+            });
 
         lambdas = ax
-            .iter()
-            .zip(bx.iter())
-            .zip(xs.iter())
+            .axis_iter(Axis(0))
+            .zip(bx.axis_iter(Axis(0)))
+            .zip(xs.axis_iter(Axis(0)))
             .map(|((ax_vec, bx_vec), x_vec)| {
-                let denom = x_vec.dot(bx_vec);
+                let denom = x_vec.inner(&bx_vec);
                 assert!((1.0 - denom).abs() < 1e-12);
-                x_vec.dot(ax_vec) / denom
+                x_vec.inner(&ax_vec) / denom
             })
             .collect();
 
-        let rs: Vec<DVector<f64>> = ax
-            .iter()
-            .zip(xs.iter())
+        let rs = ax - (lambdas * xs.t()).t();
+        /*
+            .axis_iter(Axis(0))
+            .zip(xs.axis_iter(Axis(0)))
             .zip(lambdas.iter().copied())
-            .map(|((ax_vec, x_vec), lambda)| ax_vec - (lambda * x_vec))
+            .map(|((ax_vec, x_vec), lambda)| ax_vec - (&lambda * x_vec))
             .collect();
+        */
 
-        let r_norms: Vec<f64> = rs.iter().map(|r_vec| r_vec.norm()).collect();
+        let r_norms = rs.map_axis(Axis(0), |r_vec| r_vec.norm());
 
         max_rnorm = r_norms
             .iter()
@@ -648,21 +632,33 @@ pub fn lobpcg(
             return lambdas;
         }
 
-        let ws: Vec<DVector<f64>> = rs.iter().map(|r_vec| pc.apply(&r_vec)).collect();
-        let test_vectors: Vec<DVector<f64>> = rs
+        //let ws = rs.map(|r_vec| pc.apply(&r_vec)).collect();
+
+        ws.columns_mut()
             .into_iter()
-            .chain(ws.into_iter())
-            .chain(ps.iter().cloned())
-            .chain(xs.iter().cloned().into_iter())
-            .collect();
+            .zip(rs.columns().into_iter())
+            .for_each(|(w_vec, r_vec)| {
+                let out = pc.apply(&r_vec.to_owned());
+                w_vec.iter_mut().zip(out.iter()).for_each(|(a, b)| *a = *b);
+            });
 
-        let rayleigh_space = DMatrix::from_columns(&test_vectors);
-        let rayleigh_space = rayleigh_space.qr().q();
+        for col in rs.columns() {
+            mgs.append(col);
+        }
+        for col in ws.columns() {
+            mgs.append(col);
+        }
+        for col in ps.columns() {
+            mgs.append(col);
+        }
 
-        let cols: Vec<DVector<f64>> = rayleigh_space
+        let rayleigh_space = mgs.get_q();
+
+        let cols: Vec<Vector> = rayleigh_space
             .column_iter()
-            .map(|col| spmm(mat, &DVector::from(col)))
+            .map(|col| spmv(mat, &Vector::from(col)))
             .collect();
+
         let temp = DMatrix::from_columns(&cols);
 
         let mut projection = DMatrix::zeros(4 * m, 4 * m);
@@ -680,7 +676,7 @@ pub fn lobpcg(
         ps.iter_mut()
             .zip(indices.iter().copied())
             .for_each(|(p_vec, idx)| {
-                p_vec.copy_from(&DVector::from_element(nrows, 0.0));
+                p_vec.copy_from(&Vector::from_element(nrows, 0.0));
                 p_vec.gemv(
                     1.0,
                     &rayleigh_space.columns(m, 3 * m),
@@ -690,11 +686,11 @@ pub fn lobpcg(
             });
         */
 
-        ps = xs.to_vec();
+        ps = *xs;
         xs.iter_mut()
             .zip(indices.into_iter())
             .for_each(|(x_vec, idx)| {
-                x_vec.copy_from(&DVector::from_element(nrows, 0.0));
+                x_vec.copy_from(&Vector::from_element(nrows, 0.0));
                 x_vec.gemv(1.0, &rayleigh_space, &eigvecs.column(idx), 1.0);
             });
     }
@@ -709,3 +705,4 @@ pub fn lobpcg(
 
     lambdas
 }
+*/

@@ -1,11 +1,3 @@
-use nalgebra::DMatrix;
-use nalgebra::DVector;
-use nalgebra::Matrix3;
-use nalgebra::Matrix3x1;
-use nalgebra::Vector3;
-use nalgebra_sparse::CooMatrix;
-use nalgebra_sparse::CsrMatrix;
-
 fn main() {
     /*
         let mut block_coo: CooMatrix<Matrix3<f64>> = CooMatrix::new(5, 5);
@@ -19,7 +11,7 @@ fn main() {
         block_coo.push(4, 4, data);
 
         let bsr: CsrMatrix<Matrix3<f64>> = CsrMatrix::from(&block_coo);
-        let bvector: DVector<Matrix3x1<f64>> = DVector::from_element(5, Vector3::new(1.0, 2.0, 3.0));
+        let bvector: Vector<Matrix3x1<f64>> = Vector::from_element(5, Vector3::new(1.0, 2.0, 3.0));
 
         let test = &bsr * &bvector;
     */

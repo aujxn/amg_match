@@ -4,7 +4,6 @@ use amg_match::{
     solver::{Iterative, IterativeMethod, LogInterval},
     utils::load_system,
 };
-use nalgebra::DVector;
 use npyz;
 use std::{fs::File, sync::Arc};
 
@@ -33,11 +32,11 @@ fn main() {
     //let prefix = "data/laplace/4";
     let (mat, b, coords, projector) = load_system(prefix);
     let mat_ref = &*mat;
-    let dim = mat.nrows();
-    //let b: DVector<f64> = DVector::zeros(dim);
-    let guess: DVector<f64> = DVector::zeros(dim);
-    //let guess: DVector<f64> = random_vec(dim);
-    //let guess: DVector<f64> = DVector::from_element(dim, 1.0);
+    let dim = mat.rows();
+    //let b: Vector = Vector::zeros(dim);
+    let guess: Vector = Vector::zeros(dim);
+    //let guess: Vector = random_vec(dim);
+    //let guess: Vector = Vector::from_element(dim, 1.0);
 
     let max_components = 10;
     let coarsening_factor = 4.0;
@@ -105,7 +104,7 @@ fn main() {
     let mut buffer = File::create("p_pt_residual.npz").unwrap();
     write_raw_gf(p_pt_residual_plot.as_slice(), &mut buffer).unwrap();
 
-    let mut x_vals = DVector::zeros(dim);
+    let mut x_vals = Vector::zeros(dim);
     for (i, coord) in coords.iter().enumerate() {
         x_vals[i] = coord[0];
     }
@@ -120,7 +119,7 @@ fn main() {
     let pt = p.transpose();
 
     for (i, basis_func) in pt.row_iter().enumerate().take(50) {
-        let mut basis = DVector::zeros(dim);
+        let mut basis = Vector::zeros(dim);
         for (j, val) in basis_func
             .col_indices()
             .iter()

@@ -5,21 +5,16 @@ use amg_match::interpolation::InterpolationType;
 use amg_match::preconditioner::SmootherType;
 use amg_match::{
     adaptive::AdaptiveBuilder,
-    preconditioner::{Application, Composite},
+    preconditioner::Composite,
     solver::{Iterative, IterativeMethod, LogInterval, SolveInfo},
-    utils::{format_duration, load_system, random_vec},
+    utils::{format_duration, load_system},
 };
-use nalgebra::DVector;
-//use nalgebra_sparse::io::save_to_matrix_market_file as write_mm;
-use nalgebra_sparse::{io::load_coo_from_matrix_market_file as load_mm, CsrMatrix};
+use amg_match::{CsrMatrix, Vector};
+use ndarray_rand::rand_distr::Uniform;
+use ndarray_rand::RandomExt;
 use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
-/*
-use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::time::Duration;
-use structopt::StructOpt;
-*/
+use sprs::io::read_matrix_market;
 
 /*
 * TODO
@@ -27,11 +22,6 @@ use structopt::StructOpt;
 * - SGS implementation
 * - check spd
 *
-* - FOR CMIM
-*   - 2 slides for interpolants (piecewise constant interpolation vs classical AMG interpolation)
-*       (Show block form for classical, both recover near null (in different ways, equations),
-*       operator complexity of classical for all examples (geometric complexity is size of vectors
-*       CF)
 */
 
 #[macro_use]
@@ -82,9 +72,9 @@ fn main() {
     pretty_env_logger::init();
 
     let mfem_mats = [
-        ("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
+        //("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
         //("data/spe10/spe10_0", "spe10"),
-        //("data/elasticity/elasticity_3d", "elasticity"),
+        ("data/elasticity/elasticity_3d", "elasticity"),
         //("data/laplace/3d/3d_laplace_1", "laplace-3d"),
     ];
 
@@ -105,8 +95,8 @@ fn main() {
 }
 
 fn study_mfem(prefix: &str, name: &str) {
-    let (mat, b, _coords, _projector) = load_system(prefix, true);
-    //let mat_ref: &CsrMatrix<f64> = mat.borrow();
+    let (mat, b, _coords, _projector) = load_system(prefix, false);
+    //let mat_ref: &CsrMatrix = mat.borrow();
     //write_mm(mat_ref, "anis_2d.mtx").expect("failed");
     let _pc = study(mat, b, name);
 
@@ -121,28 +111,29 @@ fn study_mfem(prefix: &str, name: &str) {
 }
 
 fn study_suitesparse(mat_path: &str, name: &str) {
-    let mat = { Arc::new(CsrMatrix::from(&load_mm(mat_path).unwrap())) };
-    let dim = mat.nrows();
-    let b: DVector<f64> = random_vec(dim);
+    let mat = { Arc::new(read_matrix_market(mat_path).unwrap().to_csr()) };
+    let dim = mat.rows();
+    let b = Vector::random(dim, Uniform::new(-1., 1.));
     study(mat, b, name);
 }
 
-fn study(mat: Arc<CsrMatrix<f64>>, b: DVector<f64>, name: &str) -> Composite {
-    info!("nrows: {} nnz: {}", mat.nrows(), mat.nnz());
-    let max_components = 20;
+fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
+    info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
+    let max_components = 10;
     let coarsening_factor = 7.5;
-    let test_iters = 20;
+    let test_iters = 30;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
         //.with_project_first_only()
         //.with_max_level(2)
-        //.with_smoother(amg_match::preconditioner::SmootherType::L1)
-        //.with_smoother(SmootherType::BlockL1)
-        .with_smoother(SmootherType::BlockGaussSeidel)
+        //.with_smoother(SmootherType::L1)
+        .with_smoother(SmootherType::BlockL1)
+        //.with_smoother(SmootherType::BlockGaussSeidel)
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
-        .with_smoothing_steps(1)
+        .with_smoothing_steps(3)
+        .cycle_type(1)
         .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
@@ -182,29 +173,19 @@ struct SolveResults {
     pub solve_info: SolveInfo,
 }
 
-fn test_solve(
-    name: &str,
-    mat: Arc<CsrMatrix<f64>>,
-    b: &DVector<f64>,
-    mut pc: Composite,
-    step_size: usize,
-) {
+fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, step_size: usize) {
     let epsilon = 1e-12;
-    //let epsilon = 1e-8;
     let num_tests = 2;
-    //let num_tests = 4;
     let mut all_results = vec![Vec::new(); num_tests];
     let max_minutes = 30;
 
-    let dim = mat.nrows();
+    let dim = mat.rows();
     info!("Solving {}", name);
 
-    //let guess: DVector<f64> = random_vec(dim).normalize();
-    let guess: DVector<f64> = DVector::zeros(dim);
+    //let guess: Vector = random_vec(dim).normalize();
+    let guess: Vector = Vector::zeros(dim);
 
-    let log_result = |solver_type: IterativeMethod,
-                      solve_results: &Vec<SolveResults>,
-                      application: Application| {
+    let log_result = |solver_type: IterativeMethod, solve_results: &Vec<SolveResults>| {
         info!("{:?} Results", solver_type);
         info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles",);
         for result in solve_results.iter() {
@@ -212,20 +193,13 @@ fn test_solve(
                 "{:15} {:15} {:15}",
                 result.num_components,
                 result.solve_info.iterations,
-                match application {
-                    Application::Multiplicative =>
-                        result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1),
-                    Application::Random => result.solve_info.iterations,
-                },
+                result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1),
             );
         }
     };
 
-    let solve = |method: IterativeMethod,
-                 results: &mut Vec<SolveResults>,
-                 application: Application,
-                 pc: &mut Composite| {
-        let base_solver = |mat: Arc<CsrMatrix<f64>>, pc: Composite, guess: DVector<f64>| {
+    let solve = |method: IterativeMethod, results: &mut Vec<SolveResults>, pc: &mut Composite| {
+        let base_solver = |mat: Arc<CsrMatrix>, pc: Composite, guess: Vector| {
             Iterative::new(mat.clone(), Some(guess))
                 .with_tolerance(epsilon)
                 //.with_max_iter(10000)
@@ -236,11 +210,7 @@ fn test_solve(
             //.with_log_interval(LogInterval::Iterations(1))
         };
         let num_components = pc.components().len();
-        pc.application = application;
-        let max_iter = match application {
-            Application::Multiplicative => 2000 / ((2 * (num_components - 1)) + 1),
-            Application::Random => 2000,
-        };
+        let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
         let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
             .with_solver(method)
             .with_max_iter(max_iter);
@@ -259,16 +229,12 @@ fn test_solve(
             num_components,
             solve_info,
         });
-        log_result(method, &results, application);
-        let title = format!("{}_{:?}_{:?}_notonlypos", name, method, &application);
-        plot_test_solve(&title, &results, application);
+        log_result(method, &results);
+        let title = format!("{}_{:?}", name, method);
+        plot_test_solve(&title, &results);
     };
 
     while pc.components().len() > 0 {
-        // todo do additive?
-        //let applications = [Application::Multiplicative, Application::Random];
-        let applications = [Application::Multiplicative];
-
         let methods = [
             IterativeMethod::StationaryIteration,
             IterativeMethod::ConjugateGradient,
@@ -277,10 +243,8 @@ fn test_solve(
         //let methods = [IterativeMethod::StationaryIteration];
         let mut counter = 0;
         for method in methods.iter() {
-            for application in applications.iter() {
-                solve(*method, &mut all_results[counter], *application, &mut pc);
-                counter += 1
-            }
+            solve(*method, &mut all_results[counter], &mut pc);
+            counter += 1
         }
 
         if pc.components().len() > 1 {
@@ -303,7 +267,7 @@ fn save_plot_raw_data(title: &str, serialized: String) {
     file.write_all(&serialized.as_bytes()).unwrap();
 }
 
-fn plot_test_solve(title: &str, data: &Vec<SolveResults>, application: Application) {
+fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
     let serialized = serde_json::to_string(&data).unwrap();
     save_plot_raw_data(title, serialized);
 
@@ -321,12 +285,11 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>, application: Applicati
                     .relative_residual_norm_history
                     .iter()
                     .enumerate()
-                    .map(|(i, residual)| match application {
-                        Application::Multiplicative => (
+                    .map(|(i, residual)| {
+                        (
                             ((i + 1) * ((2 * (solve_result.num_components - 1)) + 1)) as f64,
                             *residual,
-                        ),
-                        Application::Random => ((i + 1) as f64, *residual),
+                        )
                     })
                     //.filter(|(cycles, _)| cycles < 2000.0)
                     .collect(),
@@ -527,138 +490,3 @@ fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: usize)
         .unwrap();
     trace!("Plotting filename: {}", filename);
 }
-
-/*
-fn plot_hierarchy(title: &str, hierarchy: &Hierarchy, coords: &Vec<Vec<f64>>) {
-    let mut p = CsrMatrix::<f64>::identity(hierarchy.get_partition(0).nrows());
-    for (i, new_p) in hierarchy.get_partitions().iter().enumerate() {
-        p = p * new_p;
-        let pt = p.transpose();
-        let mut data: Vec<Vec<Vec<f64>>> = pt
-            .row_iter()
-            .map(|row| {
-                row.col_indices()
-                    .iter()
-                    .map(|col_idx| coords[*col_idx].clone())
-                    .collect()
-            })
-            .collect();
-
-        // must make 2d in spe10 case
-        if data[0][0].len() == 3 {
-            data = data
-                .into_iter()
-                .map(|cluster| {
-                    cluster
-                        .into_iter()
-                        .filter(|coord| (coord[2] - 100.0).abs() < 0.1)
-                        .collect()
-                })
-                .collect();
-            data = data
-                .into_iter()
-                .filter(|cluster| !cluster.is_empty())
-                .collect();
-        }
-
-        let (x_min, x_max, y_min, y_max) = coords.iter().fold(
-            (0.0, 0.0, 0.0, 0.0),
-            |(mut x_min, mut x_max, mut y_min, mut y_max), coord| {
-                if coord[0] < x_min {
-                    x_min = coord[0];
-                }
-                if coord[0] > x_max {
-                    x_max = coord[0];
-                }
-                if coord[1] < y_min {
-                    y_min = coord[1];
-                }
-                if coord[1] > y_max {
-                    y_max = coord[1];
-                }
-                (x_min, x_max, y_min, y_max)
-            },
-        );
-
-        let filename = format!("images/{}_level{}.png", title, i);
-        let root = BitMapBackend::new(&filename, (500, 1000)).into_drawing_area();
-        root.fill(&WHITE).unwrap();
-
-        let mut ctx = ChartBuilder::on(&root)
-            .set_label_area_size(LabelAreaPosition::Left, 40)
-            .set_label_area_size(LabelAreaPosition::Bottom, 40)
-            //.caption("Partition", ("sans-serif", 40))
-            .build_cartesian_2d(x_min..(x_max * 1.1), y_min..(y_max * 1.05))
-            .unwrap();
-
-        ctx.configure_mesh()
-            .disable_x_mesh()
-            .disable_y_mesh()
-            .draw()
-            .unwrap();
-
-        for (i, group) in data.iter().enumerate() {
-            let _size = 1.5;
-            let color = Palette99::pick(i).mix(1.0);
-            let _cross_style = ShapeStyle {
-                color,
-                filled: true,
-                stroke_width: 1,
-            };
-            ctx.draw_series(
-                group
-                    .iter()
-                    //.map(|coord| Circle::new((coord[0], coord[1]), size, cross_style)),
-                    .map(|coord| {
-                        Rectangle::new(
-                            [
-                                (coord[0] - 10.0, coord[1] - 5.0),
-                                (coord[0] + 10.0, coord[1] + 5.0),
-                            ],
-                            color.filled(),
-                        )
-                    }),
-            )
-            .unwrap();
-        }
-    }
-}
-*/
-
-/*
-fn write_gf(
-    near_nulls: &Vec<DVector<f64>>,
-    meshfile: &str,
-    outfile: &str,
-    projector: &CsrMatrix<f64>,
-) {
-    let mut contents = std::fs::read_to_string(meshfile).unwrap();
-
-    let header: String = format!("POINT_DATA {}\n", projector.ncols());
-    contents.push_str(&header);
-    let near_nulls: Vec<DVector<f64>> = near_nulls
-        .iter()
-        .map(|near_null| projector * near_null)
-        .collect();
-
-    for (i, near_null) in near_nulls.iter().enumerate() {
-        let header: String = format!("SCALARS error_vals_{} double\nLOOKUP_TABLE default\n", i);
-        contents.push_str(&header);
-        for val in near_null.iter() {
-            contents.push_str(&format!("{}\n", val));
-        }
-    }
-
-    for (i, near_null) in near_nulls.iter().enumerate() {
-        let error_data: String = format!("\nVECTORS error_warp_{} double\n", i);
-        contents.push_str(&error_data);
-        for val in near_null.iter() {
-            contents.push_str(&format!("0.0 0.0 {}\n", val));
-        }
-    }
-
-    let mut file = File::create(outfile).unwrap();
-    file.write_all(contents.as_bytes()).unwrap();
-    trace!("writing gridfunction to mesh at: {}", outfile)
-}
-*/

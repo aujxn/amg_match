@@ -1,27 +1,26 @@
 use core::fmt;
-use nalgebra::base::DVector;
-use nalgebra_sparse::csr::CsrMatrix;
 
 use std::sync::Arc;
 
 use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
 use crate::partitioner::{modularity_matching_partition, Partition};
+use crate::{CsrMatrix, Vector};
 
 #[derive(Clone)]
 pub struct Hierarchy {
-    mat: Arc<CsrMatrix<f64>>,
-    restrictions: Vec<Arc<CsrMatrix<f64>>>,
-    interpolations: Vec<Arc<CsrMatrix<f64>>>,
-    coarse_mats: Vec<Arc<CsrMatrix<f64>>>,
+    mat: Arc<CsrMatrix>,
+    restrictions: Vec<Arc<CsrMatrix>>,
+    interpolations: Vec<Arc<CsrMatrix>>,
+    coarse_mats: Vec<Arc<CsrMatrix>>,
     partitions: Vec<Arc<Partition>>,
-    near_nulls: Vec<Arc<DVector<f64>>>,
+    near_nulls: Vec<Arc<Vector>>,
 }
 
 impl fmt::Debug for Hierarchy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let fine_size = self.mat.nrows();
+        let fine_size = self.mat.rows();
         let mut sizes: Vec<usize> = vec![fine_size];
-        sizes.extend(self.coarse_mats.iter().map(|a| a.nrows()));
+        sizes.extend(self.coarse_mats.iter().map(|a| a.rows()));
 
         let fine_nnz = self.mat.nnz();
         let mut nnzs: Vec<usize> = vec![fine_nnz];
@@ -46,7 +45,7 @@ impl fmt::Debug for Hierarchy {
 }
 
 impl Hierarchy {
-    pub fn new(mat: Arc<CsrMatrix<f64>>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix>) -> Self {
         Self {
             mat,
             restrictions: Vec::new(),
@@ -80,10 +79,10 @@ impl Hierarchy {
     /// and interpolation method
     pub fn add_level(
         &mut self,
-        near_null: &DVector<f64>,
+        near_null: &Vector,
         coarsening_factor: f64,
         interpolation_type: InterpolationType,
-    ) -> DVector<f64> {
+    ) -> Vector {
         let fine_mat = self
             .get_coarse_mats()
             .last()
@@ -119,7 +118,7 @@ impl Hierarchy {
         trace!(
             "added level: {}. num vertices coarse: {} nnz: {}",
             self.levels() + 1,
-            p.ncols(),
+            p.cols(),
             mat_coarse.nnz()
         );
 
@@ -131,39 +130,39 @@ impl Hierarchy {
     }
 
     /// Get a single P matrix from the hierarchy.
-    pub fn get_restriction(&self, level: usize) -> &Arc<CsrMatrix<f64>> {
+    pub fn get_restriction(&self, level: usize) -> &Arc<CsrMatrix> {
         &self.restrictions[level]
     }
 
     /// Get a single P^T matrix from the hierarchy.
-    pub fn get_interpolation(&self, level: usize) -> &Arc<CsrMatrix<f64>> {
+    pub fn get_interpolation(&self, level: usize) -> &Arc<CsrMatrix> {
         &self.interpolations[level]
     }
 
-    pub fn get_near_null(&self, level: usize) -> &Arc<DVector<f64>> {
+    pub fn get_near_null(&self, level: usize) -> &Arc<Vector> {
         &self.near_nulls[level]
     }
 
     /// Get a reference to the matrices Vec.
-    pub fn get_coarse_mats(&self) -> &[Arc<CsrMatrix<f64>>] {
+    pub fn get_coarse_mats(&self) -> &[Arc<CsrMatrix>] {
         &self.coarse_mats
     }
 
     /// Get a reference to the P matrices Vec.
-    pub fn get_restrictions(&self) -> &Vec<Arc<CsrMatrix<f64>>> {
+    pub fn get_restrictions(&self) -> &Vec<Arc<CsrMatrix>> {
         &self.restrictions
     }
 
     /// Get a reference to the P^T matrices Vec.
-    pub fn get_interpolations(&self) -> &Vec<Arc<CsrMatrix<f64>>> {
+    pub fn get_interpolations(&self) -> &Vec<Arc<CsrMatrix>> {
         &self.interpolations
     }
 
-    pub fn get_near_nulls(&self) -> &Vec<Arc<DVector<f64>>> {
+    pub fn get_near_nulls(&self) -> &Vec<Arc<Vector>> {
         &self.near_nulls
     }
 
-    pub fn get_mat(&self, level: usize) -> Arc<CsrMatrix<f64>> {
+    pub fn get_mat(&self, level: usize) -> Arc<CsrMatrix> {
         if level == 0 {
             self.mat.clone()
         } else {
@@ -179,9 +178,9 @@ impl Hierarchy {
     }
 
     pub fn get_dims(&self) -> Vec<usize> {
-        let fine_size = self.mat.nrows();
+        let fine_size = self.mat.rows();
         let mut sizes: Vec<usize> = vec![fine_size];
-        sizes.extend(self.coarse_mats.iter().map(|a| a.nrows()));
+        sizes.extend(self.coarse_mats.iter().map(|a| a.rows()));
         sizes
     }
 

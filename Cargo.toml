@@ -12,8 +12,10 @@ readme = "README.md"
 #crate-type = ["cdylib"]
 
 [dependencies]
-nalgebra = { version = "0.33", features = ["rand"] }
-nalgebra-sparse = { version = "0.10", features = ["io", "serde-serialize"] }
+sprs = { version = "0.11", features = ["serde", "multi_thread", "approx", "alga"] }
+sprs-ldl = { version = "0.10", features = ["sprs_suitesparse_camd", "sprs_suitesparse_ldl"] }
+ndarray = { version = "0.16", features = ["serde", "rayon", "approx", "matrixmultiply-threading"] }
+ndarray-linalg = { version = "0.17", features = ["openblas-static"] }
 image = "0"
 indexmap = "1"
 rand = "0"
@@ -31,9 +33,7 @@ regex = "1"
 metis = { version = "0.2.1", features = ["vendored"] }
 bytemuck = "1.21.0"
 npyz = "0.8.3"
-
-#[dependencies.nalgebra-lapack]
-#version = "0"
+ndarray-rand = "0.15.0"
 
 [dev-dependencies]
 test-generator = "0"
