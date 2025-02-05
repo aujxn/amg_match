@@ -38,6 +38,7 @@ checksum = "4aa90d7ce82d4be67b64039a3d588d38dbcc6736577de4a847025ce5b0c468d1"
 name = "amg_match"
 version = "0.2.1"
 dependencies = [
+ "approx 0.5.1",
  "bytemuck",
  "chrono",
  "image 0.25.5",

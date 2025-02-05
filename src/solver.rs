@@ -254,6 +254,7 @@ impl Iterative {
     fn stationary(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - &(mat * &*x);
+        let test_norm = r.norm();
         let mut r0 = r.clone();
         self.preconditioner.apply_mut(&mut r0);
         //let r0 = r.dot(&r);
@@ -262,7 +263,7 @@ impl Iterative {
         //let convergence_criterion = r0 * self.tolerance * self.tolerance;
 
         if self.log_interval.is_some() {
-            trace!("Initial Residual Norm : {norm0:.3e}");
+            trace!("Initial Residual Norm / pc r norm: {test_norm:.3e} {norm0:.3e}");
         }
 
         let mut convergence_history = Vec::new();
@@ -318,7 +319,7 @@ impl Iterative {
             //let mut r = rhs - &(mat * &*x);
             let mut r = rhs - spmv(mat, &*x);
             // TODO remove this highly not optimal
-            if r.norm() < 1e-16 {
+            if r.norm() < f64::EPSILON {
                 warn!(
                     "Smoother application early termination because residual norm: {:.2e}",
                     r.norm()

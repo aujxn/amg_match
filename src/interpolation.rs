@@ -24,7 +24,7 @@ pub fn smoothed_aggregation(
         .iter_mut()
         .zip(fine_mat.diag_iter().map(|v| v.unwrap()))
     {
-        *smoother_diag = -jacobi_weight * mat_diag.recip();
+        *smoother_diag = jacobi_weight * mat_diag.recip();
     }
 
     for (coarse_i, agg) in partition.agg_to_node.iter().enumerate() {
@@ -50,7 +50,7 @@ pub fn smoothed_aggregation(
 
     let r = p.transpose_view().to_csr();
     let mat_coarse = &r * &(fine_mat * &p);
-    (coarse_near_null, r, p, mat_coarse)
+    (coarse_near_null, r, p.to_csr(), mat_coarse.to_csr())
 }
 
 pub fn classical(

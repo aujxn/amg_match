@@ -1,7 +1,6 @@
 //! Definition of the `LinearOperator` trait as well as implementors
 //! of said trait.
-
-use std::sync::Arc;
+//!
 
 use crate::hierarchy::Hierarchy;
 use crate::parallel_ops::spmv;
@@ -9,11 +8,12 @@ use crate::partitioner::{metis_n, Partition};
 use crate::solver::{Direct, Iterative, IterativeMethod};
 use crate::{Cholesky, CooMatrix, CsrMatrix, Vector};
 use ndarray::par_azip;
-use ndarray_linalg::Norm;
+use ndarray_linalg::{FactorizeC, Norm, SolveC, UPLO};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use sprs::linalg::trisolve::{lsolve_csr_dense_rhs as lsolve, usolve_csr_dense_rhs as usolve};
 use sprs_ldl::Ldl;
+use std::sync::Arc;
 
 /// A Trait for objects which can map from R^n to R^m that are linear. In linear algebra
 /// applications, this is most things (matrices, preconditioners, solvers, etc.).
@@ -172,45 +172,72 @@ impl L1 {
 
 pub struct BlockL1 {
     partition: Arc<Partition>,
-    blocks: Vec<Cholesky>,
+    blocks: Vec<Arc<dyn LinearOperator + Send + Sync>>,
+    //blocks: Vec<Cholesky>,
+    //blocks: Vec<CholeskyFactorized<OwnedRepr<f64>>>,
 }
 
 impl BlockL1 {
     // include tau?
     pub fn new(mat: &CsrMatrix, partition: Arc<Partition>) -> Self {
-        let blocks: Vec<Cholesky> = partition.agg_to_node.par_iter().map(|agg| {
-            let block_size = agg.len();
-            let agg: Vec<usize> = agg.iter().copied().collect();
-            //let mut block = DMatrix::<f64>::zeros(block_size, block_size);
-            let mut block = CooMatrix::new((block_size, block_size));
+        let blocks: Vec<Arc<dyn LinearOperator + Send + Sync>> = partition
+            .agg_to_node
+            .par_iter()
+            .map(|agg| {
+                let block_size = agg.len();
+                let agg: Vec<usize> = agg.iter().copied().collect();
+                //let mut block = DMatrix::<f64>::zeros(block_size, block_size);
+                let mut block = CooMatrix::new((block_size, block_size));
 
-            for (ic, i) in agg.iter().copied().enumerate() {
-                assert!(mat.is_csr());
-                let mat_row_i = mat.outer_view(i).unwrap();
-                let a_ii = mat.get(i, i).unwrap();
-                for (j, val) in mat_row_i.iter()
-                {
-                    match agg.binary_search(&j) {
-                        Ok(jc) => {
-                            block.add_triplet(ic, jc, *val);
-                        }
-                        Err(_) => {
-                            let a_jj = mat.get(j, j).unwrap();
-                            //block[(ic, ic)] += (a_ii / a_jj).sqrt() * val.abs();
-                            block.add_triplet(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                for (ic, i) in agg.iter().copied().enumerate() {
+                    assert!(mat.is_csr());
+                    let mat_row_i = mat.outer_view(i).unwrap();
+                    let a_ii = mat.get(i, i).unwrap();
+                    for (j, val) in mat_row_i.iter() {
+                        match agg.binary_search(&j) {
+                            Ok(jc) => {
+                                block.add_triplet(ic, jc, *val);
+                            }
+                            Err(_) => {
+                                let a_jj = mat.get(j, j).unwrap();
+                                //block[(ic, ic)] += (a_ii / a_jj).sqrt() * val.abs();
+                                block.add_triplet(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                            }
                         }
                     }
                 }
-            }
-            let csr = block.to_csr();
-            let chol = Ldl::new().check_symmetry(sprs::SymmetryCheck::CheckSymmetry).fill_in_reduction(sprs::FillInReduction::CAMDSuiteSparse).numeric(csr.view()).expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+                let csr = block.to_csr();
+                if csr.density() > 0.5 {
+                    let dense = csr.to_dense();
+                    let mut symmatrized = dense.clone() + dense.t();
+                    symmatrized *= 0.5;
 
-            //let n_tri = ((csr.nnz() - block_size) / 2) + block_size;
-            //let sparsity_reduction = (cholesky.l().nnz() as f64) / (n_tri as f64);
-            //trace!("sparsity reduction: {:.2}", sparsity_reduction);
+                    let chol = symmatrized.factorizec(UPLO::Upper).unwrap();
 
-            chol
-        }).collect();
+                    let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
+                        let mut out = in_vec.clone();
+                        chol.solvec_inplace(&mut out).unwrap();
+                        out
+                    });
+                    f
+                } else {
+
+                    let mut symmatrized = &csr.view() + &csr.transpose_view();
+                    symmatrized.map_inplace(|v| v * 0.5);
+                    let chol = Ldl::new()
+                        .check_symmetry(sprs::SymmetryCheck::CheckSymmetry)
+                        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+                        .fill_in_reduction(sprs::FillInReduction::CAMDSuiteSparse)
+                        .numeric(symmatrized.view())
+                        //.numeric(csr.view())
+                        .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+                    let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
+                        chol.solve(in_vec)
+                    });
+                    f
+                }
+            })
+        .collect();
 
         Self { partition, blocks }
     }
@@ -225,9 +252,11 @@ impl LinearOperator for BlockL1 {
             .par_iter()
             .enumerate()
             .map(|(i, agg)| {
-                let mut r_part = Vector::from_iter(agg.iter().copied().map(|i| r[i]));
-                self.blocks[i].solve(&mut r_part);
-                r_part
+                let r_part = Vector::from_iter(agg.iter().copied().map(|i| r[i]));
+
+                //self.blocks[i].solvec_inplace(&mut r_part).unwrap();
+                //self.blocks[i].solve(r_part)
+                self.blocks[i].apply(&r_part)
             })
             .collect();
 
@@ -293,7 +322,7 @@ impl BlockGaussSeidel {
 
     /*
     pub fn set_forward(&mut self, val: bool) {
-        self.forward = val;
+    self.forward = val;
     }
     */
 }
@@ -333,21 +362,21 @@ pub struct BlockL1Iterative {
 }
 
 /*
-impl BlockL1Iterative {
-    // include tau?
-    pub fn new(mat: &CsrMatrix, restriction: Arc<CsrMatrix>) -> Self {
-        let blocks: Vec<CsrMatrix> = (0..restriction.rows())
-            .into_par_iter()
-            .map(|agg_idx| {
-                let r_row = restriction.row(agg_idx);
-                let agg = r_row.col_indices();
-                let block_size = agg.len();
-                let mut block = CooMatrix::new((block_size, block_size));
+   impl BlockL1Iterative {
+// include tau?
+pub fn new(mat: &CsrMatrix, restriction: Arc<CsrMatrix>) -> Self {
+let blocks: Vec<CsrMatrix> = (0..restriction.rows())
+.into_par_iter()
+.map(|agg_idx| {
+let r_row = restriction.row(agg_idx);
+let agg = r_row.col_indices();
+let block_size = agg.len();
+let mut block = CooMatrix::new((block_size, block_size));
 
-                for (ic, i) in agg.iter().copied().enumerate() {
-                    let mat_row_i = mat.row(i);
-                    let a_ii = mat.get_entry(i, i).unwrap().into_value();
-                    for (j, val) in mat_row_i
+for (ic, i) in agg.iter().copied().enumerate() {
+let mat_row_i = mat.row(i);
+let a_ii = mat.get_entry(i, i).unwrap().into_value();
+for (j, val) in mat_row_i
                         .col_indices()
                         .iter()
                         .copied()
@@ -496,7 +525,6 @@ impl Multilevel {
         sweeps: usize,
         mu: usize,
     ) -> Self {
-        trace!("constructing new ML component");
         let fine_mat = hierarchy.get_mat(0);
         let stationary = IterativeMethod::StationaryIteration;
         let pcg = IterativeMethod::ConjugateGradient;
@@ -535,7 +563,7 @@ impl Multilevel {
             }
         };
 
-        let r = metis_n(hierarchy.get_near_null(0), fine_mat.clone(), 16);
+        let r = metis_n(hierarchy.get_near_null(0), fine_mat.clone(), 64);
         //let r = hierarchy.get_partition(0).clone();
 
         let fine_smoother = build_smoother(fine_mat.clone(), smoother, Arc::new(r), false);
@@ -589,7 +617,7 @@ impl Multilevel {
                             );
                         }
                     } else {
-                        let r = metis_n(hierarchy.get_near_null(i + 1), mat.clone(), 16);
+                        let r = metis_n(hierarchy.get_near_null(i + 1), mat.clone(), 64);
                         //let r = hierarchy.get_partition(i + 1).clone();
                         let smoother = build_smoother(mat.clone(), smoother, Arc::new(r), false);
                         let zeros = Vector::from(vec![0.0; mat.cols()]);
@@ -728,7 +756,7 @@ impl Composite {
                 x = x + component.apply(&r);
                 current_comp += 1;
                 r = &*v - spmv(&self.mat, &x);
-                if r.norm() < 1e-12 {
+                if r.norm() < f64::EPSILON {
                     v.clone_from(&x);
                     warn!(
                         "Composite application early termination at {} of {} components because residual norm: {:.2e}",
@@ -746,7 +774,7 @@ impl Composite {
                 x = x + component.apply(&r);
                 current_comp += 1;
                 r = &*v - spmv(&self.mat, &x);
-                if r.norm() < 1e-12 {
+                if r.norm() < f64::EPSILON {
                     v.clone_from(&x);
                     warn!(
                         "Composite application early termination at {} of {} components because residual norm: {:.2e}",

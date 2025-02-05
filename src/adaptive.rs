@@ -6,7 +6,7 @@ use ndarray_rand::{rand_distr::Uniform, RandomExt};
 use crate::{
     hierarchy::Hierarchy,
     interpolation::InterpolationType,
-    partitioner::metis_n,
+    partitioner::{metis_n, modularity_matching_partition},
     preconditioner::{build_smoother, Composite, LinearOperator, Multilevel, SmootherType, L1},
     solver::{Iterative, IterativeMethod},
     utils::{format_duration, inner_product, norm, normalize},
@@ -139,7 +139,6 @@ impl AdaptiveBuilder {
 
         // Find initial near null to get the iterations started
         let fine_l1 = Arc::new(L1::new(&self.mat));
-        info!("built smoother");
         let guess: Vector = Vector::from_elem(dim, 1.0);
         let stationary = Iterative::new(self.mat.clone(), Some(guess))
             .with_solver(IterativeMethod::StationaryIteration)
@@ -197,11 +196,10 @@ impl AdaptiveBuilder {
                     .unwrap_or(&hierarchy.get_mat(0))
                     .clone();
 
-                let r = metis_n(&near_null, current_a.clone(), 16);
-                let coarse_smoother =
-                    build_smoother(current_a.clone(), self.smoother_type, r.into(), false);
-
-                //let l1 = Arc::new(L1::new(&current_a));
+                //let r = metis_n(&near_null, current_a.clone(), 16);
+                //let r = modularity_matching_partition(current_a.clone(), &near_null, 64.0, Some(64));
+                //let coarse_smoother = build_smoother(current_a.clone(), self.smoother_type, r.into(), false);
+                let coarse_smoother = Arc::new(L1::new(&current_a));
                 find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 5);
                 /*
                 let dim = current_a.rows();
@@ -215,7 +213,7 @@ impl AdaptiveBuilder {
                 */
             }
             //hierarchy.consolidate(self.coarsening_factor);
-            info!("Hierarchy info*: {:?}", hierarchy);
+            info!("Hierarchy info: {:?}", hierarchy);
 
             let ml1 = Arc::new(Multilevel::new(
                 hierarchy,
@@ -224,7 +222,6 @@ impl AdaptiveBuilder {
                 self.smoothing_steps,
                 self.mu,
             ));
-            trace!("Multilevel pc constructed");
             preconditioner.push(ml1);
 
             near_null = Vector::random(dim, Uniform::new(-1., 1.));

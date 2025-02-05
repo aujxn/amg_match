@@ -21,6 +21,7 @@ use sprs::io::read_matrix_market;
 * - redo cg tests with new convergence norm
 * - SGS implementation
 * - check spd
+* - test if different smoother aggs every compononent is worth it?
 *
 */
 
@@ -72,9 +73,9 @@ fn main() {
     pretty_env_logger::init();
 
     let mfem_mats = [
-        //("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
+        ("data/anisotropy/anisotropy_2d", "anisotropic-2d"),
         //("data/spe10/spe10_0", "spe10"),
-        ("data/elasticity/elasticity_3d", "elasticity"),
+        //("data/elasticity/elasticity_3d", "elasticity"),
         //("data/laplace/3d/3d_laplace_1", "laplace-3d"),
     ];
 
@@ -121,7 +122,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
     let max_components = 10;
     let coarsening_factor = 7.5;
-    let test_iters = 30;
+    let test_iters = 20;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
@@ -132,7 +133,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         .with_smoother(SmootherType::BlockL1)
         //.with_smoother(SmootherType::BlockGaussSeidel)
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
-        .with_smoothing_steps(3)
+        .with_smoothing_steps(1)
         .cycle_type(1)
         .with_max_test_iters(test_iters);
 

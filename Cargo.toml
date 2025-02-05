@@ -14,6 +14,7 @@ readme = "README.md"
 [dependencies]
 sprs = { version = "0.11", features = ["serde", "multi_thread", "approx", "alga"] }
 sprs-ldl = { version = "0.10", features = ["sprs_suitesparse_camd", "sprs_suitesparse_ldl"] }
+approx = "0.5.1"
 ndarray = { version = "0.16", features = ["serde", "rayon", "approx", "matrixmultiply-threading"] }
 ndarray-linalg = { version = "0.17", features = ["openblas-static"] }
 image = "0"

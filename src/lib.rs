@@ -35,6 +35,7 @@ use sprs_ldl::LdlNumeric;
 
 #[macro_use]
 extern crate log;
+extern crate approx;
 
 pub mod adaptive;
 pub mod hierarchy;

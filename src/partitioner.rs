@@ -79,10 +79,10 @@ pub fn build_sparse_modularity_matrix(
     a_bar.iter().copied().for_each(|(i, j, w)| {
         if w > 0.0 {
             let modularity_ij = w - inverse_total * row_sums[i] * row_sums[j];
-            //if modularity_ij > 0 {
-            mod_mat.add_triplet(i, j, modularity_ij);
-            mod_mat.add_triplet(j, i, modularity_ij);
-            //}
+            if modularity_ij > 0.0 {
+                mod_mat.add_triplet(i, j, modularity_ij);
+                mod_mat.add_triplet(j, i, modularity_ij);
+            }
         }
     });
     mod_mat.to_csr()
