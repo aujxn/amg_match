@@ -4,6 +4,7 @@
 use indexmap::IndexSet;
 use ndarray::{Array, Array2, ArrayView2, ArrayViewMut2, Axis};
 use ndarray_linalg::lobpcg::{lobpcg, LobpcgResult};
+use ndarray_linalg::Norm;
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use sprs::io::read_matrix_market;
@@ -24,18 +25,27 @@ use crate::{CooMatrix, CsrMatrix, Vector};
 
 pub fn load_system(
     prefix: &str,
+    name: &str,
     normalize_matrix: bool,
-) -> (Arc<CsrMatrix>, Vector, Vec<Vec<f64>>, CsrMatrix) {
-    let matfile = format!("{}.mtx", prefix);
-    let doffile = format!("{}.bdy", prefix);
-    let rhsfile = format!("{}.rhs", prefix);
-    let coordsfile = format!("{}.coords", prefix);
+) -> (
+    Arc<CsrMatrix>,
+    Vector,
+    Vec<Vec<f64>>,
+    Option<Vec<Vector>>,
+    CsrMatrix,
+) {
+    let matfile = format!("{}/{}.mtx", prefix, name);
+    let doffile = format!("{}/{}.bdy", prefix, name);
+    let rhsfile = format!("{}/{}.rhs", prefix, name);
+    let coordsfile = format!("{}/{}.coords", prefix, name);
 
     info!("Loading linear system...");
     let mat = read_matrix_market(matfile).unwrap().to_csr();
     //let mat = mat.filter(|_, _, v| *v != 0.0);
 
     let b = load_vec(rhsfile).unwrap_or(Vector::from_elem(mat.cols(), 1.0));
+    //let rbms = load_rbms(prefix).map_or(None, |rbms| Some(rbms));
+    let rbms = Some(load_rbms(prefix).unwrap());
 
     let dofs = load_boundary_dofs(doffile);
     let mut coords = load_coords(coordsfile);
@@ -48,7 +58,7 @@ pub fn load_system(
         b /= factor;
     }
 
-    (Arc::new(mat), b, coords, projector)
+    (Arc::new(mat), b, coords, rbms, projector)
 }
 
 // TODO add coords file for spe10
@@ -90,6 +100,42 @@ pub fn load_vec<P: AsRef<Path>>(path: P) -> Result<Vector, Box<dyn std::error::E
     Ok(Vector::from(data))
 }
 
+pub fn load_rbms(prefix: &str) -> Result<Vec<Vector>, Box<dyn std::error::Error>> {
+    let rbm_suffixes = [
+        "rbm_rotate_xy.gf",
+        "rbm_rotate_yz.gf",
+        "rbm_rotate_zx.gf",
+        "rbm_translate_x.gf",
+        "rbm_translate_y.gf",
+        "rbm_translate_z.gf",
+    ];
+
+    let mut rbms: Vec<Vector> = Vec::new();
+
+    for suffix in rbm_suffixes {
+        let rbm_path = format!("{}/{}", prefix, suffix);
+        trace!("Loading RBM file: {}", rbm_path);
+        let rbm_file = File::open(rbm_path)?;
+        let reader = BufReader::new(rbm_file);
+        let mut data = Vec::new();
+
+        for line in reader.lines().skip(5) {
+            let line = line?;
+            let numbers: Vec<f64> = line
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
+            data.extend(numbers);
+        }
+        let mut rbm = Vector::from(data);
+        rbm /= rbm.norm();
+
+        rbms.push(rbm);
+    }
+
+    Ok(rbms)
+}
 pub fn load_boundary_dofs<P: AsRef<Path>>(path: P) -> Vec<usize> {
     let file = File::open(path).unwrap();
     let reader = BufReader::new(file);
@@ -148,7 +194,7 @@ pub fn delete_boundary(
     let p_t = p_mat.transpose_view();
     let new_mat = &p_t * &(&mat * &p_mat);
     let new_vec = &p_t * &vec;
-    (new_mat.to_csr(), new_vec, p_mat.to_csr())
+    (new_mat.to_csr(), new_vec, p_t.to_csr())
 }
 
 pub fn norm(vec: &Vector, mat: &CsrMatrix) -> f64 {

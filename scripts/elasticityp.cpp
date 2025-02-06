@@ -16,10 +16,10 @@ int main(int argc, char *argv[]) {
   int order = 1;
   bool amg_elast = 0;
 
-  // boomerAMG depends on nodal ordering which is byVDIM
+  // boomerAMG depends on array-of-structures (AoS) ordering which is byVDIM
   auto ordering = Ordering::byVDIM;
-  //auto ordering = Ordering::byNODES;
-  
+  // auto ordering = Ordering::byNODES; // structure-of-arrays SoA
+
   int refinements = 2;
   const char *device_config = "cpu";
 
@@ -71,13 +71,13 @@ int main(int argc, char *argv[]) {
   }
   ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
   delete mesh;
-    /*
-  {
-    for (int l = 0; l < refinements; l++) {
-      pmesh->UniformRefinement();
-    }
+  /*
+{
+  for (int l = 0; l < refinements; l++) {
+    pmesh->UniformRefinement();
   }
-    */
+}
+  */
 
   //    Define a parallel finite element space on the parallel mesh. Here we
   //    use vector finite elements, i.e. dim copies of a scalar finite element
@@ -164,10 +164,11 @@ int main(int argc, char *argv[]) {
   HypreBoomerAMG *amg = new HypreBoomerAMG(A);
 
   amg->SetElasticityOptions(fespace);
-  // using this set system options seems to be ok though, still not a great PC though...
-  //amg->SetSystemsOptions(dim, Ordering::byVDIM==ordering);
+  // using this set system options seems to be ok though, still not a great PC
+  // though...
+  // amg->SetSystemsOptions(dim, Ordering::byVDIM==ordering);
 
-  //CGSolver solver(MPI_COMM_WORLD);
+  // CGSolver solver(MPI_COMM_WORLD);
   SLISolver solver(MPI_COMM_WORLD);
   solver.SetRelTol(1e-8);
   solver.SetMaxIter(300);

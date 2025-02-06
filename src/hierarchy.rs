@@ -2,6 +2,8 @@ use core::fmt;
 
 use std::sync::Arc;
 
+use ndarray_linalg::Norm;
+
 use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
 use crate::partitioner::{modularity_matching_partition, Partition};
 use crate::{CsrMatrix, Vector};
@@ -96,7 +98,9 @@ impl Hierarchy {
         );
 
         let partition = Arc::new(partition);
-        self.near_nulls.push(Arc::new(near_null.clone()));
+        let mut normalized_nn = near_null.clone();
+        normalized_nn /= near_null.norm();
+        self.near_nulls.push(Arc::new(normalized_nn));
         self.partitions.push(partition.clone());
 
         let (coarse_near_null, r, p, mat_coarse) = match interpolation_type {
