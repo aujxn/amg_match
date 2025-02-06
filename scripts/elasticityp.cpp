@@ -168,9 +168,9 @@ int main(int argc, char *argv[]) {
   // though...
   // amg->SetSystemsOptions(dim, Ordering::byVDIM==ordering);
 
-  // CGSolver solver(MPI_COMM_WORLD);
-  SLISolver solver(MPI_COMM_WORLD);
-  solver.SetRelTol(1e-8);
+  CGSolver solver(MPI_COMM_WORLD);
+  // SLISolver solver(MPI_COMM_WORLD);
+  solver.SetRelTol(1e-12);
   solver.SetMaxIter(300);
   mfem::IterativeSolver::PrintLevel pl;
   solver.SetPrintLevel(pl.Iterations());

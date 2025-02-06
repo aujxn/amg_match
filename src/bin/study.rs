@@ -100,124 +100,8 @@ fn main() {
 }
 
 fn study_mfem(prefix: &str, name: &str) {
-    let (mat, b, _coords, rbms, projector) = load_system(prefix, name, false);
-    let nrows = b.len();
-
-    let l1 = L1::new(&mat);
-    let zeros = Vector::from_elem(nrows, 0.0);
-    let smoother = Iterative::new(mat.clone(), Some(zeros.clone()))
-        .with_max_iter(3)
-        .with_solver(IterativeMethod::StationaryIteration)
-        .with_preconditioner(Arc::new(l1));
-
-    let rbms: Vec<Vector> = rbms
-        .unwrap()
-        .into_iter()
-        .map(|rbm| {
-            let mut free = &projector * &rbm;
-            smoother.apply_input(&zeros, &mut free);
-            free /= free.norm();
-            free
-        })
-        .collect();
-
-    //let mat_ref: &CsrMatrix = mat.borrow();
-    //write_mm(mat_ref, "anis_2d.mtx").expect("failed");
-    let pc = study(mat, b, name);
-
-    for (_i, rbm) in rbms.iter().enumerate() {
-        for j in 0..6 {
-            let ip = rbm.inner(&rbms[j]);
-            print!("{:6.2} ", ip);
-        }
-        println!();
-    }
-
-    println!();
-    for comp in pc.components() {
-        let near_null = comp.get_hierarchy().get_near_null(0);
-        for rbm in rbms.iter() {
-            let ip = rbm.inner(&near_null);
-            print!("{:6.2} ", ip.abs());
-        }
-        println!();
-    }
-
-    let mut mgs_rbm = MGS::new(nrows, 1e-12);
-    for vec in rbms.iter() {
-        match mgs_rbm.append(vec.clone()) {
-            AppendResult::Added(_) => (),
-            AppendResult::Dependent(_) => {
-                error!("rbms are dependent...");
-                panic!()
-            }
-        }
-    }
-    let rbm_q = mgs_rbm.get_q();
-    let rbm_qt = rbm_q.t();
-
-    let mut mgs_nearnull = MGS::new(nrows, 1e-12);
-    for vec in pc
-        .components()
-        .iter()
-        .map(|comp| comp.get_hierarchy().get_near_null(0))
-    {
-        let vec: &Vector = vec;
-        match mgs_nearnull.append(vec.clone()) {
-            AppendResult::Added(_) => (),
-            AppendResult::Dependent(_) => {
-                error!("near_nulls are dependent...");
-                panic!()
-            }
-        }
-    }
-    let near_null_q = mgs_nearnull.get_q();
-    let mut c = Array::zeros((6, near_null_q.ncols()));
-    general_mat_mul(1.0, &rbm_qt, &near_null_q, 0.0, &mut c);
-    let (_u, s, _vt) = c.svd_into(false, false).unwrap();
-
-    let mut score = 0.0;
-    trace!("SVDs of Q_rbm_t Q_nn:");
-    for singular_value in s {
-        print!("{:5.2} ", singular_value);
-        score += singular_value;
-    }
-    println!();
-    trace!("(1/6)*||Q_rbm* Q_nn||_2: = {:.2}", score / 6.0);
-
-    let nn_qt = near_null_q.t();
-    for (i, rbm) in rbms.iter().enumerate() {
-        let mut coefs = Vector::zeros(nn_qt.nrows());
-        general_mat_vec_mul(1.0, &nn_qt, &rbm, 0.0, &mut coefs);
-
-        /*
-        let mut rbm_perp = rbm.clone();
-        let mut sum = 0.0;
-        for (i, w) in coefs.iter().enumerate() {
-            print!("{:5.2} ", w);
-            sum += w * w;
-            let projection = *w * near_null_q.column(i).to_owned();
-            rbm_perp = rbm_perp - projection;
-        }
-        println!();
-        trace!(
-            "RBM {} ||rbm - P rbm||: {:.3}, sum of squares: {:.2}",
-            i,
-            rbm_perp.norm(),
-            sum
-        );
-        */
-        trace!("RBM {} ||Q_nn^T m||: {:.3}", i, coefs.norm())
-    }
-
-    /*
-    //let meshfile = "data/anisotropy/test.vtk";
-    //let outfile = "../skillet/error.vtk";
-    //write_gf(&near_nulls, &meshfile, &outfile, &projector);
-    for (i, hierarchy) in pc.components().iter().map(|ml| &ml.hierarchy).enumerate() {
-        plot_hierarchy(&format!("{}_hierarchy_{}", name, i), hierarchy, &coords);
-    }
-    */
+    let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, false);
+    let _pc = study(mat, b, name);
 }
 
 fn study_suitesparse(mat_path: &str, name: &str) {
@@ -273,7 +157,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         plot_convergence_history(&components_title, &convergence_hist, step_size);
     */
 
-    //test_solve(name, mat.clone(), &b, pc.clone(), step_size);
+    test_solve(name, mat.clone(), &b, pc.clone(), step_size);
     pc
 }
 

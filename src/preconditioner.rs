@@ -805,4 +805,8 @@ impl Composite {
     pub fn components_mut(&mut self) -> &mut Vec<Arc<Multilevel>> {
         &mut self.components
     }
+
+    pub fn get_mat(&self) -> Arc<CsrMatrix> {
+        self.mat.clone()
+    }
 }

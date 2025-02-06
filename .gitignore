@@ -4,6 +4,7 @@
 /images
 /data
 /venv
+/build
 *.html
 *.svg
 *.png

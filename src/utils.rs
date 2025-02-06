@@ -44,8 +44,7 @@ pub fn load_system(
     //let mat = mat.filter(|_, _, v| *v != 0.0);
 
     let b = load_vec(rhsfile).unwrap_or(Vector::from_elem(mat.cols(), 1.0));
-    //let rbms = load_rbms(prefix).map_or(None, |rbms| Some(rbms));
-    let rbms = Some(load_rbms(prefix).unwrap());
+    let rbms = load_rbms(prefix).map_or(None, |rbms| Some(rbms));
 
     let dofs = load_boundary_dofs(doffile);
     let mut coords = load_coords(coordsfile);

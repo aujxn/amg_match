@@ -13,8 +13,9 @@ use ndarray_rand::RandomExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use strum_macros::Display;
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, Display)]
 pub enum IterativeMethod {
     ConjugateGradient,
     StationaryIteration,
@@ -26,6 +27,8 @@ pub struct SolveInfo {
     pub converged: bool,
     pub initial_residual_norm: f64,
     pub final_relative_residual_norm: f64,
+    pub final_absolute_residual_norm: f64,
+    pub average_convergence_factor: f64,
     pub iterations: usize,
     pub time: Duration,
     pub relative_residual_norm_history: Vec<f64>,
@@ -203,22 +206,18 @@ impl Iterative {
 
         if self.log_interval.is_some() {
             if !solve_info.converged {
-                warn!(
-                    "solver didn't converge on coarsest level\n\tfinal ratio: {:.2e}\n\ttarget ratio: {:.2e}\n\titerations: {}\n\ttime: {}\n\tmatrix size: {}",
-                    solve_info.final_relative_residual_norm,
-                    self.tolerance,
-                    solve_info.iterations,
-                    format_duration(&solve_info.time),
-                    self.mat.cols()
-                );
-            } else {
-                trace!(
-                    "Solved in {} iterations and {} with {:.2e} relative residual",
-                    solve_info.iterations,
-                    format_duration(&solve_info.time),
-                    solve_info.final_relative_residual_norm
-                );
+                warn!("solver didn't converge!");
             }
+
+            trace!(
+                "{} results:\n\tSolve time: {} iterations in {}\n\tResidual norms: {:.2e} relative {:.2e} absolute\n\tAverage convergence: {:.2}",
+                self.solver,
+                solve_info.iterations,
+                format_duration(&solve_info.time),
+                solve_info.final_relative_residual_norm,
+                solve_info.final_absolute_residual_norm,
+                solve_info.average_convergence_factor
+            );
         }
         (solution, solve_info)
     }
@@ -291,6 +290,8 @@ impl Iterative {
                     converged: true,
                     initial_residual_norm: norm0,
                     final_relative_residual_norm: ratio,
+                    final_absolute_residual_norm: r_norm,
+                    average_convergence_factor: ratio.powf(1.0 / iter as f64),
                     iterations: iter,
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
@@ -302,6 +303,8 @@ impl Iterative {
                     converged: false,
                     initial_residual_norm: norm0,
                     final_relative_residual_norm: ratio,
+                    final_absolute_residual_norm: r_norm,
+                    average_convergence_factor: ratio.powf(1.0 / iter as f64),
                     iterations: iter,
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
@@ -338,7 +341,6 @@ impl Iterative {
     fn pcg(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - spmv(mat, &*x);
-        //let mut r = rhs - (mat * &*x);
 
         let mut r_bar = r.clone();
         self.preconditioner.apply_mut(&mut r_bar);
@@ -347,20 +349,20 @@ impl Iterative {
         if d0 < 1e-16 {
             return SolveInfo {
                 converged: true,
-                initial_residual_norm: d0,
+                initial_residual_norm: d0.sqrt(),
                 final_relative_residual_norm: 1.0,
+                final_absolute_residual_norm: d.sqrt(),
+                average_convergence_factor: 1.0,
                 iterations: 0,
                 time: Duration::ZERO,
                 relative_residual_norm_history: Vec::new(),
             };
         }
         let converged_criterion = d0 * self.tolerance * self.tolerance;
-        /*
-        if converged_criterion < 1e-16 {
+        if converged_criterion < f64::EPSILON {
             warn!("Convergence criterion for PCG is very small... initial residual ((Br,r) = {:.3e}) might be nearly 0.0", d0);
         }
-        */
-        let norm0 = d0.sqrt();
+
         if self.log_interval.is_some() {
             trace!("Initial (Br, r): {:.3e}", d0)
         }
@@ -373,13 +375,13 @@ impl Iterative {
 
         loop {
             if self.check_max_conditions(iter, start_time) {
-                let r_final = rhs - spmv(mat, &*x);
-                //let r_final = rhs - (mat * &*x);
-                let relative_residual_norm = (r_final.dot(&r_final) / d0).sqrt();
+                let ratio = (d / d0).sqrt();
                 return SolveInfo {
                     converged: false,
-                    initial_residual_norm: norm0,
-                    final_relative_residual_norm: relative_residual_norm,
+                    initial_residual_norm: d0.sqrt(),
+                    final_relative_residual_norm: ratio,
+                    final_absolute_residual_norm: d.sqrt(),
+                    average_convergence_factor: ratio.powf(1.0 / iter as f64),
                     iterations: iter,
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
@@ -422,10 +424,13 @@ impl Iterative {
             convergence_history.push(ratio);
 
             if d < converged_criterion {
+                let ratio = (d / d0).sqrt();
                 return SolveInfo {
                     converged: true,
-                    initial_residual_norm: norm0,
+                    initial_residual_norm: d0.sqrt(),
                     final_relative_residual_norm: ratio,
+                    final_absolute_residual_norm: d.sqrt(),
+                    average_convergence_factor: ratio.powf(1.0 / iter as f64),
                     iterations: iter,
                     time: Instant::now() - start_time,
                     relative_residual_norm_history: convergence_history,
