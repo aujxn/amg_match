@@ -359,9 +359,6 @@ impl Iterative {
             };
         }
         let converged_criterion = d0 * self.tolerance * self.tolerance;
-        if converged_criterion < f64::EPSILON {
-            warn!("Convergence criterion for PCG is very small... initial residual ((Br,r) = {:.3e}) might be nearly 0.0", d0);
-        }
 
         if self.log_interval.is_some() {
             trace!("Initial (Br, r): {:.3e}", d0)
@@ -424,7 +421,6 @@ impl Iterative {
             convergence_history.push(ratio);
 
             if d < converged_criterion {
-                let ratio = (d / d0).sqrt();
                 return SolveInfo {
                     converged: true,
                     initial_residual_norm: d0.sqrt(),

@@ -264,16 +264,15 @@ fn find_near_null(
     let mut history = Vec::new();
 
     loop {
-        normalize(near_null, &mat);
-        //near_null.normalize_mut();
+        *near_null /= near_null.norm();
+        let a_norm = norm(near_null, &mat);
         let stationary = Iterative::new(mat.clone(), Some(near_null.clone()))
             .with_solver(IterativeMethod::StationaryIteration)
             .with_preconditioner(Arc::new(composite_preconditioner.clone()))
             .with_max_iter(1);
         *near_null = stationary.apply(&zeros);
         iter += 1;
-        //let convergence_factor = near_null.norm();
-        let convergence_factor = norm(near_null, &mat);
+        let convergence_factor = norm(near_null, &mat) / a_norm;
         if convergence_factor > 1.0 {
             error!(
                 "Not convergent method! Tester convergence factor: {:.2} on iteration {}",

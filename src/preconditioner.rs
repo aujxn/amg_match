@@ -61,6 +61,7 @@ where
 pub enum SmootherType {
     L1,
     GaussSeidel,
+    Ilu,
     BlockL1,
     BlockGaussSeidel,
 }
@@ -82,6 +83,7 @@ pub fn build_smoother(
                 Arc::new(ForwardGaussSeidel::new(mat))
             }
         }
+        SmootherType::Ilu => Arc::new(SymmetricGaussSeidel::diagonally_compensated_ilu(mat)),
         SmootherType::BlockGaussSeidel => {
             let block_gs = BlockGaussSeidel::new(&mat, partition.clone());
             Arc::new(block_gs)
@@ -498,6 +500,73 @@ impl SymmetricGaussSeidel {
         let diag = mat.diag_iter().map(|v| *v.unwrap()).collect();
         Self { diag, mat }
     }
+
+    // TODO improvements could be made to this smoother:
+    // (1) use permutation to minimize discarded fill
+    // (2) allow backfill based on criterion
+    // (3) don't really need to copy the entire matrix
+    //      (easy) just use the existing matrix sparsity pattern with one new values array
+    //      (medium) only store the diagonal compensation
+    //      (hard) easy/medium only work with no backfill, otherwise would need to store the
+    //      diagonal compensation and the backfill info
+    pub fn diagonally_compensated_ilu(mat: Arc<CsrMatrix>) -> Self {
+        let ndofs = mat.rows();
+        let mut lu = (*mat).clone();
+        assert!(lu.is_csr());
+
+        let mut diag: Vec<f64> = lu.diag_iter().map(|v| *v.unwrap()).collect();
+
+        for i in 0..ndofs {
+            let a_ii_inv = diag[i].recip();
+            assert!(a_ii_inv > 0.0 && a_ii_inv.is_finite());
+
+            let row_i: Vec<(usize, f64)> = lu
+                .outer_view(i)
+                .unwrap()
+                .iter()
+                .skip_while(|(j, _)| *j <= i)
+                .map(|(j, v)| (j, *v))
+                .collect();
+
+            lu.outer_view_mut(i).unwrap().iter_mut().for_each(|(j, v)| {
+                if j > i {
+                    *v *= a_ii_inv;
+                } else if j < i {
+                    *v *= diag[j].recip();
+                }
+            });
+
+            for (si, vi) in row_i.iter().copied() {
+                for (sj, vj) in row_i.iter().copied() {
+                    let sij = vi * vj * a_ii_inv;
+                    if si == sj {
+                        let v = diag[si];
+                        assert!(v - sij > 0.0);
+                        diag[si] -= sij;
+                    } else {
+                        match lu.get_mut(si, sj) {
+                            Some(v) => {
+                                *v -= sij;
+                            }
+                            None => {
+                                let x_ii = diag[si];
+                                let x_jj = diag[sj];
+                                let tau2 = (x_ii / x_jj).sqrt();
+                                assert!(tau2.is_finite());
+                                diag[si] += sij.abs() * tau2;
+                                diag[sj] += sij.abs() / tau2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lu.diag_iter_mut().for_each(|v| *v.unwrap() = 1.0);
+        Self {
+            mat: Arc::new(lu),
+            diag: diag.iter().map(|v| v.recip()).collect(),
+        }
+    }
 }
 
 // TODO probably should do a multilevel gauss seidel and figure out to
@@ -528,40 +597,6 @@ impl Multilevel {
         let fine_mat = hierarchy.get_mat(0);
         let stationary = IterativeMethod::StationaryIteration;
         let pcg = IterativeMethod::ConjugateGradient;
-
-        let build_smoother = |mat: Arc<CsrMatrix>,
-                              smoother: SmootherType,
-                              partition: Arc<Partition>,
-                              transpose: bool|
-         -> Arc<dyn LinearOperator + Send + Sync> {
-            match smoother {
-                SmootherType::L1 => Arc::new(L1::new(&mat)),
-                // TODO no clone... use Arc
-                //SmootherType::BlockL1 => Arc::new(BlockL1Iterative::new(&mat, restriction.clone())),
-                SmootherType::BlockL1 => Arc::new(BlockL1::new(&mat, partition.clone())),
-                SmootherType::GaussSeidel => {
-                    if transpose {
-                        Arc::new(BackwardGaussSeidel::new(mat))
-                    } else {
-                        Arc::new(ForwardGaussSeidel::new(mat))
-                    }
-                }
-                SmootherType::BlockGaussSeidel => {
-                    let block_gs = BlockGaussSeidel::new(&mat, partition.clone());
-                    Arc::new(block_gs)
-                    /*
-                    if transpose {
-                        let mut block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
-                        block_gs.set_forward(false);
-                        Arc::new(block_gs)
-                    } else {
-                        let block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
-                        Arc::new(block_gs)
-                    }
-                    */
-                }
-            }
-        };
 
         let r = metis_n(hierarchy.get_near_null(0), fine_mat.clone(), 64);
         //let r = hierarchy.get_partition(0).clone();

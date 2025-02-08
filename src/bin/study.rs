@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
 use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::{LinearOperator, SmootherType, L1};
+use amg_match::preconditioner::SmootherType;
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -10,10 +10,6 @@ use amg_match::{
     utils::{format_duration, load_system},
 };
 use amg_match::{CsrMatrix, Vector};
-use ndarray::linalg::{general_mat_mul, general_mat_vec_mul};
-use ndarray::{Array, Array6};
-use ndarray_linalg::krylov::{AppendResult, Orthogonalizer, MGS};
-use ndarray_linalg::{InnerProduct, Norm, SVDInto};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use plotters::prelude::*;
@@ -81,6 +77,7 @@ fn main() {
         //("data/spe10", "spe10_0"),
         ("data/elasticity", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
+        //("data/laplace", "4"),
     ];
 
     for (prefix, name) in mfem_mats {
@@ -113,7 +110,7 @@ fn study_suitesparse(mat_path: &str, name: &str) {
 
 fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 20;
+    let max_components = 8;
     let coarsening_factor = 7.5;
     let test_iters = 15;
 
@@ -123,9 +120,10 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         //.with_project_first_only()
         //.with_max_level(2)
         //.with_smoother(SmootherType::L1)
-        .with_smoother(SmootherType::BlockL1)
-        //.with_smoother(SmootherType::BlockGaussSeidel)
+        //.with_smoother(SmootherType::Ilu)
+        .with_smoother(SmootherType::BlockGaussSeidel)
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
+        //.with_interpolator(InterpolationType::UnsmoothedAggregation)
         .with_smoothing_steps(1)
         .cycle_type(1)
         .with_max_test_iters(test_iters);

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ndarray_linalg::Norm;
 
 use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
-use crate::partitioner::{modularity_matching_partition, Partition};
+use crate::partitioner::{cf_aggregation, modularity_matching_partition, Partition};
 use crate::{CsrMatrix, Vector};
 
 #[derive(Clone)]
@@ -97,6 +97,11 @@ impl Hierarchy {
             Some(coarsening_factor.ceil() as usize),
         );
 
+        /*
+        let (partition, _coarse_indices) =
+            cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
+        */
+
         let partition = Arc::new(partition);
         let mut normalized_nn = near_null.clone();
         normalized_nn /= near_null.norm();
@@ -171,6 +176,30 @@ impl Hierarchy {
             self.mat.clone()
         } else {
             self.coarse_mats[level - 1].clone()
+        }
+    }
+
+    pub fn set_fine_mat(&mut self, fine_mat: Arc<CsrMatrix>) {
+        self.mat = fine_mat.clone();
+        self.coarse_mats = Vec::new();
+
+        let mat = &*fine_mat;
+        for (pt, p) in self
+            .restrictions
+            .iter()
+            .cloned()
+            .zip(self.interpolations.iter().cloned())
+        {
+            let pt = &*pt;
+            let p = &*p;
+            let coarse: CsrMatrix;
+            if let Some(prev_mat) = self.coarse_mats.last() {
+                let prev_mat = &*(prev_mat.clone());
+                coarse = (pt * &(prev_mat * p)).to_csr();
+            } else {
+                coarse = (pt * &(mat * p)).to_csr();
+            }
+            self.coarse_mats.push(Arc::new(coarse));
         }
     }
 

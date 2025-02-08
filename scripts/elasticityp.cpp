@@ -163,17 +163,18 @@ int main(int argc, char *argv[]) {
 
   HypreBoomerAMG *amg = new HypreBoomerAMG(A);
 
-  amg->SetElasticityOptions(fespace);
-  // using this set system options seems to be ok though, still not a great PC
-  // though...
-  // amg->SetSystemsOptions(dim, Ordering::byVDIM==ordering);
+  // amg->SetElasticityOptions(fespace, false);
+  // amg->SetElasticityOptions(fespace);
+  //  using this set system options seems to be ok though, still not a great PC
+  //  though...
+  amg->SetSystemsOptions(dim, Ordering::byVDIM == ordering);
 
   CGSolver solver(MPI_COMM_WORLD);
   // SLISolver solver(MPI_COMM_WORLD);
   solver.SetRelTol(1e-12);
-  solver.SetMaxIter(300);
+  solver.SetMaxIter(10000);
   mfem::IterativeSolver::PrintLevel pl;
-  solver.SetPrintLevel(pl.Iterations());
+  solver.SetPrintLevel(pl.Summary());
   solver.SetOperator(A);
   solver.SetPreconditioner(*amg);
   solver.Mult(B, X);

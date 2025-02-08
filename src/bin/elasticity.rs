@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
 use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::{LinearOperator, SmootherType, L1};
+use amg_match::preconditioner::{LinearOperator, Multilevel, SmootherType, L1};
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -39,9 +39,9 @@ fn main() {
         &truedofs_map,
         rbm_smoothing_steps,
     );
-    value_aggregation(mat, b, &truedofs_map);
-    //let pc = build_pc(mat, name);
-    //eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
+    //value_aggregation(mat, b, &truedofs_map);
+    let pc = build_pc(mat, name);
+    eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
 }
 
 fn value_aggregation(mat: Arc<CsrMatrix>, b: Vector, truedofs_map: &CsrMatrix) {
@@ -65,14 +65,23 @@ fn value_aggregation(mat: Arc<CsrMatrix>, b: Vector, truedofs_map: &CsrMatrix) {
     let adaptive_builder = AdaptiveBuilder::new(block_csr)
         .with_max_components(1)
         .with_coarsening_factor(7.5)
-        .with_smoother(SmootherType::BlockL1)
+        .with_smoother(SmootherType::BlockGaussSeidel)
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
         .with_smoothing_steps(1)
         .cycle_type(1)
         .with_max_test_iters(50);
-
     let (pc, _convergence_hist, _near_nulls) = adaptive_builder.build();
-    let pc = Arc::new(pc);
+
+    let mut hierarchy = pc.components()[0].hierarchy.clone();
+    hierarchy.set_fine_mat(mat.clone());
+    info!("Hierarchy info: {:?}", hierarchy);
+    let pc = Arc::new(Multilevel::new(
+        hierarchy,
+        true,
+        SmootherType::BlockGaussSeidel,
+        1,
+        1,
+    ));
 
     let epsilon = 1e-12;
     let stationary = Iterative::new(mat.clone(), None)
@@ -97,8 +106,8 @@ fn build_pc(mat: Arc<CsrMatrix>, name: &str) -> Composite {
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
-        .with_smoother(SmootherType::BlockL1)
-        //.with_smoother(SmootherType::BlockGaussSeidel)
+        //.with_smoother(SmootherType::BlockL1)
+        .with_smoother(SmootherType::BlockGaussSeidel)
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
         .with_smoothing_steps(1)
         .cycle_type(1)
