@@ -97,7 +97,7 @@ fn main() {
 }
 
 fn study_mfem(prefix: &str, name: &str) {
-    let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, false);
+    let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, true);
     let _pc = study(mat, b, name);
 }
 
@@ -132,16 +132,16 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 10;
+    let max_components = 11;
     let coarsening_factor = 7.5;
-    let test_iters = 15;
+    let test_iters = 5;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
         //.with_max_level(2)
         //.with_smoother(SmootherType::L1)
-        //.with_smoother(SmootherType::Ilu)
+        //.with_smoother(SmootherType::IncompleteCholesky)
         .with_smoother(SmootherType::DiagonalCompensatedBlock(
             BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
             16,

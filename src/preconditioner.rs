@@ -308,7 +308,6 @@ impl BlockSmoother {
                         block_smoother
                     },
                     BlockSmootherType::IncompleteCholesky=> {
-
                         let block_smoother: Arc<dyn LinearOperator + Send + Sync> = Arc::new(IncompleteCholesky::new(Arc::new(csr)));
                         block_smoother
                     },
@@ -395,188 +394,6 @@ impl BlockSmoother {
         }
 
         block.to_csr()
-    }
-}
-
-pub struct BlockL1 {
-    partition: Arc<Partition>,
-    blocks: Vec<Arc<dyn LinearOperator + Send + Sync>>,
-    //blocks: Vec<Cholesky>,
-    //blocks: Vec<CholeskyFactorized<OwnedRepr<f64>>>,
-}
-
-impl BlockL1 {
-    // include tau?
-    pub fn new(mat: &CsrMatrix, partition: Arc<Partition>) -> Self {
-        let blocks: Vec<Arc<dyn LinearOperator + Send + Sync>> = partition
-            .agg_to_node
-            .par_iter()
-            .map(|agg| {
-                let block_size = agg.len();
-                let agg: Vec<usize> = agg.iter().copied().collect();
-                //let mut block = DMatrix::<f64>::zeros(block_size, block_size);
-                let mut block = CooMatrix::new((block_size, block_size));
-
-                for (ic, i) in agg.iter().copied().enumerate() {
-                    assert!(mat.is_csr());
-                    let mat_row_i = mat.outer_view(i).unwrap();
-                    let a_ii = mat.get(i, i).unwrap();
-                    for (j, val) in mat_row_i.iter() {
-                        match agg.binary_search(&j) {
-                            Ok(jc) => {
-                                block.add_triplet(ic, jc, *val);
-                            }
-                            Err(_) => {
-                                let a_jj = mat.get(j, j).unwrap();
-                                //block[(ic, ic)] += (a_ii / a_jj).sqrt() * val.abs();
-                                block.add_triplet(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
-                            }
-                        }
-                    }
-                }
-                let csr = block.to_csr();
-                if csr.density() > 0.5 {
-                    let dense = csr.to_dense();
-                    let mut symmatrized = dense.clone() + dense.t();
-                    symmatrized *= 0.5;
-
-                    let chol = symmatrized.factorizec(UPLO::Upper).unwrap();
-
-                    let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
-                        let mut out = in_vec.clone();
-                        chol.solvec_inplace(&mut out).unwrap();
-                        out
-                    });
-                    f
-                } else {
-
-                    let mut symmatrized = &csr.view() + &csr.transpose_view();
-                    symmatrized.map_inplace(|v| v * 0.5);
-                    let chol = Ldl::new()
-                        .check_symmetry(sprs::SymmetryCheck::CheckSymmetry)
-                        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-                        .fill_in_reduction(sprs::FillInReduction::CAMDSuiteSparse)
-                        .numeric(symmatrized.view())
-                        //.numeric(csr.view())
-                        .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
-                    let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
-                        chol.solve(in_vec)
-                    });
-                    f
-                }
-            })
-            .collect();
-
-        Self { partition, blocks }
-    }
-}
-
-impl LinearOperator for BlockL1 {
-    fn apply_mut(&self, r: &mut Vector) {
-        // probably can do this without an alloc of a bunch of Vectors with unsafe
-        let smoothed_parts: Vec<Vector> = self
-            .partition
-            .agg_to_node
-            .par_iter()
-            .enumerate()
-            .map(|(i, agg)| {
-                let r_part = Vector::from_iter(agg.iter().copied().map(|i| r[i]));
-
-                //self.blocks[i].solvec_inplace(&mut r_part).unwrap();
-                //self.blocks[i].solve(r_part)
-                self.blocks[i].apply(&r_part)
-            })
-            .collect();
-
-        // Could make this par iter but would need some hackery... probably not worth
-        for (smoothed_part, agg) in smoothed_parts.iter().zip(self.partition.agg_to_node.iter()) {
-            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
-                r[i] = *r_i;
-            }
-        }
-    }
-}
-
-// TODO abstract all to block smoother?? not sure what I would gain since there are only a couple
-// block smoothers to consider for now.
-pub struct BlockGaussSeidel {
-    partition: Arc<Partition>,
-    blocks: Vec<SymmetricGaussSeidel>,
-    //forward: bool,
-}
-
-impl BlockGaussSeidel {
-    // include tau?
-    pub fn new(mat: &CsrMatrix, partition: Arc<Partition>) -> Self {
-        let blocks: Vec<Arc<CsrMatrix>> = partition
-            .agg_to_node
-            .par_iter()
-            .map(|agg| {
-                let block_size = agg.len();
-                let agg: Vec<usize> = agg.iter().copied().collect();
-                let mut block = CooMatrix::new((block_size, block_size));
-
-                for (ic, i) in agg.iter().copied().enumerate() {
-                    let mat_row_i = mat.outer_view(i).unwrap();
-                    let a_ii = mat.get(i, i).unwrap();
-                    for (j, val) in mat_row_i.iter() {
-                        match agg.binary_search(&j) {
-                            Ok(jc) => {
-                                block.add_triplet(ic, jc, *val);
-                            }
-                            Err(_) => {
-                                let a_jj = mat.get(j, j).unwrap();
-                                block.add_triplet(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
-                            }
-                        }
-                    }
-                }
-                let block = block.to_csr();
-                Arc::new(block)
-            })
-            .collect();
-
-        Self {
-            partition,
-            //blocks,
-            // TODO forward then backward is better...
-            blocks: blocks
-                .into_iter()
-                .map(|mat| SymmetricGaussSeidel::new(mat))
-                .collect(),
-            //forward: true,
-        }
-    }
-
-    /*
-    pub fn set_forward(&mut self, val: bool) {
-    self.forward = val;
-    }
-    */
-}
-
-impl LinearOperator for BlockGaussSeidel {
-    fn apply_mut(&self, r: &mut Vector) {
-        // probably can do this without an alloc of a bunch of Vectors with unsafe
-        let smoothed_parts: Vec<Vector> = self
-            .partition
-            .agg_to_node
-            .par_iter()
-            .enumerate()
-            .map(|(i, agg)| {
-                let mut r_part = Vector::from_iter(agg.iter().copied().map(|i| r[i]));
-                self.blocks[i].apply_mut(&mut r_part);
-                r_part
-            })
-            .collect();
-
-        // Could make this par if reverse agg map was available... not sure if this is taking
-        // meaningful time though
-        for (smoothed_part, agg) in smoothed_parts.iter().zip(self.partition.agg_to_node.iter()) {
-            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
-                r[i] = *r_i;
-            }
-        }
     }
 }
 
@@ -908,7 +725,7 @@ impl Composite {
         let num_steps = 1;
         let total_comps = self.components().len() * 2 - 1;
         let mut current_comp: usize = 0;
-        for component in self.components.iter() {
+        for component in self.components.iter().rev() {
             for _ in 0..num_steps {
                 x = x + component.apply(&r);
                 current_comp += 1;
@@ -927,7 +744,7 @@ impl Composite {
                 }
             }
         }
-        for component in self.components.iter().rev().skip(1) {
+        for component in self.components.iter().skip(1) {
             for _ in 0..num_steps {
                 x = x + component.apply(&r);
                 current_comp += 1;

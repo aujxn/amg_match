@@ -225,7 +225,7 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
     let m = 10;
     let maxiter = 500;
     let xs = Array::random((n, m), Uniform::new(-1., 1.));
-    let tol = 1e-12;
+    let tol = 1e-6;
 
     let eigs = {
         let linop = |input: ArrayView2<f64>| -> Array2<f64> {

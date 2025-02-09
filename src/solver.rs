@@ -334,7 +334,7 @@ impl Iterative {
         for _ in 0..max_iter {
             let mut r = rhs - spmv(mat, &*x);
             #[cfg(debug_assertions)]
-            if r.norm() < f64::EPSILON {
+            if r.norm() < f64::EPSILON / 2.0 {
                 warn!(
                     "Smoother application early termination because residual norm: {:.2e}",
                     r.norm()

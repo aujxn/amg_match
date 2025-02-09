@@ -151,6 +151,7 @@ impl AdaptiveBuilder {
 
         loop {
             let almost0 = &*self.mat * &near_null;
+            //let score = 1e-3 * almost0.norm();
             let score = almost0.norm();
             trace!("Near-Null score: {:.2e}", score);
 
@@ -169,6 +170,15 @@ impl AdaptiveBuilder {
                         .unwrap();
                         acc
                     });
+
+            /* could A-orthonormalize this basis but probably doesn't help
+            for old in near_null_history.iter() {
+                let proj = inner_product(old, &near_null, &self.mat) * old;
+                near_null = near_null - proj;
+                normalize(&mut near_null, &self.mat);
+            }
+            */
+
             near_null_history.push(near_null.clone());
             if !near_null_history.is_empty() {
                 trace!("Near null component inner product with history: {ortho_check}");
@@ -206,23 +216,9 @@ impl AdaptiveBuilder {
                     .unwrap_or(&hierarchy.get_mat(0))
                     .clone();
 
-                //let r = metis_n(&near_null, current_a.clone(), 16);
-                //let r = modularity_matching_partition(current_a.clone(), &near_null, 64.0, Some(64));
-                //let coarse_smoother = build_smoother(current_a.clone(), self.smoother_type, r.into(), false);
                 let coarse_smoother = Arc::new(L1::new(&current_a));
                 find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 5);
-                /*
-                let dim = current_a.rows();
-                let zeros = Vector::from(vec![0.0; dim]);
-
-                let stationary = Iterative::new(current_a.clone(), Some(near_null))
-                    .with_solver(IterativeMethod::StationaryIteration)
-                    .with_max_iter(3)
-                    .with_preconditioner(l1.clone());
-                near_null = stationary.apply(&zeros);
-                */
             }
-            //hierarchy.consolidate(self.coarsening_factor);
             info!("Hierarchy info: {:?}", hierarchy);
 
             let ml1 = Arc::new(Multilevel::new(

@@ -3,6 +3,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use ndarray_linalg::Norm;
+use sprs::is_symmetric;
 
 use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
 use crate::partitioner::{modularity_matching_partition, Partition};
@@ -108,7 +109,7 @@ impl Hierarchy {
         self.near_nulls.push(Arc::new(normalized_nn));
         self.partitions.push(partition.clone());
 
-        let (coarse_near_null, r, p, mat_coarse) = match interpolation_type {
+        let (coarse_near_null, r, p, mut mat_coarse) = match interpolation_type {
             InterpolationType::Classical => classical(&fine_mat, &partition, near_null),
             InterpolationType::SmoothedAggregation((smoothing_steps, jacobi_weight)) => {
                 smoothed_aggregation(
@@ -130,6 +131,12 @@ impl Hierarchy {
             p.cols(),
             mat_coarse.nnz()
         );
+
+        // TODO maybe not needed / helpful and this implementation is lazy and inefficient
+        if !is_symmetric(&mat_coarse) {
+            mat_coarse = &mat_coarse.view() + &mat_coarse.transpose_view();
+            mat_coarse.map_inplace(|v| v * 0.5);
+        }
 
         self.coarse_mats.push(Arc::new(mat_coarse));
         self.interpolations.push(Arc::new(p));
