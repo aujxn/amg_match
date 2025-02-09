@@ -175,8 +175,8 @@ int main(int argc, char *argv[]) {
   solver.SetMaxIter(10000);
   mfem::IterativeSolver::PrintLevel pl;
   solver.SetPrintLevel(pl.Summary());
-  solver.SetOperator(A);
   solver.SetPreconditioner(*amg);
+  solver.SetOperator(A);
   solver.Mult(B, X);
 
   a->RecoverFEMSolution(X, *b, x);

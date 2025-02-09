@@ -6,7 +6,7 @@ use crate::{
     utils::format_duration,
 };
 use crate::{CsrMatrix, Vector};
-use ndarray::OwnedRepr;
+use ndarray::{Array2, OwnedRepr};
 use ndarray_linalg::{cholesky::*, Norm};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use strum_macros::Display;
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, Display)]
+#[non_exhaustive]
 pub enum IterativeMethod {
     ConjugateGradient,
     StationaryIteration,
@@ -39,9 +40,7 @@ pub enum Solver {
     Direct(Direct),
 }
 
-// TODO this is so janky with handling iterative and direct with a new struct.
-// The LinearOperator trait should probably have a way to set the initial guess...
-// Even if this doesn't make sense for all linear operators.
+// TODO this API is so janky with handling iterative and direct with a new struct, needs re-work
 impl Solver {
     pub fn solve_with_guess(&self, rhs: &Vector, initial_guess: &Vector) -> Vector {
         match self {
@@ -51,25 +50,51 @@ impl Solver {
     }
 }
 
+/// A solver (or smoother) which solves the matrix system `Ax = b` using an iterative method.
+/// Currently, the only 2 methods available are Stationary Linear Iteration (SLI) and (Preconditioned)
+/// Conjugate Gradient (CG/PCG), both specified in `IterativeMethod` enum. Note that these methods are only
+/// convergent under certain criteria. For CG `A` must be SPD and if preconditioned with `B` then
+/// `B` must also be SPD. For SLI, by construction the error propagation operator given by `(I - BA)`
+/// must be a contraction in the $A$ norm, i.e. there exists $\rho < 1.0$ such that for all $v \in
+/// R^d$ we have $\rho \|(I - BA) (x - v)\|_A \leq \|x - v\|_A$.
+///
+/// <div class="warning">Even though the trait `LinearOperator` is implemented for this object that
+/// doesn't actually mean the resulting operator is actually linear. Withholding the conversation
+/// of numerical stabilities and floating point precision, the SLI variant is always linear provided
+/// `B` is linear and symmetric provided that `A` and `B` are symmetric. PCG and CG are non-linear
+/// solvers and are only analytically linear operators if run until the solution lies in the span
+/// of the generated Krylov subspace. For practical purposes, if the tolerances are 'low enough'
+/// and the solver can be used in cases where an SPD linear operator is expected (such as multigrid
+/// coarse level smoothers and solvers).
+/// </div>
 pub struct Iterative {
     mat: Arc<CsrMatrix>, // maybe eventually this becomes linear operator also
     solver: IterativeMethod,
     preconditioner: Arc<dyn LinearOperator + Send + Sync>,
     max_iter: Option<usize>,
     max_duration: Option<Duration>,
-    tolerance: f64,
+    relative_tolerance: f64,
+    absolute_tolerance: f64,
     initial_guess: Vector,
     log_interval: Option<LogInterval>,
-    //optimized: bool,
 }
 
+/// Solves the linear system `Ax = b` using a direct method. Currently the only option is by
+/// (dense) Cholesky Decomposition, so don't use this on large matrices. This is primarily to be
+/// used on the coarsest level solves of a multigrid hierarchy.
 pub struct Direct {
+    // TODO should probably have more options than just Cholesky
     cho_factor: CholeskyFactorized<OwnedRepr<f64>>,
 }
 
 impl Direct {
     pub fn new(mat: &Arc<CsrMatrix>) -> Self {
         let cho_factor = mat.to_dense().factorizec(UPLO::Upper).unwrap();
+        Self { cho_factor }
+    }
+
+    pub fn from_dense(mat: &Array2<f64>) -> Self {
+        let cho_factor = mat.factorizec(UPLO::Upper).unwrap();
         Self { cho_factor }
     }
 }
@@ -89,6 +114,7 @@ impl LinearOperator for Direct {
     }
 }
 
+// TODO all this should probably move into the builder pattern
 impl Iterative {
     pub fn new(mat: Arc<CsrMatrix>, initial_guess: Option<Vector>) -> Self {
         let initial_guess =
@@ -99,10 +125,10 @@ impl Iterative {
             preconditioner: Arc::new(Identity),
             max_iter: None,
             max_duration: None,
-            tolerance: 1e-12,
+            relative_tolerance: 1e-12,
+            absolute_tolerance: 0.0,
             initial_guess,
             log_interval: None,
-            //optimized: false,
         }
     }
 
@@ -144,8 +170,13 @@ impl Iterative {
         self
     }
 
-    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
-        self.tolerance = tolerance;
+    pub fn with_relative_tolerance(mut self, tolerance: f64) -> Self {
+        self.relative_tolerance = tolerance;
+        self
+    }
+
+    pub fn with_absolute_tolerance(mut self, tolerance: f64) -> Self {
+        self.absolute_tolerance = tolerance;
         self
     }
 
@@ -163,19 +194,6 @@ impl Iterative {
         self.log_interval = None;
         self
     }
-
-    /*
-    pub fn optimized(mut self) -> Self {
-        // TODO problably want to check for conflicting settings...
-        self.optimized = true;
-        self
-    }
-
-    pub fn featured(mut self) -> Self {
-        self.optimized = false;
-        self
-    }
-    */
 
     pub fn solve(&self, rhs: &Vector) -> (Vector, SolveInfo) {
         self.solve_with_guess(rhs, &self.initial_guess)
@@ -252,17 +270,14 @@ impl Iterative {
     /// multilevel methods.
     fn stationary(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
-        let mut r = rhs - &(mat * &*x);
-        let test_norm = r.norm();
-        let mut r0 = r.clone();
-        self.preconditioner.apply_mut(&mut r0);
-        //let r0 = r.dot(&r);
-        let norm0 = r0.norm();
-        //let r0 = r0.dot(&r0);
-        //let convergence_criterion = r0 * self.tolerance * self.tolerance;
+        let mut r = rhs - &spmv(mat, &*x);
+        self.preconditioner.apply_mut(&mut r);
+        let norm0 = r.norm();
+        let convergence_criterion =
+            f64::max(norm0 * self.relative_tolerance, self.absolute_tolerance);
 
         if self.log_interval.is_some() {
-            trace!("Initial Residual Norm / pc r norm: {test_norm:.3e} {norm0:.3e}");
+            trace!("Initial Residual Norm ||B^-1 (b - Ax)||_2: {norm0:.3e}");
         }
 
         let mut convergence_history = Vec::new();
@@ -273,19 +288,17 @@ impl Iterative {
         loop {
             self.preconditioner.apply_mut(&mut r);
             let r_norm = r.norm();
-            let ratio = r_norm / norm0;
             *x += &r;
             r = rhs - spmv(mat, &*x);
-            //r = rhs - (mat * &*x);
             iter += 1;
 
-            //let ratio = (r_norm_squared / r0).sqrt();
+            let ratio = r_norm / norm0;
             self.check_log_interval(iter, &mut last_log, &start_time, r_norm, ratio);
             if iter > 1 {
                 convergence_history.push(ratio);
             }
 
-            if ratio < self.tolerance {
+            if r_norm < convergence_criterion {
                 return SolveInfo {
                     converged: true,
                     initial_residual_norm: norm0,
@@ -319,9 +332,8 @@ impl Iterative {
 
         // TODO handle case where x=0 (forward pass ML) so extra spmv is avoided
         for _ in 0..max_iter {
-            //let mut r = rhs - &(mat * &*x);
             let mut r = rhs - spmv(mat, &*x);
-            // TODO remove this highly not optimal
+            #[cfg(debug_assertions)]
             if r.norm() < f64::EPSILON {
                 warn!(
                     "Smoother application early termination because residual norm: {:.2e}",
@@ -339,6 +351,13 @@ impl Iterative {
     /// a residual (vector) and returns the action of the inverse preconditioner
     /// on that residual.
     fn pcg(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
+        // TODO (testing)
+        // manufacture a solution and measure true error norm
+        // in A, this should be strictly monotone. Also test with
+        // Ax=0 and initial random guess.
+        //
+        // Make tests for preconditioners and composite for spd
+
         let mat = &*self.mat;
         let mut r = rhs - spmv(mat, &*x);
 
@@ -346,23 +365,47 @@ impl Iterative {
         self.preconditioner.apply_mut(&mut r_bar);
         let mut d = r.dot(&r_bar);
         let d0 = d;
-        if d0 < 1e-16 {
+
+        if d0 < 0.0 {
+            error!(
+                "The preconditioner is not positive definite. (Br, r) = {:.3e}",
+                d0
+            );
+
             return SolveInfo {
-                converged: true,
-                initial_residual_norm: d0.sqrt(),
+                converged: false,
+                initial_residual_norm: d0,
                 final_relative_residual_norm: 1.0,
-                final_absolute_residual_norm: d.sqrt(),
+                final_absolute_residual_norm: d0,
                 average_convergence_factor: 1.0,
                 iterations: 0,
                 time: Duration::ZERO,
                 relative_residual_norm_history: Vec::new(),
             };
         }
-        let converged_criterion = d0 * self.tolerance * self.tolerance;
+
+        let convergence_criterion = f64::max(
+            d0 * self.relative_tolerance * self.relative_tolerance,
+            self.absolute_tolerance * self.absolute_tolerance,
+        );
+
+        if d0 < convergence_criterion {
+            return SolveInfo {
+                converged: true,
+                initial_residual_norm: d0.sqrt(),
+                final_relative_residual_norm: 1.0,
+                final_absolute_residual_norm: d0.sqrt(),
+                average_convergence_factor: 1.0,
+                iterations: 0,
+                time: Duration::ZERO,
+                relative_residual_norm_history: Vec::new(),
+            };
+        }
 
         if self.log_interval.is_some() {
             trace!("Initial (Br, r): {:.3e}", d0)
         }
+
         let mut p = r_bar.clone();
 
         let mut last_log = Instant::now();
@@ -388,16 +431,12 @@ impl Iterative {
             iter += 1;
 
             let mut g = spmv(mat, &p);
-            //let mut g = mat * &p;
             let alpha = d / p.dot(&g);
             if alpha < 0.0 {
                 error!("alpha is negative: {alpha}");
             }
             g *= alpha;
-            //x += &(alpha * &p);
-            x.iter_mut()
-                .zip(p.iter())
-                .for_each(|(x_i, p_i)| *x_i += *p_i * alpha);
+            *x += &(alpha * &p);
 
             r -= &g;
 
@@ -406,21 +445,28 @@ impl Iterative {
             let d_old = d;
             d = r.dot(&r_bar);
             if d < 0.0 {
-                error!("preconditioner is not spd: {d}");
-            }
+                error!(
+                    "The preconditioner is not positive definite. Iter {}: (Br, r) = {:.3e}",
+                    iter, d0
+                );
 
-            // TODO (testing)
-            // manufacture a solution and measure true error norm
-            // in A, this should be strictly monotone. Also test with
-            // Ax=0 and initial random guess.
-            //
-            // Make tests for preconditioners and composite for spd
+                return SolveInfo {
+                    converged: false,
+                    initial_residual_norm: d0,
+                    final_relative_residual_norm: 1.0,
+                    final_absolute_residual_norm: d0,
+                    average_convergence_factor: 1.0,
+                    iterations: 0,
+                    time: Duration::ZERO,
+                    relative_residual_norm_history: Vec::new(),
+                };
+            }
 
             let ratio = (d / d0).sqrt();
             self.check_log_interval(iter, &mut last_log, &start_time, d.sqrt(), ratio);
             convergence_history.push(ratio);
 
-            if d < converged_criterion {
+            if d < convergence_criterion {
                 return SolveInfo {
                     converged: true,
                     initial_residual_norm: d0.sqrt(),
@@ -447,21 +493,23 @@ impl Iterative {
         self.preconditioner.apply_mut(&mut r_bar);
         let mut d = r.dot(&r_bar);
         let d0 = d;
-        if d0 < 1e-16 {
+        let convergence_criterion = f64::max(
+            d0 * self.relative_tolerance * self.relative_tolerance,
+            self.absolute_tolerance * self.absolute_tolerance,
+        );
+
+        if d0 < convergence_criterion {
             return;
         }
-        let converged_criterion = d0 * self.tolerance * self.tolerance;
+
         let mut p = r_bar.clone();
 
         loop {
+            // Serial spmv with `Mul` trait, eventually move to threading profiles
             let mut g = mat * &p;
             let alpha = d / p.dot(&g);
             g *= alpha;
-            //x += &(alpha * &p);
-            x.iter_mut()
-                .zip(p.iter())
-                .for_each(|(x_i, p_i)| *x_i += *p_i * alpha);
-
+            *x += &(alpha * &p);
             r -= &g;
 
             r_bar.clone_from(&r);
@@ -469,7 +517,7 @@ impl Iterative {
             let d_old = d;
             d = r.dot(&r_bar);
 
-            if d < converged_criterion {
+            if d < convergence_criterion {
                 return;
             }
 

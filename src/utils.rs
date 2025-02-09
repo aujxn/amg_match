@@ -40,8 +40,14 @@ pub fn load_system(
     let coordsfile = format!("{}/{}.coords", prefix, name);
 
     info!("Loading linear system...");
-    let mat = read_matrix_market(matfile).unwrap().to_csr();
-    //let mat = mat.filter(|_, _, v| *v != 0.0);
+    let mm_mat = read_matrix_market(matfile).unwrap();
+    let mut mat = CooMatrix::new((mm_mat.rows(), mm_mat.cols()));
+    for (v, (i, j)) in mm_mat.triplet_iter() {
+        if *v != 0.0 {
+            mat.add_triplet(i, j, *v);
+        }
+    }
+    let mat = mat.to_csr();
 
     let b = load_vec(rhsfile).unwrap_or(Vector::from_elem(mat.cols(), 1.0));
     let rbms = load_rbms(prefix).map_or(None, |rbms| Some(rbms));

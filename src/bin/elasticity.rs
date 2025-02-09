@@ -85,7 +85,7 @@ fn value_aggregation(mat: Arc<CsrMatrix>, b: Vector, truedofs_map: &CsrMatrix) {
 
     let epsilon = 1e-12;
     let stationary = Iterative::new(mat.clone(), None)
-        .with_tolerance(epsilon)
+        .with_relative_tolerance(epsilon)
         .with_solver(IterativeMethod::StationaryIteration)
         .with_preconditioner(pc)
         .with_log_interval(LogInterval::Iterations(500));

@@ -7,10 +7,6 @@ description = "Research iterative solver utilities"
 repository = "https://github.com/aujxn/amg_match"
 readme = "README.md"
 
-#[lib]
-#name = "amg_match"
-#crate-type = ["cdylib"]
-
 [dependencies]
 sprs = { version = "0.11", features = ["serde", "multi_thread", "approx", "alga"] }
 sprs-ldl = { version = "0.10", features = ["sprs_suitesparse_camd", "sprs_suitesparse_ldl"] }
@@ -41,14 +37,12 @@ test-generator = "0"
 # TODO write lots of tests
 
 [profile.dev]
-codegen-units = 1
-opt-level = 0
+codegen-units = 256
+opt-level = 3
 debug = true
+debug-assertions = true
 overflow-checks = true
-relocation-model = "pic"
 
 [profile.release]
-debug = true
 codegen-units = 1
 opt-level = 3
-relocation-model = "pic"

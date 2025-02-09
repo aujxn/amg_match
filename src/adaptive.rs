@@ -1,17 +1,16 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
-use ndarray_linalg::Norm;
-use ndarray_rand::{rand_distr::Uniform, RandomExt};
-
 use crate::{
     hierarchy::Hierarchy,
     interpolation::InterpolationType,
-    partitioner::{metis_n, modularity_matching_partition},
-    preconditioner::{build_smoother, Composite, LinearOperator, Multilevel, SmootherType, L1},
+    preconditioner::{BlockSmootherType, Composite, LinearOperator, Multilevel, SmootherType, L1},
     solver::{Iterative, IterativeMethod},
     utils::{format_duration, inner_product, norm, normalize},
     CsrMatrix, Vector,
 };
+use ndarray_linalg::Norm;
+use ndarray_rand::{rand_distr::Uniform, RandomExt};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,7 +41,10 @@ impl AdaptiveBuilder {
             test_iters: None,
             solve_coarsest_exactly: true,
             smoothing_steps: 1,
-            smoother_type: SmootherType::BlockGaussSeidel,
+            smoother_type: SmootherType::DiagonalCompensatedBlock(
+                BlockSmootherType::GaussSeidel,
+                16,
+            ),
             interpolation_type: InterpolationType::SmoothedAggregation((1, 0.66)),
         }
     }
@@ -155,10 +157,18 @@ impl AdaptiveBuilder {
             // Sanity check that each near null is orthogonal to the last.
             // Could move into test suite down the line.
             normalize(&mut near_null, &self.mat);
-            let ortho_check: String = near_null_history
-                .iter()
-                .map(|old| format!("{:.1e}, ", inner_product(old, &near_null, &self.mat)))
-                .collect();
+            let ortho_check: String =
+                near_null_history
+                    .iter()
+                    .fold(String::new(), |mut acc, old| {
+                        write!(
+                            &mut acc,
+                            "{:.1e}, ",
+                            inner_product(old, &near_null, &self.mat)
+                        )
+                        .unwrap();
+                        acc
+                    });
             near_null_history.push(near_null.clone());
             if !near_null_history.is_empty() {
                 trace!("Near null component inner product with history: {ortho_check}");

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
 use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::SmootherType;
+use amg_match::preconditioner::{BlockSmootherType, SmootherType};
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -109,19 +109,43 @@ fn study_suitesparse(mat_path: &str, name: &str) {
 }
 
 fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
+    #[cfg(debug_assertions)]
+    {
+        let transpose = mat.transpose_view().to_csr();
+
+        for (i, (csr_row, transposed_row)) in mat
+            .outer_iterator()
+            .zip(transpose.outer_iterator())
+            .enumerate()
+        {
+            for ((j, v), (jt, vt)) in csr_row.iter().zip(transposed_row.iter()) {
+                assert_eq!(j, jt);
+                if vt != v {
+                    let rel_err = (v - vt).abs() / v.abs().max(vt.abs());
+                    let abs_err = (v - vt).abs();
+                    assert!(rel_err.min(abs_err) < 1e-12, "Symmetry check failed. A_{},{} is {:.3e} but A_{},{} is {:.3e}. Relative error: {:.3e}, Absolute error: {:.3e}", 
+                        i, j, v, j, i, vt,
+                        rel_err, abs_err);
+                }
+            }
+        }
+    }
+
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 8;
+    let max_components = 10;
     let coarsening_factor = 7.5;
     let test_iters = 15;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
-        //.with_project_first_only()
         //.with_max_level(2)
         //.with_smoother(SmootherType::L1)
         //.with_smoother(SmootherType::Ilu)
-        .with_smoother(SmootherType::BlockGaussSeidel)
+        .with_smoother(SmootherType::DiagonalCompensatedBlock(
+            BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+            16,
+        ))
         .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
         //.with_interpolator(InterpolationType::UnsmoothedAggregation)
         .with_smoothing_steps(1)
@@ -193,24 +217,18 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
     let solve = |method: IterativeMethod, results: &mut Vec<SolveResults>, pc: &mut Composite| {
         let base_solver = |mat: Arc<CsrMatrix>, pc: Composite, guess: Vector| {
             Iterative::new(mat.clone(), Some(guess))
-                .with_tolerance(epsilon)
-                //.with_max_iter(10000)
+                .with_relative_tolerance(epsilon)
                 .with_max_duration(Duration::from_secs(60 * max_minutes))
                 .with_solver(IterativeMethod::ConjugateGradient)
                 .with_preconditioner(Arc::new(pc))
-                .with_log_interval(LogInterval::Time(Duration::from_secs(30)))
-            //.with_log_interval(LogInterval::Iterations(1))
+                .with_log_interval(LogInterval::Time(Duration::from_secs(10)))
         };
         let num_components = pc.components().len();
         let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
         let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
             .with_solver(method)
             .with_max_iter(max_iter);
-        let complexity = pc
-            .components()
-            .iter()
-            .map(|ml| ml.hierarchy.op_complexity())
-            .sum::<f64>();
+        let complexity = pc.op_complexity();
         info!(
             "Starting solve with {} components and {:.2} complexity",
             pc.components().len(),

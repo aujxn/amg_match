@@ -63,6 +63,18 @@ pub fn metis_n(near_null: &'_ Vector, mat: Arc<CsrMatrix>, n_parts: usize) -> Pa
         agg_to_node[agg].insert(i);
     }
 
+    #[cfg(debug_assertions)]
+    {
+        let all: BTreeSet<usize> = (0..mat.rows()).collect();
+        let mut running = BTreeSet::new();
+        for agg in agg_to_node.iter() {
+            assert!(running.is_disjoint(agg));
+            running.extend(agg);
+        }
+        assert!(running.is_subset(&all));
+        assert!(running.symmetric_difference(&all).next().is_none());
+    }
+
     Partition {
         mat,
         node_to_agg,
@@ -144,14 +156,17 @@ pub fn modularity_matching_partition(
         }
     }
 
-    let all: BTreeSet<usize> = (0..ndofs).collect();
-    let mut running = BTreeSet::new();
-    for agg in aggs.iter() {
-        assert!(running.is_disjoint(agg));
-        running.extend(agg);
+    #[cfg(debug_assertions)]
+    {
+        let all: BTreeSet<usize> = (0..ndofs).collect();
+        let mut running = BTreeSet::new();
+        for agg in aggs.iter() {
+            assert!(running.is_disjoint(agg));
+            running.extend(agg);
+        }
+        assert!(running.is_subset(&all));
+        assert!(running.symmetric_difference(&all).next().is_none());
     }
-    assert!(running.is_subset(&all));
-    assert!(running.symmetric_difference(&all).next().is_none());
 
     Partition {
         mat,
@@ -290,10 +305,13 @@ fn greedy_matching(
         aggs.push(BTreeSet::new());
         new_aggs.push(aggs.swap_remove(i));
     }
+
     assert_eq!(agg_id, new_agg_count);
+    #[cfg(debug_assertions)]
     for agg in aggs.into_iter() {
         assert!(agg.is_empty());
     }
+
     *aggs = new_aggs;
 
     *a_bar = a_bar

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ndarray_linalg::Norm;
 
 use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
-use crate::partitioner::{cf_aggregation, modularity_matching_partition, Partition};
+use crate::partitioner::{modularity_matching_partition, Partition};
 use crate::{CsrMatrix, Vector};
 
 #[derive(Clone)]

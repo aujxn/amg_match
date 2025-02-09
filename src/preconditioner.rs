@@ -6,17 +6,27 @@ use crate::hierarchy::Hierarchy;
 use crate::parallel_ops::spmv;
 use crate::partitioner::{metis_n, Partition};
 use crate::solver::{Direct, Iterative, IterativeMethod};
-use crate::{Cholesky, CooMatrix, CsrMatrix, Vector};
+use crate::{CooMatrix, CsrMatrix, Vector};
+use core::f64;
 use ndarray::par_azip;
 use ndarray_linalg::{FactorizeC, Norm, SolveC, UPLO};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
-use serde::{Deserialize, Serialize};
 use sprs::linalg::trisolve::{lsolve_csr_dense_rhs as lsolve, usolve_csr_dense_rhs as usolve};
+use sprs::{is_symmetric, FillInReduction};
 use sprs_ldl::Ldl;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// A Trait for objects which can map from R^n to R^m that are linear. In linear algebra
 /// applications, this is most things (matrices, preconditioners, solvers, etc.).
+///
+/// <div class="warning">For linear operators which really on some iterative process
+/// (such as Stationary Linear Iterations) the `apply_input` method will use the provided output
+/// Vector as a starting guess for the process. Although this is common in other numerical
+/// libraries, the Default impl of `apply_input` doesn't do this so this behaviour could be error
+/// prone / confusing and I will likely decide to change this in the future to require an explicit
+/// call to `Iterative::with_initial_guess` before applying.
+/// </div>
 pub trait LinearOperator {
     /* Should LinearOperator have this information? On one hand, this might be nice to reduce the
      * number of arguments/returns for functions which consume and produce LinearOperators.
@@ -57,25 +67,87 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+/* API here is weird to design
+pub enum GaussSeidelDirection {
+    Forward,
+    Backward,
+    Symmetric
+}
+*/
+
+/// Smoother options for constructing preconditioners. All smoothers should be A-convergent as
+/// preconditioners for Stationary Linear Iterations or Conjugate Gradient as long as the matrix
+/// `A` is SPD.
+#[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
 pub enum SmootherType {
+    /// An L1-scaled Jacobi smoother. Application is a diagonal matrix so this smoother has a low
+    /// memory and application cost but is not suitable for challenging matrices.
     L1,
+    /// A high quality smoother with a low memory footprint. The symmetric variant makes an
+    /// additional copy of the matrix diagonal but otherwise only requires the storage of the `Arc`
+    /// to the matrix. The main downside to this choice is that is is strictly sequential in its
+    /// current implementation. In the future, we might support colored variations with weakly
+    /// parallel capabilities but currently the best way to take advantage of GS smoothing in
+    /// parallel is to use the "diagonally compensated block" variant.
     GaussSeidel,
-    Ilu,
-    BlockL1,
-    BlockGaussSeidel,
+    /// Current implementation has no fill-in and creates a new matrix with the same sparsity
+    /// pattern as the matrix and a copy of the matrix diagonal. Like `GaussSeidel` this involves
+    /// sparse triangular solves which are inherently serial. Use within "diagonally compensated
+    /// block" to achieve parallelism.
+    IncompleteCholesky,
+    /// A more advanced smoother which uses rank-1 corrections to the matrix to delete entries off
+    /// of a prescribed block diagonal. Diagonal blocks are specified by partitioning the matrix
+    /// into the specified number of blocks. Using the number of processors as the number of blocks
+    /// will provide decent CPU saturation but processors that finish early will be waiting for the
+    /// others to finish. Using many more blocks than the number of processors will eventually
+    /// degrade the preconditioner but can result in better saturation. For using a pre-specified
+    /// partition, don't use the provided helpers which consume this enum and build the multilevel
+    /// operator using the `MultilevelBuilder`.
+    ///
+    /// Any solver / smoother which is A-convergent should still be A-convergent when used
+    /// in this block form. Each block component is applied in a `rayon` parallel iterator, so by
+    /// using partitions with at least as many aggregates as processors, this allows the use of
+    /// higher quality sequential smoothers locally within a thread in a sort-of algebraic domain
+    /// decomposition fashion.
+    DiagonalCompensatedBlock(BlockSmootherType, usize),
+}
+
+/// The `SmootherType::DiagonalCompenstatedBlock` can be solved or smoothed with different options
+/// specified here. For more customization you will have to build your smoother yourself.
+#[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
+pub enum BlockSmootherType {
+    /// Performs one symmetric Gauss-Seidel sweep per block.
+    GaussSeidel,
+    /// Decomposes each block into LDL^T with no fill-in. Resulting decomposition has same sparsity
+    /// pattern as the block matrix created by removing connections between aggregates in the
+    /// partition.
+    IncompleteCholesky,
+    /// If the sparsity of a block is below 30% then solve with sparse Cholesky decomposition but
+    /// otherwise just use dense Cholesky decompositions. Warning: large blocks can consume lots of
+    /// memory even when the sparse decomposition is done.
+    AutoCholesky(FillInReduction),
+    /// Solve each block by cacheing a sparse Cholesky decomposition of each block using the
+    /// provided reordering. Warning: If blocks are large and the reordering approach doesn't
+    /// effectively reduce fill in this can consume lots of memory.
+    SparseCholesky(FillInReduction),
+    /// Solve each block by cacheing a dense Cholesky decomposition of each block. Warning: if the
+    /// blocks are large this can consume all available memory very quickly.
+    DenseCholesky,
+    /// Solve each block to a relative accuracy provided (1e-6 is probably okay most the time but
+    /// problem dependent) iteratively with conjugate gradient.
+    ConjugateGradient(f64),
 }
 
 pub fn build_smoother(
     mat: Arc<CsrMatrix>,
     smoother: SmootherType,
-    partition: Arc<Partition>,
+    near_null: Arc<Vector>,
     transpose: bool,
 ) -> Arc<dyn LinearOperator + Send + Sync> {
     match smoother {
         SmootherType::L1 => Arc::new(L1::new(&mat)),
-        //SmootherType::BlockL1 => Arc::new(BlockL1Iterative::new(&mat, restriction.clone())),
-        SmootherType::BlockL1 => Arc::new(BlockL1::new(&mat, partition.clone())),
         SmootherType::GaussSeidel => {
             if transpose {
                 Arc::new(BackwardGaussSeidel::new(mat))
@@ -83,20 +155,15 @@ pub fn build_smoother(
                 Arc::new(ForwardGaussSeidel::new(mat))
             }
         }
-        SmootherType::Ilu => Arc::new(SymmetricGaussSeidel::diagonally_compensated_ilu(mat)),
-        SmootherType::BlockGaussSeidel => {
-            let block_gs = BlockGaussSeidel::new(&mat, partition.clone());
-            Arc::new(block_gs)
-            /*
-            if transpose {
-                let mut block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
-                block_gs.set_forward(false);
-                Arc::new(block_gs)
-            } else {
-                let block_gs = BlockGaussSeidel::new(&mat, restriction.clone());
-                Arc::new(block_gs)
-            }
-            */
+        SmootherType::IncompleteCholesky => Arc::new(IncompleteCholesky::new(mat)),
+        SmootherType::DiagonalCompensatedBlock(block_smoother, n_parts) => {
+            let partition = metis_n(&*near_null, mat.clone(), n_parts);
+
+            Arc::new(BlockSmoother::new(
+                &*mat,
+                Arc::new(partition),
+                block_smoother,
+            ))
         }
     }
 }
@@ -107,8 +174,6 @@ impl Identity {
         Self
     }
 }
-//unsafe impl Send for Identity {}
-//unsafe impl Sync for Identity {}
 
 impl LinearOperator for Identity {
     fn apply_mut(&self, _vec: &mut Vector) {}
@@ -169,6 +234,167 @@ impl L1 {
         let l1_inverse: Vector = Vector::from(l1_inverse);
         //trace!("{:?}", l1_inverse.max());
         Self { l1_inverse }
+    }
+}
+
+pub struct BlockSmoother {
+    partition: Arc<Partition>,
+    blocks: Vec<Arc<dyn LinearOperator + Send + Sync>>,
+}
+
+impl LinearOperator for BlockSmoother {
+    fn apply_mut(&self, r: &mut Vector) {
+        // TODO probably can do this without a allocating of a bunch of Vectors with unsafe
+        let smoothed_parts: Vec<Vector> = self
+            .partition
+            .agg_to_node
+            .par_iter()
+            .enumerate()
+            .map(|(i, agg)| {
+                let r_part = Vector::from_iter(agg.iter().copied().map(|i| r[i]));
+                self.blocks[i].apply(&r_part)
+            })
+            .collect();
+
+        // Could make this par iter but would need some hackery... probably not worth
+        for (smoothed_part, agg) in smoothed_parts.iter().zip(self.partition.agg_to_node.iter()) {
+            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
+                r[i] = *r_i;
+            }
+        }
+    }
+}
+
+impl BlockSmoother {
+    // include tau?
+    pub fn new(mat: &CsrMatrix, partition: Arc<Partition>, smoother: BlockSmootherType) -> Self {
+        let blocks: Vec<Arc<dyn LinearOperator + Send + Sync>> = partition
+            .agg_to_node
+            .par_iter()
+            .map(|agg| {
+                let mut csr = Self::diagonally_compensate(agg, mat);
+
+                #[cfg(debug_assertions)]
+                {
+                    let transpose = mat.transpose_view().to_csr();
+
+                    for (i, (csr_row, transposed_row)) in mat
+                        .outer_iterator()
+                        .zip(transpose.outer_iterator())
+                        .enumerate()
+                    {
+                        for ((j, v), (jt, vt)) in csr_row.iter().zip(transposed_row.iter()) {
+                            assert_eq!(j, jt);
+                            if vt != v {
+                                let rel_err = (v - vt).abs() / v.abs().max(vt.abs());
+                                let abs_err = (v - vt).abs();
+                                assert!(rel_err.min(abs_err) < 1e-12, "Symmetry check failed. A_{},{} is {:.3e} but A_{},{} is {:.3e}. Relative error: {:.3e}, Absolute error: {:.3e}", 
+                                    i, j, v, j, i, vt,
+                                    rel_err, abs_err);
+                            }
+                        }
+                    }
+                }
+
+                // TODO maybe not needed / helpful and this implementation is lazy and inefficient
+                if !is_symmetric(&csr) {
+                    csr = &csr.view() + &csr.transpose_view();
+                    csr.map_inplace(|v| v * 0.5);
+                }
+
+                match smoother {
+                    BlockSmootherType::GaussSeidel => {
+                        let block_smoother: Arc<dyn LinearOperator + Send + Sync> = Arc::new(SymmetricGaussSeidel::new(Arc::new(csr)));
+                        block_smoother
+                    },
+                    BlockSmootherType::IncompleteCholesky=> {
+
+                        let block_smoother: Arc<dyn LinearOperator + Send + Sync> = Arc::new(IncompleteCholesky::new(Arc::new(csr)));
+                        block_smoother
+                    },
+                    BlockSmootherType::AutoCholesky(fill_in_reduction) => {
+                        if csr.density() > 0.3 {
+                            let dense = csr.to_dense();
+
+                            let chol = dense.factorizec(UPLO::Upper).unwrap();
+
+                            let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
+                                let mut out = in_vec.clone();
+                                chol.solvec_inplace(&mut out).unwrap();
+                                out
+                            });
+                            f
+                        } else {
+                            let chol = Ldl::new()
+                                .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+                                .fill_in_reduction(fill_in_reduction)
+                                .numeric(csr.view())
+                                .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+                            let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
+                                chol.solve(in_vec)
+                            });
+                            f
+                        }
+                    },
+                    BlockSmootherType::DenseCholesky=> {
+                        Arc::new(Direct::new(&Arc::new(csr)))
+                    },
+                    BlockSmootherType::SparseCholesky(fill_in_reduction)=> {
+
+                        let chol = Ldl::new()
+                            .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+                            .fill_in_reduction(fill_in_reduction)
+                            .numeric(csr.view())
+                            .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
+                        let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
+                            chol.solve(in_vec)
+                        });
+                        f
+                    },
+                    BlockSmootherType::ConjugateGradient(tolerance)=> {
+                        // TODO (idea) If solving for a block smoother iteratively, a permutation along with a diagonal
+                        // shift is all the information we need to efficiently construct a solver on the fly for each
+                        // block. This should significantly reduce the memory demands of the smoother. This should also be
+                        // possible for the SGS version or other approaches which don't require decompositions.
+                        let op = Arc::new(csr);
+                        let cg: Arc<dyn LinearOperator + Sync + Send>  = Arc::new(Iterative::new(op.clone(), None)
+                            .with_solver(IterativeMethod::ConjugateGradient)
+                            .without_max_iter()
+                            .with_relative_tolerance(tolerance)
+                            .with_absolute_tolerance(f64::EPSILON)
+                            .with_preconditioner(Arc::new(SymmetricGaussSeidel::new(op))));
+                        cg
+                    },
+                }
+            })
+            .collect();
+
+        Self { partition, blocks }
+    }
+
+    fn diagonally_compensate(agg: &BTreeSet<usize>, mat: &CsrMatrix) -> CsrMatrix {
+        assert!(mat.is_csr());
+        let block_size = agg.len();
+        let agg: Vec<usize> = agg.iter().copied().collect();
+        let mut block = CooMatrix::new((block_size, block_size));
+
+        for (ic, i) in agg.iter().copied().enumerate() {
+            let mat_row_i = mat.outer_view(i).unwrap();
+            let a_ii = mat.get(i, i).unwrap();
+            for (j, val) in mat_row_i.iter() {
+                match agg.binary_search(&j) {
+                    Ok(jc) => {
+                        block.add_triplet(ic, jc, *val);
+                    }
+                    Err(_) => {
+                        let a_jj = mat.get(j, j).unwrap();
+                        block.add_triplet(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
+                    }
+                }
+            }
+        }
+
+        block.to_csr()
     }
 }
 
@@ -239,7 +465,7 @@ impl BlockL1 {
                     f
                 }
             })
-        .collect();
+            .collect();
 
         Self { partition, blocks }
     }
@@ -354,102 +580,6 @@ impl LinearOperator for BlockGaussSeidel {
     }
 }
 
-// TODO (idea) If solving for a block smoother iteratively, a permutation along with a diagonal
-// shift is all the information we need to efficiently construct a solver on the fly for each
-// block. This should significantly reduce the memory demands of the smoother. This should also be
-// possible for the SGS version...
-pub struct BlockL1Iterative {
-    restriction: Arc<Partition>,
-    blocks: Vec<Iterative>,
-}
-
-/*
-   impl BlockL1Iterative {
-// include tau?
-pub fn new(mat: &CsrMatrix, restriction: Arc<CsrMatrix>) -> Self {
-let blocks: Vec<CsrMatrix> = (0..restriction.rows())
-.into_par_iter()
-.map(|agg_idx| {
-let r_row = restriction.row(agg_idx);
-let agg = r_row.col_indices();
-let block_size = agg.len();
-let mut block = CooMatrix::new((block_size, block_size));
-
-for (ic, i) in agg.iter().copied().enumerate() {
-let mat_row_i = mat.row(i);
-let a_ii = mat.get_entry(i, i).unwrap().into_value();
-for (j, val) in mat_row_i
-                        .col_indices()
-                        .iter()
-                        .copied()
-                        .zip(mat_row_i.values().iter().copied())
-                    {
-                        match agg.binary_search(&j) {
-                            Ok(jc) => {
-                                block.push(ic, jc, val);
-                            }
-                            Err(_) => {
-                                let a_jj = mat.get_entry(j, j).unwrap().into_value();
-                                block.push(ic, ic, (a_ii / a_jj).sqrt() * val.abs());
-                            }
-                        }
-                    }
-                }
-                CsrMatrix::<f64>::from(&block)
-            })
-            .collect();
-
-        let blocks = blocks
-            .into_iter()
-            .map(|csr| {
-                let block_size = csr.cols();
-                let pc = L1::new(&csr);
-                let ptr = Arc::new(csr);
-                let epsilon = 1e-3;
-                let solver = Iterative::new(ptr, Some(Vector::zeros(block_size)))
-                    .with_tolerance(epsilon)
-                    .with_max_iter(150)
-                    .with_solver(IterativeMethod::ConjugateGradient)
-                    //.with_log_interval(crate::solver::LogInterval::Iterations(51))
-                    .with_preconditioner(Arc::new(pc));
-                solver
-            })
-            .collect();
-
-        Self {
-            restriction,
-            blocks,
-        }
-    }
-}
-
-impl LinearOperator for BlockL1Iterative {
-    fn apply_mut(&self, r: &mut Vector) {
-        // probably can do this without an alloc of a bunch of Vectors with unsafe
-        let smoothed_parts: Vec<Vector> = (0..self.restriction.rows())
-            .into_par_iter()
-            .map(|i| {
-                let row = self.restriction.row(i);
-                let agg = row.col_indices();
-                let mut r_part =
-                    Vector::from_iterator(agg.len(), agg.iter().copied().map(|i| r[i]));
-                self.blocks[i].apply_mut(&mut r_part);
-                r_part
-            })
-            .collect();
-
-        // Could make this par if reverse agg map was available... not sure if this is taking
-        // meaningful time though
-        for (smoothed_part, row) in smoothed_parts.iter().zip(self.restriction.row_iter()) {
-            let agg = row.col_indices();
-            for (i, r_i) in agg.iter().copied().zip(smoothed_part.iter()) {
-                r[i] = *r_i;
-            }
-        }
-    }
-}
-*/
-
 pub struct ForwardGaussSeidel {
     mat: Arc<CsrMatrix>,
 }
@@ -496,11 +626,26 @@ impl LinearOperator for SymmetricGaussSeidel {
 }
 
 impl SymmetricGaussSeidel {
-    pub fn new(mat: Arc<CsrMatrix>) -> SymmetricGaussSeidel {
+    pub fn new(mat: Arc<CsrMatrix>) -> Self {
         let diag = mat.diag_iter().map(|v| *v.unwrap()).collect();
         Self { diag, mat }
     }
+}
 
+pub struct IncompleteCholesky {
+    diag: Vector,
+    mat: Arc<CsrMatrix>,
+}
+
+impl LinearOperator for IncompleteCholesky {
+    fn apply_mut(&self, r: &mut Vector) {
+        lsolve(self.mat.view(), r.view_mut()).unwrap();
+        *r *= &self.diag;
+        usolve(self.mat.view(), r.view_mut()).unwrap();
+    }
+}
+
+impl IncompleteCholesky {
     // TODO improvements could be made to this smoother:
     // (1) use permutation to minimize discarded fill
     // (2) allow backfill based on criterion
@@ -509,7 +654,7 @@ impl SymmetricGaussSeidel {
     //      (medium) only store the diagonal compensation
     //      (hard) easy/medium only work with no backfill, otherwise would need to store the
     //      diagonal compensation and the backfill info
-    pub fn diagonally_compensated_ilu(mat: Arc<CsrMatrix>) -> Self {
+    pub fn new(mat: Arc<CsrMatrix>) -> Self {
         let ndofs = mat.rows();
         let mut lu = (*mat).clone();
         assert!(lu.is_csr());
@@ -569,6 +714,24 @@ impl SymmetricGaussSeidel {
     }
 }
 
+#[derive(Clone)]
+pub struct MultilevelBuilder {
+    // TODO
+    _fine_mat: Arc<CsrMatrix>, //.....
+}
+impl MultilevelBuilder {
+    // TODO
+    pub fn new(fine_mat: Arc<CsrMatrix>) -> Self {
+        Self {
+            _fine_mat: fine_mat,
+        }
+    }
+    // TODO
+    pub fn build(self) -> Multilevel {
+        unimplemented!()
+    }
+}
+
 // TODO probably should do a multilevel gauss seidel and figure out to
 // use the same code as L1
 //      - test spd of precon again
@@ -586,7 +749,6 @@ impl LinearOperator for Multilevel {
 }
 
 impl Multilevel {
-    // TODO builder pattern for Multilevel
     pub fn new(
         hierarchy: Hierarchy,
         solve_coarsest_exactly: bool,
@@ -598,37 +760,23 @@ impl Multilevel {
         let stationary = IterativeMethod::StationaryIteration;
         let pcg = IterativeMethod::ConjugateGradient;
 
-        let r = metis_n(hierarchy.get_near_null(0), fine_mat.clone(), 64);
-        //let r = hierarchy.get_partition(0).clone();
-
-        let fine_smoother = build_smoother(fine_mat.clone(), smoother, Arc::new(r), false);
+        let fine_smoother = build_smoother(
+            fine_mat.clone(),
+            smoother,
+            hierarchy.get_near_null(0).clone(),
+            false,
+        );
         let zeros = Vector::from(vec![0.0; fine_mat.cols()]);
         let forward_solver = Iterative::new(fine_mat.clone(), Some(zeros.clone()))
             .with_solver(stationary)
             .with_max_iter(sweeps)
             .with_preconditioner(fine_smoother)
-            .with_tolerance(1e-12);
+            .with_relative_tolerance(1e-8)
+            .with_absolute_tolerance(f64::EPSILON);
         let mut forward_smoothers: Vec<Arc<dyn LinearOperator + Send + Sync>> =
             vec![Arc::new(forward_solver)];
 
         let backward_smoothers = None;
-        /*
-        let mut backward_smoothers: Option<Vec<Arc<dyn LinearOperator + Send + Sync>>> =
-            match smoother {
-                SmootherType::L1 => None,
-                SmootherType::BlockL1 => None,
-                SmootherType::GaussSeidel => {
-                    let backward_smoother = Arc::new(BackwardGaussSeidel::new(fine_mat.clone()));
-                    let backward_solver = Iterative::new(fine_mat.clone(), Some(zeros))
-                        .with_solver(stationary)
-                        .with_max_iter(sweeps)
-                        .with_preconditioner(backward_smoother)
-                        .with_tolerance(1e-12);
-                    Some(vec![Arc::new(backward_solver)])
-                }
-                SmootherType::BlockGaussSeidel => None,
-            };
-        */
 
         let coarse_index = hierarchy.get_coarse_mats().len() - 1;
         forward_smoothers.extend(
@@ -638,64 +786,43 @@ impl Multilevel {
                 .enumerate()
                 .map(|(i, mat)| {
                     let solver: Arc<dyn LinearOperator + Send + Sync>;
+                    let zeros = Vector::zeros(mat.cols());
+
                     if i == coarse_index && solve_coarsest_exactly {
-                        if mat.rows() < 1000 {
+                        if mat.density() > 0.3 || mat.rows() < 1000 {
+                            // If the coarse problem is small or mostly dense then use dense direct
+                            // decomposition method
                             solver = Arc::new(Direct::new(&mat));
                         } else {
+                            // Otherwise solve with PCG to decent accuracy
                             let pc = Arc::new(L1::new(mat));
                             solver = Arc::new(
-                                Iterative::new(mat.clone(), Some(Vector::zeros(mat.cols())))
+                                Iterative::new(mat.clone(), Some(zeros))
                                     .with_solver(pcg)
                                     .with_max_iter(10000)
                                     .with_preconditioner(pc)
-                                    .with_tolerance(1e-8),
+                                    .with_relative_tolerance(1e-8)
+                                    .with_absolute_tolerance(f64::EPSILON),
                             );
                         }
                     } else {
-                        let r = metis_n(hierarchy.get_near_null(i + 1), mat.clone(), 64);
-                        //let r = hierarchy.get_partition(i + 1).clone();
-                        let smoother = build_smoother(mat.clone(), smoother, Arc::new(r), false);
-                        let zeros = Vector::from(vec![0.0; mat.cols()]);
+                        let smoother = build_smoother(
+                            mat.clone(),
+                            smoother,
+                            hierarchy.get_near_null(i + 1).clone(),
+                            false,
+                        );
                         solver = Arc::new(
                             Iterative::new(mat.clone(), Some(zeros))
                                 .with_solver(stationary)
                                 .with_max_iter(sweeps)
                                 .with_preconditioner(smoother)
-                                .with_tolerance(0.0),
+                                .with_relative_tolerance(0.0),
                         );
                     }
                     solver
                 }),
         );
-
-        /*
-        if let Some(ref mut smoothers) = &mut backward_smoothers {
-            smoothers.extend(
-                hierarchy
-                    .get_matrices()
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i < coarse_index)
-                    .map(|(i, mat)| {
-                        let smoother = build_smoother(
-                            mat.clone(),
-                            smoother,
-                            Arc::new(hierarchy.restriction_matrices[i + 1].clone()),
-                            true,
-                        );
-                        let zeros = Vector::from(vec![0.0; mat.cols()]);
-
-                        Arc::new(
-                            Iterative::new(mat.clone(), Some(zeros))
-                                .with_solver(stationary)
-                                .with_max_iter(sweeps)
-                                .with_preconditioner(smoother)
-                                .with_tolerance(0.0),
-                        )
-                    }),
-            );
-        }
-        */
 
         Self {
             hierarchy,
@@ -711,7 +838,6 @@ impl Multilevel {
 
     fn init_w_cycle(&self, r: &mut Vector) {
         let mut v = Vector::from(vec![0.0; r.len()]);
-        // TODO mu params in builder
         if self.hierarchy.levels() > 2 {
             self.w_cycle_recursive(&mut v, &*r, 0);
         } else {
@@ -730,22 +856,19 @@ impl Multilevel {
             let a = &*self.hierarchy.get_mat(level);
 
             self.forward_smoothers[level].apply_input(f, v);
-
             let f_coarse = spmv(pt, &(f - &spmv(a, v)));
-            //let f_coarse = pt * &(f - &(a * &*v));
-            let mut v_coarse = Vector::from(vec![0.0; f_coarse.len()]);
+            let mut v_coarse = Vector::zeros(f_coarse.len());
             for _ in 0..self.mu {
                 self.w_cycle_recursive(&mut v_coarse, &f_coarse, level + 1);
-                /*
-                if level + 1 == levels {
-                    break;
-                }
-                */
             }
 
             let interpolated = spmv(p, &v_coarse);
-            //let interpolated = p * &v_coarse;
             *v += &interpolated;
+
+            // Ideally the smoothers have a transpose method which returns a 'view' referencing the
+            // original smoother. All available non-symmetric smoothers should be capable of
+            // efficiently applying their transpose and I can't think of a situation where we would
+            // actually require two different objects...
             if let Some(backward_smoothers) = &self.backward_smoothers {
                 backward_smoothers[level].apply_input(f, v)
             } else {
@@ -755,7 +878,6 @@ impl Multilevel {
     }
 }
 
-// clone should be fine here since everything is Arc
 #[derive(Clone)]
 pub struct Composite {
     mat: Arc<CsrMatrix>,
@@ -791,6 +913,8 @@ impl Composite {
                 x = x + component.apply(&r);
                 current_comp += 1;
                 r = &*v - spmv(&self.mat, &x);
+
+                #[cfg(debug_assertions)]
                 if r.norm() < f64::EPSILON {
                     v.clone_from(&x);
                     warn!(
@@ -801,7 +925,6 @@ impl Composite {
                     );
                     return;
                 }
-                //r = &*v - (&*self.mat * &x);
             }
         }
         for component in self.components.iter().rev().skip(1) {
@@ -809,6 +932,8 @@ impl Composite {
                 x = x + component.apply(&r);
                 current_comp += 1;
                 r = &*v - spmv(&self.mat, &x);
+
+                #[cfg(debug_assertions)]
                 if r.norm() < f64::EPSILON {
                     v.clone_from(&x);
                     warn!(
@@ -819,10 +944,22 @@ impl Composite {
                     );
                     return;
                 }
-                //r = &*v - (&*self.mat * &x);
             }
         }
         v.clone_from(&x);
+    }
+
+    pub fn op_complexity(&self) -> f64 {
+        let mut op_complexity = 0.0;
+        let last_idx = self.components.len() - 1;
+        for (i, component) in self.components.iter().enumerate() {
+            if i == last_idx {
+                op_complexity += component.hierarchy.op_complexity()
+            } else {
+                op_complexity += 2.0 * component.hierarchy.op_complexity()
+            }
+        }
+        op_complexity
     }
 
     pub fn push(&mut self, component: Arc<Multilevel>) {
