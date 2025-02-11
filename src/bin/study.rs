@@ -73,11 +73,11 @@ fn main() {
     pretty_env_logger::init();
 
     let mfem_mats = [
-        //("data/anisotropy", "anisotropic_2d"),
+        //("data/anisotropy", "anisotropy_2d"),
         //("data/spe10", "spe10_0"),
-        ("data/elasticity", "elasticity_3d"),
+        //("data/elasticity", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
-        //("data/laplace", "4"),
+        ("data/laplace", "4"),
     ];
 
     for (prefix, name) in mfem_mats {
@@ -97,7 +97,7 @@ fn main() {
 }
 
 fn study_mfem(prefix: &str, name: &str) {
-    let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, true);
+    let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, false);
     let _pc = study(mat, b, name);
 }
 
@@ -132,9 +132,9 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 11;
+    let max_components = 3;
     let coarsening_factor = 7.5;
-    let test_iters = 5;
+    let test_iters = 15;
 
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
@@ -143,11 +143,13 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         //.with_smoother(SmootherType::L1)
         //.with_smoother(SmootherType::IncompleteCholesky)
         .with_smoother(SmootherType::DiagonalCompensatedBlock(
-            BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+            //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+            BlockSmootherType::GaussSeidel,
             16,
         ))
-        .with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
+        //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
         //.with_interpolator(InterpolationType::UnsmoothedAggregation)
+        .with_interpolator(InterpolationType::Classical)
         .with_smoothing_steps(1)
         .cycle_type(1)
         .with_max_test_iters(test_iters);

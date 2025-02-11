@@ -91,27 +91,27 @@ impl Hierarchy {
             .last()
             .map_or(self.get_mat(0), |m| m.clone());
 
-        let partition = modularity_matching_partition(
-            fine_mat.clone(),
-            near_null,
-            coarsening_factor,
-            Some(coarsening_factor.ceil() as usize),
-        );
-
-        /*
-        let (partition, _coarse_indices) =
-            cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
-        */
-
-        let partition = Arc::new(partition);
         let mut normalized_nn = near_null.clone();
         normalized_nn /= near_null.norm();
         self.near_nulls.push(Arc::new(normalized_nn));
-        self.partitions.push(partition.clone());
 
         let (coarse_near_null, r, p, mut mat_coarse) = match interpolation_type {
-            InterpolationType::Classical => classical(&fine_mat, &partition, near_null),
+            InterpolationType::Classical => classical(&fine_mat, near_null),
             InterpolationType::SmoothedAggregation((smoothing_steps, jacobi_weight)) => {
+                let partition = modularity_matching_partition(
+                    fine_mat.clone(),
+                    near_null,
+                    coarsening_factor,
+                    Some(coarsening_factor.ceil() as usize),
+                );
+
+                /*
+                let (partition, _coarse_indices) =
+                    cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
+                */
+
+                let partition = Arc::new(partition);
+                self.partitions.push(partition.clone());
                 smoothed_aggregation(
                     &fine_mat,
                     &partition,
@@ -121,6 +121,20 @@ impl Hierarchy {
                 )
             }
             InterpolationType::UnsmoothedAggregation => {
+                let partition = modularity_matching_partition(
+                    fine_mat.clone(),
+                    near_null,
+                    coarsening_factor,
+                    Some(coarsening_factor.ceil() as usize),
+                );
+
+                /*
+                let (partition, _coarse_indices) =
+                    cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
+                */
+
+                let partition = Arc::new(partition);
+                self.partitions.push(partition.clone());
                 smoothed_aggregation(&fine_mat, &partition, near_null, 0, 0.0)
             }
         };

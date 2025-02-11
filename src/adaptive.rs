@@ -188,6 +188,7 @@ impl AdaptiveBuilder {
             let mut levels = 1;
 
             loop {
+                near_null /= near_null.norm();
                 near_null = hierarchy.add_level(
                     &near_null,
                     self.coarsening_factor,
@@ -217,7 +218,7 @@ impl AdaptiveBuilder {
                     .clone();
 
                 let coarse_smoother = Arc::new(L1::new(&current_a));
-                find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 5);
+                find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 3);
             }
             info!("Hierarchy info: {:?}", hierarchy);
 
