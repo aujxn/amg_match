@@ -73,11 +73,11 @@ fn main() {
     pretty_env_logger::init();
 
     let mfem_mats = [
-        //("data/anisotropy", "anisotropy_2d"),
+        ("data/anisotropy", "anisotropy_2d"),
         //("data/spe10", "spe10_0"),
         //("data/elasticity", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
-        ("data/laplace", "4"),
+        //("data/laplace", "4"),
     ];
 
     for (prefix, name) in mfem_mats {

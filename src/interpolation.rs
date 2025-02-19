@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
+use std::usize;
 
-use ndarray_linalg::{assert, Norm};
+use ndarray_linalg::Norm;
+use rand::Rng;
 
 use crate::{partitioner::Partition, CooMatrix, CsrMatrix, Vector};
 
@@ -58,7 +60,7 @@ pub fn smoothed_aggregation(
     (coarse_near_null, r, p.to_csr(), mat_coarse.to_csr())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Strength(f64, usize);
 
 impl Ord for Strength {
@@ -71,7 +73,7 @@ impl Ord for Strength {
         }
 
         if other.0 == self.0 {
-            Ordering::Equal
+            other.1.cmp(&self.1)
         } else if other.0 < self.0 {
             Ordering::Less
         } else {
@@ -102,16 +104,21 @@ pub fn classical(
     let mut current_p = CsrMatrix::eye(fine_mat.rows());
     let mut current_near_null = near_null.clone();
     let mut prev_size = current_mat.rows();
-    let mut starting_coarse_dofs = None;
+    //let mut starting_coarse_dofs = None;
     let target_cf = 8.0;
     let target_size = (fine_mat.rows() as f64 / target_cf).ceil() as usize;
     loop {
-        let (coarse_near_null, _r, p, ac) = classical_step(
-            &current_mat,
-            &current_near_null,
-            &starting_coarse_dofs,
-            target_size,
-        );
+        /*
+                let (coarse_near_null, _r, p, ac) = classical_step(
+                    &current_mat,
+                    &current_near_null,
+                    &starting_coarse_dofs,
+                    target_size,
+                );
+        */
+        let (coarse_near_null, _r, p, ac) =
+            pmis(&current_mat, &current_near_null, 0.5, target_size);
+
         current_mat = ac.clone();
         current_p = &current_p * &p;
         current_p = current_p.to_csr();
@@ -119,21 +126,27 @@ pub fn classical(
         let cf = current_p.rows() as f64 / current_p.cols() as f64;
         trace!("coarse size: {}, current cf: {:.2}", current_p.cols(), cf);
 
-        if cf > target_cf {
-            let mut r = current_p.transpose_view().to_csr();
-            for (coarse_i, mut row) in r.outer_iterator_mut().enumerate() {
-                let scale: f64 = row.iter().map(|(_, v)| v.powf(2.0)).sum::<f64>().sqrt();
-                row.iter_mut().for_each(|(_, v)| *v /= scale);
-                current_near_null[coarse_i] *= scale;
-            }
-            let p = r.transpose_view().to_csr();
-            let ac = &r * &(fine_mat * &p);
-            let test = &p * &current_near_null;
-            let err = near_null - test;
-            info!("Final reconstruction error: {:.2e}", err.norm());
-            return (current_near_null, r, p, ac);
+        //if cf > target_cf {
+        let mut r = current_p.transpose_view().to_csr();
+        for (coarse_i, mut row) in r.outer_iterator_mut().enumerate() {
+            let scale: f64 = row.iter().map(|(_, v)| v.powf(2.0)).sum::<f64>().sqrt();
+            row.iter_mut().for_each(|(_, v)| *v /= scale);
+            current_near_null[coarse_i] *= scale;
         }
+        let p = r.transpose_view().to_csr();
+        let ac = &r * &(fine_mat * &p);
+        let test = &p * &current_near_null;
+        /*
+                for (truth, interp) in near_null.iter().zip(test.iter()) {
+                    println!("{:.3e} {:.3e}", truth, interp);
+                }
+        */
+        let err = near_null - test;
+        info!("Final reconstruction error: {:.2e}", err.norm());
+        return (current_near_null, r, p, ac);
+        //}
 
+        /*
         if prev_size == current_mat.rows() {
             warn!("Couldn't coarsen to desired size");
             return (
@@ -143,7 +156,9 @@ pub fn classical(
                 ac,
             );
         }
+        */
 
+        /*
         for row in current_p.outer_iterator() {
             let nci_count = row.nnz();
             if nci_count >= 40 {
@@ -152,6 +167,7 @@ pub fn classical(
                 }
             }
         }
+        */
 
         prev_size = current_mat.rows();
     }
@@ -336,14 +352,15 @@ fn classical_coarsen(
     coarse_vertices: Vec<BTreeSet<usize>>,
     near_null: &Vector,
 ) -> (CsrMatrix, Vector) {
-    let nci_max = 2;
+    let nci_max = 6;
 
     let neighbors: Vec<BTreeSet<usize>> = mat
         .outer_iterator()
         .enumerate()
         .map(|(i, row)| {
             row.iter()
-                .filter(|(j, _v)| *j != i)
+                //.filter(|(j, _v)| *j != i)
+                .filter(|(j, v)| *j != i && *v * near_null[*j] / near_null[i] < 0.0)
                 //.filter(|(j, v)| *j != i && **v < 0.0)
                 .map(|(j, _)| j)
                 .collect()
@@ -371,10 +388,12 @@ fn classical_coarsen(
     let mut strong = vec![BTreeSet::new(); fine_vertices.len()];
     for (i, fine_idx) in fine_vertices.iter().enumerate() {
         for (j, w) in mat.outer_view(*fine_idx).unwrap().iter() {
-            let strength = -(w * near_null[j]) / near_null[*fine_idx];
-            if strength.is_finite() && strength > 0.0 {
-                if *fine_idx != j {
-                    strong[i].insert(j);
+            if *fine_idx != j {
+                let strength = -(w * near_null[j]) / near_null[*fine_idx];
+                if strength.is_finite() && strength > 0.0 {
+                    if *fine_idx != j {
+                        strong[i].insert(j);
+                    }
                 }
             }
         }
@@ -383,9 +402,11 @@ fn classical_coarsen(
     let mut nc = vec![BTreeSet::new(); fine_vertices.len()];
     for i in 0..fine_vertices.len() {
         for (k, coarse_set) in coarse_vertices.iter().enumerate() {
+            /*
             if k == coarse_vertices.len() - 1 {
                 break;
             }
+            */
             if nc[i].len() >= nci_max {
                 break;
             }
@@ -424,7 +445,7 @@ fn classical_coarsen(
                 .chain(strong_prime[i].iter())
                 .copied()
                 .map(|fine_j| {
-                    -*mat.get(*fine_i, fine_j).unwrap() * near_null[fine_j] / near_null[*fine_i]
+                    -(*mat.get(*fine_i, fine_j).unwrap() * near_null[fine_j]) / near_null[*fine_i]
                 })
                 .sum()
         })
@@ -442,13 +463,17 @@ fn classical_coarsen(
 
             for j in strong_prime[i].iter().copied() {
                 let mut delta_jic = 0.0;
-                assert!(nc[i].intersection(&neighbors[j]).next().is_some());
-                for k in nc[i].intersection(&neighbors[j]).copied() {
-                    delta_jic += mat.get(j, k).unwrap() * near_null[k];
+                if neighbors[j].contains(&ic) {
+                    assert!(nc[i].intersection(&neighbors[j]).next().is_some());
+                    for k in nc[i].intersection(&neighbors[j]).copied() {
+                        if neighbors[j].contains(&k) {
+                            delta_jic += mat.get(j, k).unwrap() * near_null[k];
+                        }
+                    }
+                    //assert!(delta_jic < 0.0);
+                    delta_jic = mat.get(j, ic).unwrap() / delta_jic;
+                    //assert!(delta_jic >= 0.0);
                 }
-                //assert!(delta_jic < 0.0);
-                delta_jic = mat.get(j, ic).unwrap_or(&0.0) / delta_jic;
-                //assert!(delta_jic >= 0.0);
 
                 weight += mat.get(fine_i, j).unwrap() * near_null[j] * delta_jic;
             }
@@ -456,21 +481,192 @@ fn classical_coarsen(
             weight += a_i_ic;
             weight /= -deltas[i];
 
-            p.add_triplet(fine_i, *ic_to_coarse.get(&ic).unwrap(), weight);
+            let ic = *ic_to_coarse.get(&ic).unwrap();
+            //println!("p_i,j: {} {} {:.2e}", fine_i, ic, weight);
+            p.add_triplet(fine_i, ic, weight);
         }
     }
 
-    let p: CsrMatrix = p.to_csr();
-    let mut r = p.transpose_view().to_csr();
+    let mut p: CsrMatrix = p.to_csr();
+    let normalize_cols = false;
+    if normalize_cols {
+        let mut r = p.transpose_view().to_csr();
 
-    for (coarse_i, mut row) in r.outer_iterator_mut().enumerate() {
-        let scale: f64 = row.iter().map(|(_, v)| v.powf(2.0)).sum::<f64>().sqrt();
-        row.iter_mut().for_each(|(_, v)| *v /= scale);
-        coarse_near_null[coarse_i] *= scale;
+        for (coarse_i, mut row) in r.outer_iterator_mut().enumerate() {
+            let scale: f64 = row.iter().map(|(_, v)| v.powf(2.0)).sum::<f64>().sqrt();
+            row.iter_mut().for_each(|(_, v)| *v /= scale);
+            coarse_near_null[coarse_i] *= scale;
+        }
+        p = r.transpose_into().to_csr();
     }
-    let p = r.transpose_into().to_csr();
     //let test = &p * &coarse_near_null;
     //let err = near_null - test;
     //info!("Reconstruction error: {:.2e}", err.norm());
     (p, coarse_near_null)
+}
+
+/// Standard choice for alpha between 0.25 and 0.5:
+/// (J. W. Ruge and K. St¨uben, Algebraic multigrid (AMG), in :
+///     S. F. McCormick, ed., Multigrid Methods, vol. 3 of Frontiers in Applied Mathematics (SIAM, Philadelphia, 1987) 73–130.)
+fn pmis(
+    fine_mat: &CsrMatrix,
+    near_null: &Vector,
+    alpha: f64,
+    target_size: usize,
+) -> (Vector, CsrMatrix, CsrMatrix, CsrMatrix) {
+    trace!("Starting pmis");
+    let ndofs_fine = fine_mat.rows();
+    let mut fine_dofs = BTreeSet::new();
+    let mut all_coarse_dofs = vec![];
+    let mut remaining_dofs: BTreeSet<usize> = (0..ndofs_fine).collect();
+
+    let mut neighborhoods: Vec<BTreeSet<usize>> = fine_mat
+        .outer_iterator()
+        .enumerate()
+        .map(|(i, row)| {
+            row.iter()
+                .filter(|(j, w)| *j != i && **w * near_null[*j] / near_null[i] < 0.0)
+                .map(|(j, _)| j)
+                .collect()
+        })
+        .collect();
+
+    let mut influenced_by: Vec<BTreeSet<Strength>> = vec![BTreeSet::new(); ndofs_fine];
+    let mut influences: Vec<BTreeSet<Strength>> = vec![BTreeSet::new(); ndofs_fine];
+
+    // populate non-symmetric strength relationship with bi-directional lookup
+    for (i, row) in fine_mat.outer_iterator().enumerate() {
+        for (strength_ij, j) in row
+            .iter()
+            .filter(|(j, _)| *j != i)
+            .map(|(j, w)| (-(w * near_null[j]) / near_null[i], j))
+            .filter(|strength_ij| strength_ij.0 > 0.0)
+        {
+            influenced_by[i].insert(Strength(strength_ij, j));
+            influences[j].insert(Strength(strength_ij, i));
+        }
+    }
+
+    let mut rng = rand::rng();
+    let influence_total: Vec<f64> = influences
+        .iter()
+        .map(|strengths| {
+            if let Some(max) = strengths.first() {
+                strengths
+                    .iter()
+                    .map(|strength| strength.0 / max.0)
+                    .sum::<f64>()
+                    + rng.random_range(0.0..1e-5)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let update_neighborhoods = |neighborhoods: &mut Vec<BTreeSet<usize>>,
+                                to_remove: &BTreeSet<usize>| {
+        for i in to_remove.iter().copied() {
+            neighborhoods.push(BTreeSet::new());
+            let neighbors = neighborhoods.swap_remove(i);
+            for j in neighbors {
+                neighborhoods[j].remove(&i);
+            }
+        }
+    };
+
+    // any vertices that don't strongly influence anyone else must be F-vertices
+    // .... this is sketchy, how to interpolate them?
+    /*
+    for (i, influenced_by_i) in influences.iter().enumerate() {
+        if influenced_by_i.is_empty() {
+            fine_dofs.insert(i);
+            remaining_dofs.remove(&i);
+        }
+    }
+
+    if !fine_dofs.is_empty() {
+        warn!(
+            "{} dofs don't strongly influence any other dofs... making them F dofs",
+            fine_dofs.len()
+        );
+    }
+    // remove initial F-vertices from graph
+    update_neighborhoods(&mut neighborhoods, &fine_dofs);
+    */
+
+    //let mut iter = 0;
+    // choose F and C points until graph is covered
+    while !remaining_dofs.is_empty() {
+        /*
+        iter += 1;
+        trace!(
+            "iter {}: Starting C/F selection by Luby's with {} remaining dofs.",
+            iter,
+            remaining_dofs.len(),
+        );
+        */
+        let mut new_coarse_dofs = BTreeSet::new();
+        let mut new_fine_dofs = BTreeSet::new();
+        let mut to_remove = BTreeSet::new();
+
+        // select an independent set of new coarse dofs
+        for i in remaining_dofs.iter().copied() {
+            let score_i = influence_total[i];
+            let maximal = neighborhoods[i]
+                .iter()
+                .copied()
+                .map(|j| influence_total[j])
+                .all(|score_j| score_i > score_j);
+            if maximal {
+                new_coarse_dofs.insert(i);
+                to_remove.insert(i);
+            }
+        }
+
+        // find all fine dofs strongly influenced by selected coarse dofs
+        for i in new_coarse_dofs.iter().copied() {
+            for strength in influences[i].iter() {
+                new_fine_dofs.insert(strength.1);
+                to_remove.insert(strength.1);
+            }
+        }
+
+        if new_fine_dofs.is_empty() && new_coarse_dofs.is_empty() {
+            for i in remaining_dofs.iter().copied() {
+                print!("{:.2e} ", influence_total[i]);
+            }
+            println!();
+            panic!();
+        }
+
+        new_fine_dofs = new_fine_dofs
+            .difference(&new_coarse_dofs)
+            .copied()
+            .collect();
+        new_fine_dofs = new_fine_dofs
+            .intersection(&remaining_dofs)
+            .copied()
+            .collect();
+        to_remove = to_remove.intersection(&remaining_dofs).copied().collect();
+
+        /*
+                trace!(
+                    "{} coarse dofs and {} fine dofs selected ({} total)",
+                    new_coarse_dofs.len(),
+                    new_fine_dofs.len(),
+                    to_remove.len()
+                );
+        */
+        // update neighborhoods and remaining dofs
+        update_neighborhoods(&mut neighborhoods, &to_remove);
+        remaining_dofs = remaining_dofs.difference(&to_remove).copied().collect();
+        all_coarse_dofs.push(new_coarse_dofs);
+        fine_dofs.extend(new_fine_dofs);
+    }
+
+    let (p, coarse_near_null) = classical_coarsen(fine_mat, fine_dofs, all_coarse_dofs, near_null);
+
+    let r = p.transpose_view().to_csr();
+    let mat_coarse = &r * &(fine_mat * &p);
+    (coarse_near_null, r, p.to_csr(), mat_coarse.to_csr())
 }
