@@ -28,7 +28,7 @@
 
 using namespace std;
 using namespace mfem;
-int generate_rbms(FiniteElementSpace *fespace);
+int generate_rbms(FiniteElementSpace *fespace, char *folder);
 
 int main(int argc, char *argv[]) {
   const char *mesh_file = "../data/beam-tet.mesh";
@@ -79,7 +79,10 @@ int main(int argc, char *argv[]) {
        << endl
        << "Assembling: " << flush;
 
-  generate_rbms(fespace);
+  char filename[200];
+  const char *base = "../data/elasticity";
+  sprintf(filename, "%s/%d", base, refinements);
+  generate_rbms(fespace, filename);
   Array<int> ess_tdof_list, ess_bdr(mesh->bdr_attributes.Max());
   ess_bdr = 0;
   ess_bdr[0] = 1;
@@ -126,15 +129,18 @@ int main(int argc, char *argv[]) {
 
   cout << "Size of linear system: " << A.Height() << endl;
 
-  std::ofstream matfile("../data/elasticity/elasticity_3d.mtx", std::ios::out);
+  sprintf(filename, "%s/%d/elasticity_3d.mtx", base, refinements);
+  std::ofstream matfile(filename, std::ios::out);
   A.PrintMM(matfile);
   matfile.close();
 
-  std::ofstream vecfile("../data/elasticity/elasticity_3d.rhs", std::ios::out);
+  sprintf(filename, "%s/%d/elasticity_3d.rhs", base, refinements);
+  std::ofstream vecfile(filename, std::ios::out);
   B.Print(vecfile);
   vecfile.close();
 
-  std::ofstream bdyfile("../data/elasticity/elasticity_3d.bdy", std::ios::out);
+  sprintf(filename, "%s/%d/elasticity_3d.bdy", base, refinements);
+  std::ofstream bdyfile(filename, std::ios::out);
   ess_tdof_list.Save(bdyfile);
   bdyfile.close();
 
@@ -193,7 +199,7 @@ static void func_tz(const Vector &x, Vector &y) {
   y(2) = 1.0;
 }
 
-int generate_rbms(FiniteElementSpace *fespace) {
+int generate_rbms(FiniteElementSpace *fespace, char *folder) {
 
   // translational modes, taken from mfem/linalg/hypre.cpp line 5262
   VectorFunctionCoefficient coeff_rxy(3, func_rxy);
@@ -205,9 +211,14 @@ int generate_rbms(FiniteElementSpace *fespace) {
   rbms_rxy.ProjectCoefficient(coeff_rxy);
   rbms_ryz.ProjectCoefficient(coeff_ryz);
   rbms_rzx.ProjectCoefficient(coeff_rzx);
-  rbms_rxy.Save("../data/elasticity/rbm_rotate_xy.gf");
-  rbms_ryz.Save("../data/elasticity/rbm_rotate_yz.gf");
-  rbms_rzx.Save("../data/elasticity/rbm_rotate_zx.gf");
+
+  char filename[200];
+  sprintf(filename, "%s/%s", folder, "rbm_rotate_xy.gf");
+  rbms_rxy.Save(filename);
+  sprintf(filename, "%s/%s", folder, "rbm_rotate_yz.gf");
+  rbms_ryz.Save(filename);
+  sprintf(filename, "%s/%s", folder, "rbm_rotate_zx.gf");
+  rbms_rzx.Save(filename);
 
   // rotational modes
   VectorFunctionCoefficient coeff_tx(3, func_tx);
@@ -216,11 +227,15 @@ int generate_rbms(FiniteElementSpace *fespace) {
   GridFunction rbms_tx(fespace);
   GridFunction rbms_ty(fespace);
   GridFunction rbms_tz(fespace);
-  rbms_rxy.ProjectCoefficient(coeff_tx);
-  rbms_ryz.ProjectCoefficient(coeff_ty);
-  rbms_rzx.ProjectCoefficient(coeff_tz);
-  rbms_rxy.Save("../data/elasticity/rbm_translate_x.gf");
-  rbms_ryz.Save("../data/elasticity/rbm_translate_y.gf");
-  rbms_rzx.Save("../data/elasticity/rbm_translate_z.gf");
+  rbms_tx.ProjectCoefficient(coeff_tx);
+  rbms_ty.ProjectCoefficient(coeff_ty);
+  rbms_tz.ProjectCoefficient(coeff_tz);
+
+  sprintf(filename, "%s/%s", folder, "rbm_translate_x.gf");
+  rbms_tx.Save(filename);
+  sprintf(filename, "%s/%s", folder, "rbm_translate_y.gf");
+  rbms_ty.Save(filename);
+  sprintf(filename, "%s/%s", folder, "rbm_translate_z.gf");
+  rbms_tz.Save(filename);
   return 0;
 }

@@ -20,7 +20,7 @@ use std::{
 use crate::hierarchy::Hierarchy;
 use crate::interpolation::InterpolationType;
 use crate::parallel_ops::spmv;
-use crate::preconditioner::{LinearOperator, Multilevel, SmootherType};
+use crate::preconditioner::{build_smoother, LinearOperator, Multilevel, SmootherType};
 use crate::{CooMatrix, CsrMatrix, Vector};
 
 pub fn load_system(
@@ -48,6 +48,11 @@ pub fn load_system(
         }
     }
     let mat = mat.to_csr();
+    info!(
+        "(before bdy removal) rows: {}, nnz: {}",
+        mat.rows(),
+        mat.nnz()
+    );
 
     let b = load_vec(rhsfile).unwrap_or(Vector::from_elem(mat.cols(), 1.0));
     let rbms = load_rbms(prefix).map_or(None, |rbms| Some(rbms));
@@ -114,6 +119,13 @@ pub fn load_rbms(prefix: &str) -> Result<Vec<Vector>, Box<dyn std::error::Error>
         "rbm_translate_y.gf",
         "rbm_translate_z.gf",
     ];
+    /*
+    let rbm_suffixes = [
+        "rbm_translate_x.gf",
+        "rbm_translate_y.gf",
+        "rbm_translate_z.gf",
+    ];
+    */
 
     let mut rbms: Vec<Vector> = Vec::new();
 
@@ -161,6 +173,15 @@ pub fn delete_boundary(
     let n = mat.rows();
     let new_n = n - dofs.len();
     let mut p_mat = CooMatrix::new((n, new_n));
+    info!("DOFs length: {}, new_n: {}", dofs.len(), new_n);
+
+    /*
+    for i in 0..dofs.len() / 3 {
+        let idx = i * 3;
+        assert_eq!(dofs[idx] + 1, dofs[idx + 1]);
+        assert_eq!(dofs[idx] + 2, dofs[idx + 2]);
+    }
+    */
 
     let bdy_dofs_idx: IndexSet<_> = dofs.iter().collect();
     if coords.len() > 0 {
@@ -199,6 +220,12 @@ pub fn delete_boundary(
     let p_t = p_mat.transpose_view();
     let new_mat = &p_t * &(&mat * &p_mat);
     let new_vec = &p_t * &vec;
+
+    info!(
+        "(after bdy removal) rows: {}, nnz: {}",
+        new_mat.rows(),
+        new_mat.nnz()
+    );
     (new_mat.to_csr(), new_vec, p_t.to_csr())
 }
 
@@ -209,15 +236,39 @@ pub fn norm(vec: &Vector, mat: &CsrMatrix) -> f64 {
     temp
 }
 
-pub fn inner_product(vec_left: &Vector, vec_right: &Vector, mat: &CsrMatrix) -> f64 {
+pub fn inner_product(vec_left: &Vector, vec_right: &Vector, mat: Option<&CsrMatrix>) -> f64 {
     //let mut workspace = Vector::from(vec![0.0; vec_right.rows()]);
     //spmv_csr_dense(0.0, &mut workspace, 1.0, mat, &*vec_right);
-    let workspace = mat * vec_right;
-    vec_left.dot(&workspace)
+    if let Some(mat) = mat {
+        let workspace = mat * vec_right;
+        vec_left.dot(&workspace)
+    } else {
+        vec_left.dot(vec_right)
+    }
 }
 
 pub fn normalize(vec: &mut Vector, mat: &CsrMatrix) {
     *vec /= norm(&*vec, mat);
+}
+
+pub fn orthonormalize_mgs(basis: &mut [Vector], mat: Option<&CsrMatrix>) {
+    let n = basis.len();
+    for i in 0..n {
+        let norm_i = inner_product(&basis[i], &basis[i], mat).sqrt();
+        if norm_i < 1e-6 {
+            warn!(
+                "Basis is numerically linearly dependent. norm of vector {} is {:.2e}",
+                i, norm_i
+            );
+        }
+        basis[i] /= norm_i;
+
+        for j in i + 1..n {
+            let proj = inner_product(&basis[i], &basis[j], mat);
+            let scaled = proj * &basis[i];
+            basis[j] -= &scaled;
+        }
+    }
 }
 
 pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
@@ -225,7 +276,7 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
     let m = 10;
     let maxiter = 500;
     let xs = Array::random((n, m), Uniform::new(-1., 1.));
-    let tol = 1e-6;
+    let tol = 1e-3;
 
     let eigs = {
         let linop = |input: ArrayView2<f64>| -> Array2<f64> {
@@ -237,6 +288,7 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
         };
         let arc_mat = Arc::new(mat.clone());
 
+        /*
         let mut near_null = Vector::from_elem(mat.cols(), 1.0);
         let mut hierarchy = Hierarchy::new(arc_mat.clone());
 
@@ -245,6 +297,7 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
                 &near_null,
                 8.0,
                 InterpolationType::SmoothedAggregation((1, 0.66)),
+                1,
             );
             if near_null.len() < 100 {
                 break;
@@ -252,22 +305,15 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
         }
         let pc = Arc::new(Multilevel::new(hierarchy, true, SmootherType::L1, 3, 1));
 
+        */
+        let near_null = Arc::new(Vector::from_elem(mat.cols(), 1.0));
+        let pc = build_smoother(arc_mat.clone(), SmootherType::L1, near_null, false, 1);
         let pc = |mut input: ArrayViewMut2<f64>| {
             for mut col in input.axis_iter_mut(Axis(1)) {
                 let out = pc.apply(&col.to_owned());
                 col.assign(&out);
             }
         };
-        /*
-        let near_null = Vector::from_element(mat.cols(), 1.0);
-        let r = metis_n(&near_null, arc_mat.clone(), 16);
-        let pc = build_smoother(
-            arc_mat.clone(),
-            SmootherType::BlockGaussSeidel,
-            r.into(),
-            false,
-        );
-        */
 
         trace!("Starting LOBPCG to normalize matrix...");
         match lobpcg(
@@ -309,8 +355,10 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
         eigvec.dot(&spmv(mat, &eigvec)),
     );
     */
-    *mat /= 1e-3 * eigs[0];
-    1e-3 * eigs[0]
+    //*mat /= 1e-3 * eigs[0];
+    //1e-3 * eigs[0]
+    *mat /= eigs[0];
+    eigs[0]
 }
 
 pub fn format_duration(duration: &Duration) -> String {

@@ -11,7 +11,7 @@ readme = "README.md"
 sprs = { version = "0.11", features = ["serde", "multi_thread", "approx", "alga"] }
 sprs-ldl = { version = "0.10", features = ["sprs_suitesparse_camd", "sprs_suitesparse_ldl"] }
 approx = "0.5.1"
-ndarray = { version = "0.16", features = ["serde", "rayon", "approx", "matrixmultiply-threading"] }
+ndarray = { version = "0.16", features = ["serde", "rayon", "approx", "matrixmultiply-threading", "blas"] }
 ndarray-linalg = { version = "0.17", features = ["openblas-static"] }
 image = "0"
 indexmap = "1"
@@ -31,6 +31,7 @@ metis = { version = "0.2.1", features = ["vendored"] }
 bytemuck = "1.21.0"
 npyz = "0.8.3"
 ndarray-rand = "0.15.0"
+faer = "0.21.4"
 
 [dev-dependencies]
 test-generator = "0"

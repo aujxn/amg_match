@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
+use amg_match::hierarchy::Hierarchy;
 use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::{BlockSmootherType, SmootherType};
+use amg_match::preconditioner::{BlockSmootherType, Multilevel, SmootherType};
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -10,6 +11,7 @@ use amg_match::{
     utils::{format_duration, load_system},
 };
 use amg_match::{CsrMatrix, Vector};
+use ndarray_linalg::hstack;
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use plotters::prelude::*;
@@ -75,9 +77,9 @@ fn main() {
     let mfem_mats = [
         ("data/anisotropy", "anisotropy_2d"),
         //("data/spe10", "spe10_0"),
-        //("data/elasticity", "elasticity_3d"),
+        //("data/elasticity/4", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
-        //("data/laplace", "4"),
+        //("data/laplace", "1"),
     ];
 
     for (prefix, name) in mfem_mats {
@@ -98,6 +100,7 @@ fn main() {
 
 fn study_mfem(prefix: &str, name: &str) {
     let (mat, b, _coords, _rbms, _freedofs_map) = load_system(prefix, name, false);
+    let b = Vector::zeros(b.dim());
     let _pc = study(mat, b, name);
 }
 
@@ -132,31 +135,78 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 3;
-    let coarsening_factor = 7.5;
-    let test_iters = 15;
+    let max_components = 12;
+    //let coarsening_factor = 16.0;
+    let coarsening_factor = 6.0;
+    let test_iters = 100;
 
+    let smoother_type = SmootherType::DiagonalCompensatedBlock(
+        //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+        BlockSmootherType::GaussSeidel,
+        //BlockSmootherType::IncompleteCholesky,
+        16,
+    );
+    //let smoother_type = SmootherType::L1;
+    //let smoother_type = SmootherType::GaussSeidel;
+    let interp_type = InterpolationType::SmoothedAggregation((1, 0.66));
+    //let interp_type = InterpolationType::Classical;
     let adaptive_builder = AdaptiveBuilder::new(mat.clone())
         .with_max_components(max_components)
         .with_coarsening_factor(coarsening_factor)
-        //.with_max_level(2)
-        //.with_smoother(SmootherType::L1)
-        //.with_smoother(SmootherType::IncompleteCholesky)
-        .with_smoother(SmootherType::DiagonalCompensatedBlock(
-            //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
-            BlockSmootherType::GaussSeidel,
-            16,
-        ))
-        //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
-        //.with_interpolator(InterpolationType::UnsmoothedAggregation)
-        .with_interpolator(InterpolationType::Classical)
+        .with_smoother(smoother_type)
+        .with_interpolator(interp_type)
         .with_smoothing_steps(1)
-        .cycle_type(1)
+        .cycle_type(2)
+        //.set_block_size(3)
+        .set_near_null_dim(3)
         .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
     let timer = std::time::Instant::now();
     let (pc, _convergence_hist, _near_nulls) = adaptive_builder.build();
+
+    /* messing around with block smoothed aggregation...
+    let kernel = hstack(&near_nulls).unwrap();
+    let block_hierarchy = Hierarchy::from_partitions(
+        mat.clone(),
+        pc.components()[0].get_hierarchy().get_partitions().clone(),
+        &kernel,
+    );
+
+    info!("Hierarchy info: {:?}", block_hierarchy);
+    let smoother = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::GaussSeidel, 16);
+    //let smoother = SmootherType::L1;
+    let sweeps = 3;
+    let mu = 1;
+    let ml = Multilevel::new(block_hierarchy, true, smoother, sweeps, mu);
+
+    let epsilon = 1e-12;
+    let dim = b.len();
+    let guess = Vector::random(dim, Uniform::new(-1., 1.));
+
+    let mut solver = Iterative::new(mat.clone(), Some(guess.clone()))
+        .with_relative_tolerance(epsilon)
+        .with_max_iter(300)
+        .with_preconditioner(Arc::new(ml))
+        .with_log_interval(LogInterval::Time(Duration::from_secs(10)));
+    let complexity = pc.op_complexity();
+    info!(
+        "Starting solve with {} components and {:.2} complexity",
+        pc.components().len(),
+        complexity
+    );
+
+    let methods = [
+        IterativeMethod::ConjugateGradient,
+        IterativeMethod::StationaryIteration,
+    ];
+
+    for method in methods.iter().copied() {
+        solver = solver.with_solver(method);
+        solver.solve(&b);
+    }
+    */
+
     let mut step_size = pc.components().len() / 6;
     if step_size == 0 {
         step_size += 1;
@@ -195,13 +245,13 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
     let epsilon = 1e-12;
     let num_tests = 2;
     let mut all_results = vec![Vec::new(); num_tests];
-    let max_minutes = 30;
+    let max_minutes = 2;
 
     let dim = mat.rows();
     info!("Solving {}", name);
 
-    //let guess: Vector = random_vec(dim).normalize();
-    let guess: Vector = Vector::zeros(dim);
+    let guess = Vector::random(dim, Uniform::new(-1., 1.));
+    //let guess: Vector = Vector::zeros(dim);
 
     let log_result = |solver_type: IterativeMethod, solve_results: &Vec<SolveResults>| {
         info!("{:?} Results", solver_type);
@@ -221,12 +271,11 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
             Iterative::new(mat.clone(), Some(guess))
                 .with_relative_tolerance(epsilon)
                 .with_max_duration(Duration::from_secs(60 * max_minutes))
-                .with_solver(IterativeMethod::ConjugateGradient)
                 .with_preconditioner(Arc::new(pc))
                 .with_log_interval(LogInterval::Time(Duration::from_secs(10)))
         };
         let num_components = pc.components().len();
-        let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
+        let max_iter = 500 / ((2 * (num_components - 1)) + 1);
         let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
             .with_solver(method)
             .with_max_iter(max_iter);

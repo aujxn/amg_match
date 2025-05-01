@@ -2,10 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use amg_match::{
     adaptive::AdaptiveBuilder,
-    partitioner::InterpolationType,
+    interpolation::InterpolationType,
+    preconditioner::{BlockSmootherType, SmootherType},
     solver::{Iterative, IterativeMethod, LogInterval},
-    utils::{load_system, random_vec},
+    utils::load_system,
+    Vector,
 };
+use ndarray_rand::{rand_distr::Uniform, RandomExt};
 
 #[macro_use]
 extern crate log;
@@ -13,14 +16,16 @@ extern crate log;
 fn main() {
     pretty_env_logger::init();
 
-    let epsilon = 1e-12;
+    let epsilon = 1e-8;
     let mut results: Vec<(usize, usize, usize)> = Vec::new();
     //let mut results: Vec<(usize, usize)> = Vec::new();
     let method = IterativeMethod::StationaryIteration;
+    //let method = IterativeMethod::ConjugateGradient;
 
     for i in 2..8 {
-        let prefix = format!("data/laplace/{}", i);
-        let (mat, b, _coords, _projector) = load_system(&prefix);
+        let prefix = "data/laplace";
+        let name = format!("{}", i);
+        let (mat, b, _coords, _rbms, _projector) = load_system(&prefix, &name, false);
         let dim = mat.rows();
         //let cf = dim as f64 / 100.0;
         let cf = 8.0;
@@ -32,25 +37,37 @@ fn main() {
 
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
-            .with_smoother(amg_match::preconditioner::SmootherType::L1)
+            //.with_smoother(SmootherType::L1)
+            .with_smoother(SmootherType::DiagonalCompensatedBlock(
+                BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+                //BlockSmootherType::GaussSeidel,
+                16,
+            ))
             //.with_smoother(SmootherType::BlockL1)
-            .with_interpolator(InterpolationType::SmoothedAggregation(1))
+            //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
+            .with_interpolator(InterpolationType::Classical)
             //.with_interpolator(InterpolationType::UnsmoothedAggregation)
-            .with_smoothing_steps(3)
-            .with_max_test_iters(50)
+            .with_smoothing_steps(1)
+            .with_max_test_iters(10)
             .with_coarsening_factor(cf);
+
         let (multi_pc, _, _) = adaptive_builder.build();
         let multi_pc = Arc::new(multi_pc);
 
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
             .with_max_level(2)
-            .with_smoother(amg_match::preconditioner::SmootherType::L1)
-            //.with_smoother(SmootherType::BlockL1)
-            .with_interpolator(InterpolationType::SmoothedAggregation(1))
+            //.with_smoother(SmootherType::L1)
+            .with_smoother(SmootherType::DiagonalCompensatedBlock(
+                BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+                //BlockSmootherType::GaussSeidel,
+                16,
+            ))
+            //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
+            .with_interpolator(InterpolationType::Classical)
             //.with_interpolator(InterpolationType::UnsmoothedAggregation)
-            .with_smoothing_steps(3)
-            .with_max_test_iters(50)
+            .with_smoothing_steps(1)
+            .with_max_test_iters(10)
             .with_coarsening_factor(cf);
         let (two_pc, _, _) = adaptive_builder.build();
         let two_pc = Arc::new(two_pc);
@@ -61,9 +78,10 @@ fn main() {
         let mut two_sum = 0;
 
         for _ in 0..avg {
-            let x: Vector = random_vec(dim);
+            let x = Vector::random(dim, Uniform::new(-1., 1.));
+            multi_pc.components()[0].get_hierarchy().print_table();
             let multi_solver = Iterative::new(mat.clone(), Some(x))
-                .with_tolerance(epsilon)
+                .with_relative_tolerance(epsilon)
                 .with_max_iter(max_iter)
                 .with_solver(method)
                 .with_preconditioner(multi_pc.clone())
@@ -78,9 +96,9 @@ fn main() {
             }
             multi_sum += multi_solve_result.iterations;
 
-            let x: Vector = random_vec(dim);
+            let x = Vector::random(dim, Uniform::new(-1., 1.));
             let two_solver = Iterative::new(mat.clone(), Some(x))
-                .with_tolerance(epsilon)
+                .with_relative_tolerance(epsilon)
                 .with_max_iter(max_iter)
                 .with_solver(method)
                 .with_preconditioner(two_pc.clone())

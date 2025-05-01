@@ -1,21 +1,20 @@
 import pyvista as pv
 import numpy as np
+import glob
 
-mesh = pv.read("mesh.vtk")
+i = 2
+mesh = pv.read(f"{i}.vtk")
 print("Number of points:", mesh.n_points)
 
-mesh = pv.UnstructuredGrid("mesh.vtk")  # or pv.read("mesh.vtk")
+mesh = pv.UnstructuredGrid(f"{i}.vtk")  # or pv.read("mesh.vtk")
 
-names = ["solution", "error", "residual", "interp_x_vals", "p_pt_residual"]
-
-for i in range(10):
-    names.append( f"near_null-{i}")
-
-for i in range(50):
-    names.append(f"basis-{i}")
+names = ["smooth_near_null.npz", "c_points.npz"]
+basis_fine = glob.glob("basis_fine_*.npz")
+basis_coarse = glob.glob("basis_coarse_*.npz")
+names = names + basis_fine + basis_coarse
 
 for func in names:
-    func_data = np.load(f"../{func}.npz")
+    func_data = np.load(func)
     mesh.point_data[func] = func_data
 
 current_index = 0
@@ -31,39 +30,57 @@ warped_mesh = mesh.warp_by_scalar(
 
 plotter.add_mesh(
     warped_mesh, 
-    scalars=names[current_index], 
-    show_edges=False,
-    cmap="inferno"
+    show_edges=True,
+    scalars=names[0]
 )
 
 plotter.add_scalar_bar(names[current_index])
 
-def toggle_scalar():
+def toggle_scalar(fwd):
     global current_index
     plotter.clear()
 
-    current_index = (current_index + 1) % len(names)
-    name = names[current_index]
-    
-    warped_mesh = mesh.warp_by_scalar(
-        scalars=name,
-        factor=1.0 / np.max(np.abs(mesh.point_data[name])),       
-        normal=(0, 0, 1),
-        inplace=False   
-    )
+    if fwd:
+        current_index = (current_index + 1) % len(names)
+    else:
+        current_index = (current_index - 1)
+        if current_index < 0:
+            current_index = len(names) - 1
 
-    plotter.add_mesh(
-        warped_mesh,
-        scalars=name,
-        show_edges=False,
-        cmap="inferno"
-    )
+    name = names[current_index]
+
+    if current_index == 0:
+        warped_mesh = mesh.warp_by_scalar(
+            scalars=name,
+            factor=1.0 / np.max(np.abs(mesh.point_data[name])),       
+            normal=(0, 0, 1),
+            inplace=False   
+        )
+
+        plotter.add_mesh(
+            warped_mesh,
+            show_edges=True,
+            scalars=name,
+        )
+    else:
+        plotter.add_mesh(
+            mesh,
+            scalars=name,
+            style="points",
+            render_points_as_spheres=True,
+            point_size=20,
+            opacity="linear",
+            #cmap="inferno"
+        )
+        plotter.add_mesh(
+            mesh,
+            style="wireframe",
+        )
 
     plotter.add_scalar_bar(title=name)
 
 # Register the callback: press 't' to toggle
-plotter.add_key_event("t", toggle_scalar)
+plotter.add_key_event("t", lambda: toggle_scalar(True))
+plotter.add_key_event("T", lambda: toggle_scalar(False))
 
 plotter.show()
-
-

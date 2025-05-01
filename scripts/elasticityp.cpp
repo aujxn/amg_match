@@ -1,6 +1,8 @@
 #include "mfem.hpp"
 #include <fstream>
 #include <iostream>
+#include <mfem/linalg/solvers.hpp>
+#include <ostream>
 
 using namespace std;
 using namespace mfem;
@@ -13,6 +15,7 @@ int main(int argc, char *argv[]) {
   Hypre::Init();
 
   const char *mesh_file = "../data/meshes/beam-tet.mesh";
+  const char *solver_method = "SLI";
   int order = 1;
   bool amg_elast = 0;
 
@@ -35,6 +38,7 @@ int main(int argc, char *argv[]) {
                  "Device configuration string, see Device::Configure().");
   args.AddOption(&refinements, "-r", "--refinements",
                  "How many times to uniform refine");
+  args.AddOption(&solver_method, "-s", "--solver", "Either CG or SLI");
   args.Parse();
   if (!args.Good()) {
     if (myid == 0) {
@@ -163,24 +167,43 @@ int main(int argc, char *argv[]) {
 
   HypreBoomerAMG *amg = new HypreBoomerAMG(A);
 
-  // amg->SetElasticityOptions(fespace, false);
-  // amg->SetElasticityOptions(fespace);
-  //  using this set system options seems to be ok though, still not a great PC
-  //  though...
-  amg->SetSystemsOptions(dim, Ordering::byVDIM == ordering);
+  if (amg_elast) {
+    amg->SetElasticityOptions(fespace, false);
+  } else {
+    // amg->SetElasticityOptions(fespace);
+    //  using this set system options seems to be ok though, still not a great
+    //  PC though...
+    amg->SetSystemsOptions(dim, Ordering::byVDIM == ordering);
+  }
 
-  CGSolver solver(MPI_COMM_WORLD);
-  // SLISolver solver(MPI_COMM_WORLD);
-  solver.SetRelTol(1e-12);
-  solver.SetMaxIter(10000);
+  IterativeSolver *solver;
+  if (strcmp(solver_method, "CG") == 0) {
+    solver = new CGSolver(MPI_COMM_WORLD);
+  } else if (strcmp(solver_method, "SLI") == 0) {
+    solver = new SLISolver(MPI_COMM_WORLD);
+  } else {
+    cout << "Bad solver choice: " << solver_method << endl;
+    cout << "Must be either CG or SLI" << endl;
+    return -1;
+  }
+  solver->SetRelTol(1e-12);
+  solver->SetMaxIter(10000);
   mfem::IterativeSolver::PrintLevel pl;
-  solver.SetPrintLevel(pl.Summary());
-  solver.SetPreconditioner(*amg);
-  solver.SetOperator(A);
-  solver.Mult(B, X);
+  solver->SetPrintLevel(pl.Summary());
+  solver->SetPreconditioner(*amg);
+  solver->SetOperator(A);
 
+  StopWatch timer;
+  if (Mpi::Root()) {
+    cout << "Size of linear system: " << A.Height() << endl;
+    timer.Start();
+  }
+  solver->Mult(B, X);
   a->RecoverFEMSolution(X, *b, x);
-
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (Mpi::Root()) {
+    cout << "Solved in: " << timer.RealTime() << endl;
+  }
   delete amg;
   delete a;
   delete b;
@@ -189,6 +212,7 @@ int main(int argc, char *argv[]) {
     delete fec;
   }
   delete pmesh;
+  delete solver;
 
   return 0;
 }

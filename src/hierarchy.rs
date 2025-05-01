@@ -5,9 +5,11 @@ use std::sync::Arc;
 use ndarray_linalg::Norm;
 use sprs::is_symmetric;
 
-use crate::interpolation::{classical, smoothed_aggregation, InterpolationType};
-use crate::partitioner::{modularity_matching_partition, Partition};
-use crate::{CsrMatrix, Vector};
+use crate::interpolation::{
+    classical, smoothed_aggregation, smoothed_aggregation2, InterpolationInfo, InterpolationType,
+};
+use crate::partitioner::{cf_aggregation, modularity_matching_partition, Partition};
+use crate::{CsrMatrix, Matrix, Vector};
 
 #[derive(Clone)]
 pub struct Hierarchy {
@@ -17,6 +19,7 @@ pub struct Hierarchy {
     coarse_mats: Vec<Arc<CsrMatrix>>,
     partitions: Vec<Arc<Partition>>,
     near_nulls: Vec<Arc<Vector>>,
+    pub vdims: Vec<usize>,
 }
 
 impl fmt::Debug for Hierarchy {
@@ -56,7 +59,122 @@ impl Hierarchy {
             coarse_mats: Vec::new(),
             partitions: Vec::new(),
             near_nulls: Vec::new(),
+            vdims: Vec::new(),
         }
+    }
+
+    pub fn consolidate(&mut self, cf: f64) {
+        let mut new_restrictions = Vec::new();
+        let mut new_interpolations = Vec::new();
+        let mut new_coarse_mats = Vec::new();
+        let mut new_near_nulls = Vec::new();
+        let mut new_vdims = Vec::new();
+        let new_partitions = Vec::new();
+
+        let mut old_level = 0;
+        let mut fine_nnz = self.mat.nnz() as f64;
+        while old_level < self.coarse_mats.len() {
+            new_near_nulls.push(self.near_nulls[old_level].clone());
+            new_vdims.push(self.vdims[old_level]);
+            let mut new_p = self.interpolations[old_level].clone();
+            //let mut current_cf = new_p.rows() as f64 / new_p.cols() as f64;
+            let mut current_cf = fine_nnz / self.coarse_mats[old_level].nnz() as f64;
+            old_level += 1;
+            //while current_cf < cf && old_level < self.coarse_mats.len() {
+            while current_cf < 1.5 && old_level < self.coarse_mats.len() {
+                new_p = Arc::new(&*new_p * &*self.interpolations[old_level]);
+                //current_cf = new_p.rows() as f64 / new_p.cols() as f64;
+                current_cf = fine_nnz / self.coarse_mats[old_level].nnz() as f64;
+                old_level += 1;
+            }
+            let new_p = new_p.to_csr();
+            let new_r = new_p.transpose_view().to_csr();
+            new_interpolations.push(Arc::new(new_p));
+            new_restrictions.push(Arc::new(new_r));
+            new_coarse_mats.push(self.coarse_mats[old_level - 1].clone());
+        }
+        self.interpolations = new_interpolations;
+        self.restrictions = new_restrictions;
+        self.coarse_mats = new_coarse_mats;
+        self.partitions = new_partitions;
+        self.vdims = new_vdims;
+        self.near_nulls = new_near_nulls;
+    }
+
+    pub fn push_level(
+        &mut self,
+        mat: Arc<CsrMatrix>,
+        r: Arc<CsrMatrix>,
+        p: Arc<CsrMatrix>,
+        partition: Arc<Partition>,
+        near_null: Arc<Vector>,
+        vdim: usize,
+    ) {
+        self.coarse_mats.push(mat);
+        self.restrictions.push(r);
+        self.interpolations.push(p);
+        self.partitions.push(partition);
+        self.near_nulls.push(near_null);
+        self.vdims.push(vdim);
+    }
+
+    pub fn from_partitions(
+        fine_mat: Arc<CsrMatrix>,
+        partitions: Vec<Arc<Partition>>,
+        near_null: &Matrix,
+    ) -> Self {
+        let mut mat = (*fine_mat).clone();
+        let mut restrictions = Vec::new();
+        let mut interpolations = Vec::new();
+        let mut coarse_mats = Vec::new();
+        let mut near_nulls = Vec::new();
+        let mut vdims = Vec::new();
+        let mut next_near_null = near_null.clone();
+        let mut block_size = 1;
+        vdims.push(block_size);
+
+        let mut collapsed = Vector::zeros(next_near_null.nrows());
+        for near_null in next_near_null.columns().into_iter() {
+            collapsed = collapsed + near_null;
+        }
+        near_nulls.push(Arc::new(collapsed));
+
+        for partition in partitions.iter() {
+            let (coarse_near_null, r, p, mat_coarse) =
+                smoothed_aggregation2(&mat, &**partition, block_size, &next_near_null);
+            mat = mat_coarse.clone();
+            coarse_mats.push(Arc::new(mat_coarse));
+            interpolations.push(Arc::new(p));
+            restrictions.push(Arc::new(r));
+            next_near_null = coarse_near_null.clone();
+            block_size = next_near_null.ncols();
+            //near_nulls.push(Arc::new(next_near_null.column(0).to_owned()));
+            let mut collapsed = Vector::zeros(next_near_null.nrows());
+            for near_null in next_near_null.columns().into_iter() {
+                collapsed = collapsed + near_null;
+            }
+            near_nulls.push(Arc::new(collapsed));
+            vdims.push(block_size);
+        }
+
+        Self {
+            mat: fine_mat,
+            restrictions,
+            interpolations,
+            coarse_mats,
+            partitions,
+            near_nulls,
+            vdims,
+        }
+    }
+
+    pub fn print_table(&self) {
+        let infos = self
+            .interpolations
+            .iter()
+            .map(|p| InterpolationInfo::new(p))
+            .collect();
+        InterpolationInfo::display(&infos);
     }
 
     /// Total nnz / finest level nnz
@@ -85,6 +203,7 @@ impl Hierarchy {
         near_null: &Vector,
         coarsening_factor: f64,
         interpolation_type: InterpolationType,
+        block_size: usize,
     ) -> Vector {
         let fine_mat = self
             .get_coarse_mats()
@@ -103,13 +222,31 @@ impl Hierarchy {
                     near_null,
                     coarsening_factor,
                     Some(coarsening_factor.ceil() as usize),
+                    block_size,
                 );
 
                 /*
-                let (partition, _coarse_indices) =
-                    cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
+                let mut max_w: Vec<Option<usize>> = vec![None; partition.agg_to_node.len()];
+                for (fine_idx, coarse_idx) in partition.node_to_agg.iter().enumerate() {
+                    match max_w[*coarse_idx] {
+                        None => max_w[*coarse_idx] = Some(fine_idx),
+                        Some(other_fine_idx) => {
+                            if near_null[fine_idx].abs() > near_null[other_fine_idx].abs() {
+                                max_w[*coarse_idx] = Some(fine_idx);
+                            }
+                        }
+                    }
+                }
+                let coarse_indices: Vec<usize> = max_w
+                    .into_iter()
+                    .map(|option_i| option_i.expect("All aggregates should have a max..."))
+                    .collect();
                 */
 
+                /*
+                let (partition, coarse_indices) =
+                    cf_aggregation(fine_mat.clone(), near_null, coarsening_factor);
+                */
                 let partition = Arc::new(partition);
                 self.partitions.push(partition.clone());
                 smoothed_aggregation(
@@ -119,6 +256,7 @@ impl Hierarchy {
                     smoothing_steps,
                     jacobi_weight,
                 )
+                //smoothed_aggregation2(&fine_mat, &partition, near_null, &coarse_indices)
             }
             InterpolationType::UnsmoothedAggregation => {
                 let partition = modularity_matching_partition(
@@ -126,6 +264,7 @@ impl Hierarchy {
                     near_null,
                     coarsening_factor,
                     Some(coarsening_factor.ceil() as usize),
+                    block_size,
                 );
 
                 /*
@@ -155,6 +294,7 @@ impl Hierarchy {
         self.coarse_mats.push(Arc::new(mat_coarse));
         self.interpolations.push(Arc::new(p));
         self.restrictions.push(Arc::new(r));
+        self.vdims.push(block_size);
 
         coarse_near_null
     }
@@ -186,6 +326,11 @@ impl Hierarchy {
     /// Get a reference to the P^T matrices Vec.
     pub fn get_interpolations(&self) -> &Vec<Arc<CsrMatrix>> {
         &self.interpolations
+    }
+
+    /// Get a reference to the partitions Vec.
+    pub fn get_partitions(&self) -> &Vec<Arc<Partition>> {
+        &self.partitions
     }
 
     pub fn get_near_nulls(&self) -> &Vec<Arc<Vector>> {

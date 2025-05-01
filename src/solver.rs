@@ -6,10 +6,11 @@ use crate::{
     utils::format_duration,
 };
 use crate::{CsrMatrix, Vector};
-use ndarray::{Array2, OwnedRepr};
+use ndarray::{par_azip, Array2, OwnedRepr};
 use ndarray_linalg::{cholesky::*, Norm};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -271,8 +272,10 @@ impl Iterative {
     fn stationary(&self, rhs: &Vector, x: &mut Vector) -> SolveInfo {
         let mat = &*self.mat;
         let mut r = rhs - &spmv(mat, &*x);
-        self.preconditioner.apply_mut(&mut r);
         let norm0 = r.norm();
+        self.preconditioner.apply_mut(&mut r);
+        //let norm0 = r.norm();
+        //let mut r_norm = norm0;
         let convergence_criterion =
             f64::max(norm0 * self.relative_tolerance, self.absolute_tolerance);
 
@@ -286,17 +289,18 @@ impl Iterative {
         let start_time = Instant::now();
 
         loop {
-            self.preconditioner.apply_mut(&mut r);
-            let r_norm = r.norm();
             *x += &r;
             r = rhs - spmv(mat, &*x);
             iter += 1;
+            let r_norm = r.norm();
+            self.preconditioner.apply_mut(&mut r);
+            //r_norm = r.norm();
 
             let ratio = r_norm / norm0;
             self.check_log_interval(iter, &mut last_log, &start_time, r_norm, ratio);
-            if iter > 1 {
-                convergence_history.push(ratio);
-            }
+            //if iter > 1 {
+            convergence_history.push(ratio);
+            //}
 
             if r_norm < convergence_criterion {
                 return SolveInfo {
@@ -334,7 +338,7 @@ impl Iterative {
         for _ in 0..max_iter {
             let mut r = rhs - spmv(mat, &*x);
             #[cfg(debug_assertions)]
-            if r.norm() < f64::EPSILON / 2.0 {
+            if r.norm() < f64::EPSILON.powf(2.0) / 2.0 {
                 warn!(
                     "Smoother application early termination because residual norm: {:.2e}",
                     r.norm()
@@ -360,6 +364,7 @@ impl Iterative {
 
         let mat = &*self.mat;
         let mut r = rhs - spmv(mat, &*x);
+        let r0 = r.norm();
 
         let mut r_bar = r.clone();
         self.preconditioner.apply_mut(&mut r_bar);
@@ -407,6 +412,7 @@ impl Iterative {
         }
 
         let mut p = r_bar.clone();
+        let mut g;
 
         let mut last_log = Instant::now();
         let mut iter = 0;
@@ -430,17 +436,21 @@ impl Iterative {
 
             iter += 1;
 
-            let mut g = spmv(mat, &p);
+            g = spmv(mat, &p);
             let alpha = d / p.dot(&g);
             if alpha < 0.0 {
                 error!("alpha is negative: {alpha}");
             }
-            g *= alpha;
-            *x += &(alpha * &p);
+            //g *= alpha;
+            g.par_mapv_inplace(|gi| gi * alpha);
+            //*x += &(alpha * &p);
+            par_azip!((a in &mut *x, b in &p) *a += alpha * b);
 
-            r -= &g;
+            //r -= &g;
+            par_azip!((a in &mut r, b in &g) *a -= b);
 
-            r_bar.clone_from(&r);
+            //r_bar.clone_from(&r);
+            par_azip!((a in &mut r_bar, &b in &r) *a = b);
             self.preconditioner.apply_mut(&mut r_bar);
             let d_old = d;
             d = r.dot(&r_bar);
@@ -462,7 +472,9 @@ impl Iterative {
                 };
             }
 
-            let ratio = (d / d0).sqrt();
+            //let ratio = (d / d0).sqrt();
+            r = rhs - spmv(mat, &x);
+            let ratio = r.norm() / r0;
             self.check_log_interval(iter, &mut last_log, &start_time, d.sqrt(), ratio);
             convergence_history.push(ratio);
 
@@ -480,8 +492,10 @@ impl Iterative {
             }
 
             let beta = d / d_old;
-            p *= beta;
-            p += &r_bar;
+            //p *= beta;
+            p.par_mapv_inplace(|v| v * beta);
+            //p += &r_bar;
+            par_azip!((a in &mut p, b in &r_bar) *a += b);
         }
     }
 

@@ -1,4 +1,4 @@
-use amg_match::{preconditioner::Application, solver::SolveInfo};
+use amg_match::solver::SolveInfo;
 use log::trace;
 use plotters::prelude::*;
 use regex::Regex;
@@ -13,9 +13,11 @@ struct SolveResults {
 }
 
 fn main() {
+    pretty_env_logger::init();
     let titles = [
-        //"anisotropic-2d_StationaryIteration_Multiplicative_notonlypos",
-        "spe10_StationaryIteration_Multiplicative_notonlypos",
+        "anisotropy_2d_StationaryIteration",
+        "anisotropy_2d_ConjugateGradient",
+        //"spe10_StationaryIteration",
     ];
     /*
     let boomer_paths = ["images/anisotropy_2d_boomer.txt", "images/spe10_boomer.txt"];
@@ -25,8 +27,10 @@ fn main() {
         plot_test_solve(title, &data, &boomer_data, Application::Multiplicative);
     }
     */
-    let data = load_plot_raw_data(titles[0]);
-    plot_test_solve_simple(titles[0], &data);
+    for title in titles {
+        let data = load_plot_raw_data(title);
+        plot_test_solve_simple(title, &data);
+    }
 }
 
 /*
@@ -115,8 +119,8 @@ fn plot_test_solve_simple(title: &str, data: &Vec<SolveResults>) {
     let root = BitMapBackend::new(&filename, (1000, 400)).into_drawing_area();
     root.fill(&WHITE).unwrap();
 
-    let min_rr_norm = 1e-7;
-    let max_vcycles = 225.0;
+    let min_rr_norm = 1e-12;
+    let max_vcycles = 100.0;
 
     let data: Vec<(usize, Vec<(f64, f64)>)> = data
         .iter()
@@ -200,10 +204,13 @@ fn plot_test_solve_simple(title: &str, data: &Vec<SolveResults>) {
             stroke_width: 3,
         };
 
+        /*
         let mut step = data.len() / 10;
         if step == 0 {
             step = 1;
         }
+        */
+        let step = 1;
         chart_context
             .draw_series(
                 data.iter()
@@ -228,12 +235,7 @@ fn plot_test_solve_simple(title: &str, data: &Vec<SolveResults>) {
     trace!("Plotting filename: {}", filename);
 }
 
-fn plot_test_solve(
-    title: &str,
-    data: &Vec<SolveResults>,
-    boomer: &BoomerData,
-    application: Application,
-) {
+fn plot_test_solve(title: &str, data: &Vec<SolveResults>, boomer: &BoomerData) {
     let filename = format!("/{}_final.png", title);
     //let filename = "temp.png";
     let root = BitMapBackend::new(&filename, (900, 600)).into_drawing_area();
@@ -252,12 +254,11 @@ fn plot_test_solve(
                     .iter()
                     .filter(|rr_norm| **rr_norm > min_rr_norm)
                     .enumerate()
-                    .map(|(i, residual)| match application {
-                        Application::Multiplicative => (
+                    .map(|(i, residual)| {
+                        (
                             ((i + 1) * ((2 * (solve_result.num_components - 1)) + 1)) as f64,
                             *residual,
-                        ),
-                        Application::Random => ((i + 1) as f64, *residual),
+                        )
                     })
                     //.filter(|(cycles, _)| cycles < 2000.0)
                     .collect(),

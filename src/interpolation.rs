@@ -1,10 +1,16 @@
+use rayon::prelude::ParallelSliceMut;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
-use std::usize;
+use std::{f64, usize};
 
-use ndarray_linalg::Norm;
+use chrono::offset;
+use ndarray::{concatenate, stack, ArrayBase, Axis};
+use ndarray_linalg::{hstack, InverseInto, Norm, QRInto};
 use rand::Rng;
 
+use crate::preconditioner::L1;
+use crate::utils::normalize_mat;
+use crate::Matrix;
 use crate::{partitioner::Partition, CooMatrix, CsrMatrix, Vector};
 
 #[derive(Copy, Clone, Debug)]
@@ -12,6 +18,143 @@ pub enum InterpolationType {
     UnsmoothedAggregation,
     SmoothedAggregation((usize, f64)),
     Classical,
+}
+
+pub struct InterpolationInfo {
+    pub min_entries_per_row: usize,
+    pub max_entries_per_row: usize,
+    pub avg_entries_per_row: f64,
+    pub min_weight: f64,
+    pub max_weight: f64,
+    pub min_rowsum: f64,
+    pub max_rowsum: f64,
+}
+
+impl InterpolationInfo {
+    pub fn new(p: &CsrMatrix) -> Self {
+        let mut min_entries_per_row = usize::MAX;
+        let mut max_entries_per_row = 0;
+        let mut max_weight = f64::MIN;
+        let mut min_weight = f64::MAX;
+        let mut max_rowsum = f64::MIN;
+        let mut min_rowsum = f64::MAX;
+
+        for (_, row) in p.outer_iterator().enumerate() {
+            let row_entries = row.data().len();
+            let rowsum: f64 = row.data().iter().sum();
+
+            if row_entries > max_entries_per_row {
+                max_entries_per_row = row_entries;
+            }
+
+            if row_entries < min_entries_per_row {
+                min_entries_per_row = row_entries;
+            }
+
+            if rowsum > max_rowsum {
+                max_rowsum = rowsum;
+            }
+
+            if rowsum < min_rowsum {
+                min_rowsum = rowsum;
+            }
+
+            for (_, w) in row.iter() {
+                if *w > max_weight {
+                    max_weight = *w;
+                }
+                if *w < min_weight {
+                    min_weight = *w;
+                }
+            }
+        }
+        let avg_entries_per_row = (p.data().len() as f64) / (p.rows() as f64);
+
+        Self {
+            min_entries_per_row,
+            max_entries_per_row,
+            avg_entries_per_row,
+            min_weight,
+            max_weight,
+            min_rowsum,
+            max_rowsum,
+        }
+    }
+
+    pub fn display(interpolations: &Vec<Self>) {
+        println!("Interpolation Matrix Information:");
+        println!();
+
+        println!(
+            "{:>4}  {:>24}  {:>20}  {:>20}",
+            "", "entries / row", "weight values", "rowsums"
+        );
+
+        println!(
+            "{:>4}  {:>8}  {:>8}  {:>8}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "lev", "min", "max", "avg", "min", "max", "min", "max"
+        );
+
+        println!(
+            "{:-<4}  {:-<8}  {:-<8}  {:-<8}  {:-<10}  {:-<10}  {:-<10}  {:-<10}",
+            "", "", "", "", "", "", "", "",
+        );
+
+        // Now print each row of data
+        for (level, info) in interpolations.iter().enumerate() {
+            println!(
+                "{:>4}  {:>8}  {:>8}  {:>8.1}  {:>10.2e}  {:>10.2e}  {:>10.2e}  {:>10.2e}",
+                level,
+                info.min_entries_per_row,
+                info.max_entries_per_row,
+                info.avg_entries_per_row,
+                info.min_weight,
+                info.max_weight,
+                info.min_rowsum,
+                info.max_rowsum,
+            );
+        }
+    }
+}
+
+pub fn smooth_interpolation(
+    mat: &CsrMatrix,
+    p: &mut CsrMatrix,
+    smoothing_steps: usize,
+    jacobi_weight: f64,
+) {
+    //let l1 = L1::new(mat);
+
+    let mut diag_inv = CsrMatrix::eye(mat.rows());
+    for (smoother_diag, mat_diag) in diag_inv
+        .data_mut()
+        .iter_mut()
+        .zip(mat.diag_iter().map(|v| v.unwrap()))
+    //.zip(l1.l1_inverse.iter())
+    {
+        *smoother_diag = jacobi_weight * mat_diag.recip();
+        //*smoother_diag = *mat_diag;
+    }
+
+    for _ in 0..smoothing_steps {
+        let ap = mat * &*p;
+        let smoothed = &diag_inv * &ap;
+        *p = &*p - &smoothed;
+    }
+    *p = p.to_csr();
+
+    /*
+    let mut p_pruned = CooMatrix::new((p.rows(), p.cols()));
+    let max_w = 4;
+    let delta = 0.2;
+    for (i, row) in p.outer_iterator().enumerate() {
+        if row.data().len() <= max_w {
+            for (j, v) in row.iter() {
+                p_pruned.add_triplet(i, j, *v);
+            }
+        }
+    }
+    */
 }
 
 pub fn smoothed_aggregation(
@@ -25,14 +168,6 @@ pub fn smoothed_aggregation(
     let n_coarse = partition.agg_to_node.len();
 
     let mut coarse_near_null: Vector = Vector::zeros(n_coarse);
-    let mut diag_inv = CsrMatrix::eye(n_fine);
-    for (smoother_diag, mat_diag) in diag_inv
-        .data_mut()
-        .iter_mut()
-        .zip(fine_mat.diag_iter().map(|v| v.unwrap()))
-    {
-        *smoother_diag = jacobi_weight * mat_diag.recip();
-    }
 
     for (coarse_i, agg) in partition.agg_to_node.iter().enumerate() {
         let r: f64 = agg.iter().map(|i| near_null[*i].powf(2.0)).sum();
@@ -49,11 +184,162 @@ pub fn smoothed_aggregation(
     }
     let mut p = p.to_csr();
 
-    for _ in 0..smoothing_steps {
-        let ap = fine_mat * &p;
-        let smoothed = &diag_inv * &ap;
-        p = &p - &smoothed;
+    smooth_interpolation(fine_mat, &mut p, smoothing_steps, jacobi_weight);
+
+    let r = p.transpose_view().to_csr();
+    let mat_coarse = &r * &(fine_mat * &p);
+    (coarse_near_null, r, p.to_csr(), mat_coarse.to_csr())
+}
+
+pub fn block_jacobi(mat: &CsrMatrix, block_size: usize, p: &CsrMatrix) -> CsrMatrix {
+    let ndofs = mat.rows();
+    let n_blocks = ndofs / block_size;
+    let mut d_inv = CooMatrix::new((ndofs, ndofs));
+
+    for block_idx in 0..n_blocks {
+        let start = block_idx * block_size;
+
+        let mut block = Matrix::zeros((block_size, block_size));
+        for i in 0..block_size {
+            for j in 0..block_size {
+                if let Some(v) = mat.get(start + i, start + j) {
+                    block[[i, j]] = *v;
+                }
+            }
+        }
+        block = block.inv_into().unwrap();
+        for i in 0..block_size {
+            for j in 0..block_size {
+                d_inv.add_triplet(start + i, start + j, block[[i, j]]);
+            }
+        }
     }
+
+    let d_inv = d_inv.to_csr();
+    let mut d_inv_a = &d_inv * mat;
+    //let norm = normalize_mat(&mut d_inv_a);
+    //info!("Norm of D^-1 A: {:.2e}", norm);
+    //d_inv_a *= 4.0 / 3.0;
+    d_inv_a *= 0.66;
+    let smoothed = &d_inv_a * &*p;
+    let new_p = &*p - &smoothed;
+    let new_p = new_p.to_csr();
+    new_p
+
+    /* TODO need to rescale rows if trimming....
+    let max_rowsize = 99999999;
+    let mut trimmed = CooMatrix::new((new_p.rows(), new_p.cols()));
+    for (i, row) in new_p.outer_iterator().enumerate() {
+        let mut cutoff = 0.0;
+        if row.data().len() > max_rowsize {
+            let mut weights = Vec::from(row.data());
+            weights.par_sort_by(|w1, w2| w2.abs().partial_cmp(&w1.abs()).unwrap());
+            cutoff = weights[max_rowsize].abs();
+        }
+
+        for (j, w) in row.iter() {
+            if w.abs() > cutoff {
+                trimmed.add_triplet(i, j, *w);
+            }
+        }
+    }
+
+    trimmed.to_csr()
+    */
+}
+
+pub fn smoothed_aggregation2(
+    fine_mat: &CsrMatrix,
+    partition: &Partition,
+    block_size: usize,
+    near_null: &Matrix,
+) -> (Matrix, CsrMatrix, CsrMatrix, CsrMatrix) {
+    let n_fine = fine_mat.rows();
+    let n_coarse = partition.agg_to_node.len();
+    let k = near_null.ncols();
+    let mut coarse_near_null = Matrix::zeros((partition.agg_to_node.len() * k, k));
+
+    /*
+    let mut diag_inv = CsrMatrix::eye(n_fine);
+    for (smoother_diag, mat_diag) in diag_inv
+        .data_mut()
+        .iter_mut()
+        .zip(fine_mat.diag_iter().map(|v| v.unwrap()))
+    {
+        *smoother_diag = 0.66 * mat_diag.recip();
+    }
+    */
+
+    let mut p = CooMatrix::new((n_fine, n_coarse * k));
+    for (coarse_idx, nodes) in partition.agg_to_node.iter().enumerate() {
+        let local_rows = nodes.len();
+        assert!(local_rows >= k);
+        /*
+        if local_rows < k {
+            local_rows = k;
+        }
+        */
+        let mut local = Matrix::zeros((local_rows, k));
+        for (local_j, j) in nodes.iter().copied().enumerate() {
+            for (dest, src) in local.row_mut(local_j).into_iter().zip(near_null.row(j)) {
+                *dest = *src;
+            }
+        }
+
+        //println!("\n{:#.1}", local);
+        let (q, r) = local.qr_into().unwrap();
+        assert_eq!(q.ncols(), k);
+        //println!("-----\n{:#.1}", q);
+        //println!("-----\n{:#.1}", r);
+        /*
+        if q.ncols() < k {
+            let extension = Matrix::from_elem((q.nrows(), k - q.ncols()), 1.0);
+            q = concatenate(Axis(1), &[q.view(), extension.view()]).unwrap();
+        }
+        */
+
+        for (i, r_row) in r.rows().into_iter().enumerate() {
+            for (dest, src) in coarse_near_null
+                .row_mut(coarse_idx * k + i)
+                .iter_mut()
+                .zip(r_row)
+            {
+                *dest = *src;
+            }
+        }
+
+        for (local_i, fine_i) in nodes.iter().copied().enumerate() {
+            let col_start = k * coarse_idx;
+            for (offset_j, src) in q.row(local_i).iter().enumerate() {
+                p.add_triplet(fine_i, col_start + offset_j, *src);
+            }
+        }
+    }
+    let mut p = p.to_csr();
+
+    //let presmooth_info = InterpolationInfo::new(&p);
+    //InterpolationInfo::display(&vec![presmooth_info]);
+
+    /*
+    let dense = p.to_dense();
+    println!("{:#.1}", dense);
+    */
+    /*
+    let ap = fine_mat * &p;
+    let smoothed = &diag_inv * &ap;
+    p = &p - &smoothed;
+    */
+    //if block_size == 6 {
+    p = block_jacobi(fine_mat, block_size, &p);
+    //}
+    //
+    //let postsmooth_info = InterpolationInfo::new(&p);
+    //InterpolationInfo::display(&vec![postsmooth_info]);
+
+    /*
+    let dense = p.to_dense();
+    println!("{:#.1}", dense);
+    */
 
     let r = p.transpose_view().to_csr();
     let mat_coarse = &r * &(fine_mat * &p);
@@ -104,20 +390,21 @@ pub fn classical(
     let mut current_p = CsrMatrix::eye(fine_mat.rows());
     let mut current_near_null = near_null.clone();
     let mut prev_size = current_mat.rows();
-    //let mut starting_coarse_dofs = None;
+    let mut starting_coarse_dofs: Option<BTreeSet<usize>> = None;
     let target_cf = 8.0;
     let target_size = (fine_mat.rows() as f64 / target_cf).ceil() as usize;
     loop {
+        let (coarse_near_null, _r, p, ac, _, _) = classical_step(
+            &current_mat,
+            &current_near_null,
+            &starting_coarse_dofs,
+            target_size,
+        );
+
         /*
-                let (coarse_near_null, _r, p, ac) = classical_step(
-                    &current_mat,
-                    &current_near_null,
-                    &starting_coarse_dofs,
-                    target_size,
-                );
-        */
         let (coarse_near_null, _r, p, ac) =
             pmis(&current_mat, &current_near_null, 0.5, target_size);
+        */
 
         current_mat = ac.clone();
         current_p = &current_p * &p;
@@ -126,27 +413,32 @@ pub fn classical(
         let cf = current_p.rows() as f64 / current_p.cols() as f64;
         trace!("coarse size: {}, current cf: {:.2}", current_p.cols(), cf);
 
-        //if cf > target_cf {
-        let mut r = current_p.transpose_view().to_csr();
-        for (coarse_i, mut row) in r.outer_iterator_mut().enumerate() {
-            let scale: f64 = row.iter().map(|(_, v)| v.powf(2.0)).sum::<f64>().sqrt();
-            row.iter_mut().for_each(|(_, v)| *v /= scale);
-            current_near_null[coarse_i] *= scale;
-        }
-        let p = r.transpose_view().to_csr();
-        let ac = &r * &(fine_mat * &p);
-        let test = &p * &current_near_null;
-        /*
-                for (truth, interp) in near_null.iter().zip(test.iter()) {
-                    println!("{:.3e} {:.3e}", truth, interp);
-                }
-        */
-        let err = near_null - test;
-        info!("Final reconstruction error: {:.2e}", err.norm());
-        return (current_near_null, r, p, ac);
-        //}
+        if cf > target_cf {
+            let mut p = current_p.clone();
+            let test = &p * &current_near_null;
+            /*
+                    for (truth, interp) in near_null.iter().zip(test.iter()) {
+                        println!("{:.3e} {:.3e}", truth, interp);
+                    }
+            */
+            let err = near_null - test;
+            info!("Final reconstruction error: {:.2e}", err.norm());
+            let smooth_interp = true;
+            if smooth_interp {
+                smooth_interpolation(fine_mat, &mut p, 1, 0.66);
+                let test = &p * &current_near_null;
+                let err = near_null - test;
+                info!(
+                    "Final reconstruction error after smoothing: {:.2e}",
+                    err.norm()
+                );
+            }
 
-        /*
+            let r = p.transpose_view().to_csr();
+            let ac = &r * &(fine_mat * &p);
+            return (current_near_null, r, p, ac.to_csr());
+        }
+
         if prev_size == current_mat.rows() {
             warn!("Couldn't coarsen to desired size");
             return (
@@ -156,7 +448,6 @@ pub fn classical(
                 ac,
             );
         }
-        */
 
         /*
         for row in current_p.outer_iterator() {
@@ -178,10 +469,19 @@ pub fn classical_step(
     near_null: &Vector,
     starting_coarse_dofs: &Option<BTreeSet<usize>>,
     target_size: usize,
-) -> (Vector, CsrMatrix, CsrMatrix, CsrMatrix) {
+) -> (
+    Vector,
+    CsrMatrix,
+    CsrMatrix,
+    CsrMatrix,
+    Vec<BTreeSet<usize>>,
+    BTreeSet<usize>,
+) {
+    let threshold = 0.5;
     let ndofs_fine = fine_mat.rows();
     let mut fine_dofs = BTreeSet::new();
     let mut all_coarse_dofs = vec![];
+    let mut all_coarse_dofs_set = BTreeSet::new();
     let mut remaining_dofs: BTreeSet<usize> = (0..ndofs_fine).collect();
     if let Some(starting_coarse_dofs) = starting_coarse_dofs {
         remaining_dofs = remaining_dofs
@@ -190,9 +490,9 @@ pub fn classical_step(
             .collect();
         all_coarse_dofs.push(starting_coarse_dofs.clone())
     }
-    let thresh = 0.5;
 
-    let strengths: Vec<BTreeSet<Strength>> = fine_mat
+    // TODO filter by threshold to max?
+    let mut strengths: Vec<BTreeSet<Strength>> = fine_mat
         .outer_iterator()
         .enumerate()
         .map(|(i, row)| {
@@ -204,40 +504,30 @@ pub fn classical_step(
         })
         .collect();
 
+    let mut deltas = vec![None; ndofs_fine];
+
+    let mut rng = rand::rng();
+
+    // find max strength for each dof and associated potential coarse dof
+    for (i, strong_neighbors) in strengths.iter_mut().enumerate() {
+        let delta_i = strong_neighbors.iter().copied().next();
+        if let Some(max_strength) = delta_i {
+            strong_neighbors.retain(|strength| strength.0 > threshold * max_strength.0);
+        }
+
+        assert!(delta_i.is_some());
+        if let Some(mut strength) = delta_i {
+            strength.0 += rng.random_range(0.0..1e-3);
+            deltas[i] = Some(strength);
+        } else {
+            deltas[i] = delta_i;
+        }
+    }
+
+    let mut unassigned = remaining_dofs.clone();
     while !remaining_dofs.is_empty() {
         let mut coarse_dofs = BTreeSet::new();
         let mut new_fine_dofs = BTreeSet::new();
-        let mut deltas = vec![None; ndofs_fine];
-
-        #[cfg(debug_assertions)]
-        for coarse_set in all_coarse_dofs.iter() {
-            assert!(fine_dofs.intersection(coarse_set).next().is_none());
-        }
-
-        // find max strength for each dof and associated potential coarse dof
-        for (i, row) in fine_mat
-            .outer_iterator()
-            .enumerate()
-            .filter(|(i, _)| remaining_dofs.contains(i))
-        {
-            let mut delta_i = None;
-            for (j, w) in row
-                .iter()
-                .filter(|(j, _)| i != *j && remaining_dofs.contains(j))
-            {
-                let strength = -(w * near_null[j]) / near_null[i];
-                if strength.is_finite() && strength > 0.0 {
-                    if let Some((old_strength, _)) = delta_i {
-                        if old_strength < strength {
-                            delta_i = Some((strength, j));
-                        }
-                    } else {
-                        delta_i = Some((strength, j));
-                    }
-                }
-            }
-            deltas[i] = delta_i;
-        }
 
         // find all locally maximum dofs and add them to the new fine set. since they are
         // locally maximum, any of their neighbors which are remaining are safe to add to
@@ -245,13 +535,13 @@ pub fn classical_step(
         // be locally maximal.
         for (i, row) in fine_mat.outer_iterator().enumerate() {
             if remaining_dofs.contains(&i) {
-                if let Some((delta_i, neighbor)) = deltas[i] {
+                if let Some(Strength(delta_i, neighbor)) = deltas[i] {
                     let mut fine_candidate = true;
                     for (j, _) in row
                         .iter()
                         .filter(|(j, _)| i != *j && remaining_dofs.contains(j))
                     {
-                        if let Some((delta_j, _)) = deltas[j] {
+                        if let Some(Strength(delta_j, _)) = deltas[j] {
                             if delta_j >= delta_i {
                                 fine_candidate = false;
                                 break;
@@ -260,73 +550,59 @@ pub fn classical_step(
                     }
                     if fine_candidate {
                         new_fine_dofs.insert(i);
-                        coarse_dofs.insert(neighbor);
+                        unassigned.remove(&neighbor);
+                        if all_coarse_dofs_set.insert(neighbor) {
+                            coarse_dofs.insert(neighbor);
+                        }
+
+                        let check = unassigned.remove(&i);
+                        assert!(check);
                     }
                 }
             }
-            if remaining_dofs.len() - new_fine_dofs.len() < target_size {
+            if unassigned.len() + all_coarse_dofs_set.len() < target_size {
+                coarse_dofs.extend(&unassigned);
+                all_coarse_dofs_set.extend(&unassigned);
+                remaining_dofs = BTreeSet::new();
                 break;
             }
         }
 
         remaining_dofs = remaining_dofs.difference(&coarse_dofs).copied().collect();
         remaining_dofs = remaining_dofs.difference(&new_fine_dofs).copied().collect();
-        let mut fine_counter = 0;
+
         for i in remaining_dofs.iter() {
-            if let Some((_delta_i, j)) = deltas[*i] {
-                if coarse_dofs.contains(&j) {
+            for strength in strengths[*i].iter() {
+                if coarse_dofs.contains(&strength.1) {
                     new_fine_dofs.insert(*i);
-                    fine_counter += 1;
-                }
-            } else {
-                if let Some(Strength(max_strength, _)) = strengths[*i].first() {
-                    for strength in strengths[*i].iter() {
-                        if strength.0 < thresh * max_strength {
-                            break;
-                        }
-                        if all_coarse_dofs
-                            .iter()
-                            .any(|coarse_set| coarse_set.contains(&strength.1))
-                        {
-                            new_fine_dofs.insert(*i);
-                            fine_counter += 1;
-                            break;
-                        }
-                    }
+                    unassigned.remove(i);
+                    break;
                 }
             }
-            if remaining_dofs.len() - fine_counter < target_size {
+            if unassigned.len() + all_coarse_dofs_set.len() < target_size {
                 break;
             }
         }
         remaining_dofs = remaining_dofs.difference(&new_fine_dofs).copied().collect();
 
-        if new_fine_dofs.is_empty() {
-            all_coarse_dofs.push(remaining_dofs);
-            remaining_dofs = BTreeSet::new();
-        } else {
-            all_coarse_dofs.push(coarse_dofs);
-            fine_dofs.extend(new_fine_dofs);
-        }
+        all_coarse_dofs.push(coarse_dofs);
+        fine_dofs.extend(new_fine_dofs);
     }
+
+    let coarse_dofs = all_coarse_dofs_set;
+    fine_dofs = fine_dofs.difference(&coarse_dofs).copied().collect();
 
     #[cfg(debug_assertions)]
     {
-        let mut all_dofs_test = fine_dofs.clone();
-        for coarse_set in all_coarse_dofs.iter() {
-            assert!(fine_dofs.intersection(coarse_set).next().is_none());
-            all_dofs_test.extend(coarse_set);
-        }
-        for i in 0..ndofs_fine {
-            assert!(all_dofs_test.contains(&i));
-        }
+        let all_dofs_test: BTreeSet<usize> = fine_dofs.union(&coarse_dofs).copied().collect();
+        assert_eq!(all_dofs_test.len(), fine_mat.rows());
     }
 
     let total_coarse: usize = all_coarse_dofs
         .iter()
         .map(|coarse_set| coarse_set.len())
         .sum();
-    /*
+
     info!(
         "ndofs_fine: {}, fine size: {}, coarse total: {}, coarse sizes: {}",
         ndofs_fine,
@@ -337,22 +613,30 @@ pub fn classical_step(
             .map(|coarse_set| format!("{} ", coarse_set.len()))
             .collect::<String>()
     );
-    */
 
-    let (p, coarse_near_null) = classical_coarsen(fine_mat, fine_dofs, all_coarse_dofs, near_null);
+    let (p, coarse_near_null) =
+        classical_coarsen(fine_mat, &fine_dofs, &all_coarse_dofs, near_null);
 
     let r = p.transpose_view().to_csr();
     let mat_coarse = &r * &(fine_mat * &p);
-    (coarse_near_null, r, p.to_csr(), mat_coarse.to_csr())
+    (
+        coarse_near_null,
+        r,
+        p.to_csr(),
+        mat_coarse.to_csr(),
+        all_coarse_dofs,
+        fine_dofs,
+    )
 }
 
 fn classical_coarsen(
     mat: &CsrMatrix,
-    fine_vertices: BTreeSet<usize>,
-    coarse_vertices: Vec<BTreeSet<usize>>,
+    fine_vertices: &BTreeSet<usize>,
+    coarse_vertices: &Vec<BTreeSet<usize>>,
     near_null: &Vector,
 ) -> (CsrMatrix, Vector) {
-    let nci_max = 6;
+    let nci_max = 3;
+    let threshold = 0.5;
 
     let neighbors: Vec<BTreeSet<usize>> = mat
         .outer_iterator()
@@ -401,12 +685,7 @@ fn classical_coarsen(
 
     let mut nc = vec![BTreeSet::new(); fine_vertices.len()];
     for i in 0..fine_vertices.len() {
-        for (k, coarse_set) in coarse_vertices.iter().enumerate() {
-            /*
-            if k == coarse_vertices.len() - 1 {
-                break;
-            }
-            */
+        for coarse_set in coarse_vertices.iter() {
             if nc[i].len() >= nci_max {
                 break;
             }
@@ -472,7 +751,8 @@ fn classical_coarsen(
                     }
                     //assert!(delta_jic < 0.0);
                     delta_jic = mat.get(j, ic).unwrap() / delta_jic;
-                    //assert!(delta_jic >= 0.0);
+                    assert!(delta_jic >= 0.0);
+                    println!("{:.2e}", delta_jic);
                 }
 
                 weight += mat.get(fine_i, j).unwrap() * near_null[j] * delta_jic;
@@ -499,9 +779,6 @@ fn classical_coarsen(
         }
         p = r.transpose_into().to_csr();
     }
-    //let test = &p * &coarse_near_null;
-    //let err = near_null - test;
-    //info!("Reconstruction error: {:.2e}", err.norm());
     (p, coarse_near_null)
 }
 
@@ -664,7 +941,8 @@ fn pmis(
         fine_dofs.extend(new_fine_dofs);
     }
 
-    let (p, coarse_near_null) = classical_coarsen(fine_mat, fine_dofs, all_coarse_dofs, near_null);
+    let (p, coarse_near_null) =
+        classical_coarsen(fine_mat, &fine_dofs, &all_coarse_dofs, near_null);
 
     let r = p.transpose_view().to_csr();
     let mat_coarse = &r * &(fine_mat * &p);

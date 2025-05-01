@@ -1,8 +1,12 @@
 use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
-use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::{LinearOperator, Multilevel, SmootherType, L1};
+use amg_match::hierarchy::Hierarchy;
+use amg_match::interpolation::{smoothed_aggregation, smoothed_aggregation2, InterpolationType};
+use amg_match::partitioner::modularity_matching_partition;
+use amg_match::preconditioner::{
+    BlockSmootherType, LinearOperator, Multilevel, SmootherType, SymmetricGaussSeidel, L1,
+};
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -12,7 +16,7 @@ use amg_match::{
 use amg_match::{CooMatrix, CsrMatrix, Vector};
 use chrono::format::format;
 use ndarray::linalg::{general_mat_mul, general_mat_vec_mul};
-use ndarray::{Array, Array6};
+use ndarray::{stack, Array, Array6, Axis};
 use ndarray_linalg::krylov::{AppendResult, Orthogonalizer, MGS};
 use ndarray_linalg::{InnerProduct, Norm, SVDInto};
 use ndarray_rand::rand_distr::Uniform;
@@ -27,12 +31,12 @@ extern crate log;
 fn main() {
     pretty_env_logger::init();
 
-    let prefix = "data/elasticity";
+    let prefix = "data/elasticity/2";
     let name = "elasticity_3d";
 
     let (mat, b, _coords, rbms, truedofs_map) = load_system(prefix, name, false);
     let nrows = b.len();
-    let rbm_smoothing_steps = 3;
+    let rbm_smoothing_steps = 10;
     let rbms = smooth_rbms(
         rbms.unwrap(),
         mat.clone(),
@@ -40,10 +44,135 @@ fn main() {
         rbm_smoothing_steps,
     );
     //value_aggregation(mat, b, &truedofs_map);
-    let pc = build_pc(mat, name);
-    eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
+    //let pc = build_pc(mat, name);
+    //eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
+
+    sa_test(mat, &b, &rbms);
 }
 
+fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
+    let mut coarsening_factor = 16.0;
+    let smoothing_steps = 10;
+    let mut max_agg_size = Some(18 * 3);
+    let mut block_size = 3;
+    let mut ndofs = b.len();
+    let mut current_mat = mat.clone();
+
+    let mut hierarchy = Hierarchy::new(mat.clone());
+    let mut near_null = Vector::zeros(ndofs);
+    for rbm in smooth_rbms.iter() {
+        near_null += rbm;
+    }
+    let mut near_nullspace = stack![
+        Axis(1),
+        smooth_rbms[0],
+        smooth_rbms[1],
+        smooth_rbms[2],
+        smooth_rbms[3],
+        smooth_rbms[4],
+        smooth_rbms[5],
+    ];
+
+    while ndofs > 100 {
+        //let l1 = L1::new(&current_mat);
+        let l1 = SymmetricGaussSeidel::new(current_mat.clone());
+        let zeros = Vector::from_elem(ndofs, 0.0);
+        let smoother = Iterative::new(current_mat.clone(), Some(zeros.clone()))
+            .with_max_iter(smoothing_steps)
+            .with_solver(IterativeMethod::StationaryIteration)
+            .with_preconditioner(Arc::new(l1));
+
+        //smoother.apply_input(&zeros, &mut near_null);
+        for mut col in near_nullspace.columns_mut() {
+            let mut col_own = col.to_owned();
+            smoother.apply_input(&zeros, &mut col_own);
+            col_own /= col_own.norm_l2();
+            col.iter_mut()
+                .zip(col_own.iter())
+                .for_each(|(a, b)| *a = *b);
+        }
+        near_null = near_nullspace.sum_axis(Axis(1));
+        near_null /= near_null.norm_l2();
+
+        let mut partition = modularity_matching_partition(
+            current_mat.clone(),
+            &near_null,
+            coarsening_factor,
+            max_agg_size,
+            block_size,
+        );
+
+        while partition.cf(block_size) < coarsening_factor {
+            info!("Target CF of {:.2} not achieved with current CF of {:.2}, coarsening and matching again", coarsening_factor, partition.cf(block_size));
+            let (coarse_near_null, _r, _p, mat_coarse) =
+                smoothed_aggregation(&current_mat, &partition, &near_null, 1, 0.66);
+            let target_cf = coarsening_factor / partition.cf(block_size);
+            let max_agg_size = Some(target_cf.ceil() as usize);
+            let new_partition = modularity_matching_partition(
+                Arc::new(mat_coarse),
+                &coarse_near_null,
+                target_cf,
+                max_agg_size,
+                1,
+            );
+            partition.compose(&new_partition);
+        }
+        let (coarse_near_nullspace, r, p, mat_coarse) =
+            smoothed_aggregation2(&current_mat, &partition, block_size, &near_nullspace);
+        current_mat = Arc::new(mat_coarse);
+
+        hierarchy.push_level(
+            current_mat.clone(),
+            Arc::new(r),
+            Arc::new(p),
+            Arc::new(partition),
+            Arc::new(near_null),
+            block_size,
+        );
+
+        ndofs = current_mat.rows();
+
+        near_nullspace = coarse_near_nullspace;
+
+        block_size = 6;
+        coarsening_factor = 7.0;
+        max_agg_size = Some(8 * 6);
+    }
+
+    info!("Hierarchy info: {:?}", hierarchy);
+    hierarchy.print_table();
+    println!("{:?}", hierarchy.vdims);
+
+    /*
+    hierarchy.consolidate(coarsening_factor);
+    info!("Hierarchy info (consolidated): {:?}", hierarchy);
+    hierarchy.print_table();
+    println!("{:?}", hierarchy.vdims);
+    */
+
+    //let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::IncompleteCholesky, 16);
+    let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::GaussSeidel, 16);
+    //let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::DenseCholesky, 16);
+    //let smoother_type = SmootherType::GaussSeidel;
+    //let smoother_type = SmootherType::IncompleteCholesky;
+    let ml = Arc::new(Multilevel::new(hierarchy, true, smoother_type, 1, 1));
+
+    let epsilon = 1e-12;
+    let max_iter = 1000;
+    let guess = Vector::random(mat.rows(), Uniform::new(-1., 1.));
+    let mut solver = Iterative::new(mat.clone(), Some(guess))
+        .with_solver(IterativeMethod::StationaryIteration)
+        .with_preconditioner(ml)
+        .with_relative_tolerance(epsilon)
+        .with_log_interval(LogInterval::Iterations(10))
+        .with_max_iter(max_iter);
+
+    solver.solve(b);
+    solver = solver.with_solver(IterativeMethod::ConjugateGradient);
+    solver.solve(b);
+}
+
+/*
 fn value_aggregation(mat: Arc<CsrMatrix>, b: Vector, truedofs_map: &CsrMatrix) {
     let truedof_idx = truedofs_map.indices();
     let nrows = mat.rows();
@@ -125,6 +254,7 @@ fn build_pc(mat: Arc<CsrMatrix>, name: &str) -> Composite {
 
     pc
 }
+*/
 
 fn smooth_rbms(
     rbms: Vec<Vector>,
@@ -150,6 +280,7 @@ fn smooth_rbms(
         .collect()
 }
 
+/*
 fn eval_nearnull_and_rbm_spaces(rbms: Vec<Vector>, pc: Arc<Composite>) {
     let nrows = pc.get_mat().rows();
 
@@ -209,3 +340,4 @@ fn eval_nearnull_and_rbm_spaces(rbms: Vec<Vector>, pc: Arc<Composite>) {
         scores
     );
 }
+*/

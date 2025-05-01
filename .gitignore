@@ -19,6 +19,7 @@ perf*
 *.mtx
 *.vtk
 *.mesh
+*.npz
 
 # CMake ignores
 CMakeLists.txt.user

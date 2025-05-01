@@ -22,9 +22,9 @@ using namespace std;
 using namespace mfem;
 
 int main(int argc, char *argv[]) {
-  const char *mesh_file = "../meshes/star.mesh";
+  const char *mesh_file = "../data/meshes/beam-tri.vtk";
   int order = 1;
-  int refinements = 8;
+  int refinements = 9;
 
   Mesh mesh(mesh_file);
   for (int i = 0; i < refinements; ++i) {
@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
 
     BilinearForm a(&fespace);
     a.AddDomainIntegrator(new DiffusionIntegrator);
-    //a.AddDomainIntegrator(new MassIntegrator);
+    // a.AddDomainIntegrator(new MassIntegrator);
     a.Assemble();
 
     SparseMatrix A;
@@ -55,15 +55,24 @@ int main(int argc, char *argv[]) {
     a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
     cout << "Size of linear system: " << A.Height() << endl;
 
-    std::ofstream matfile(std::format("../laplace/{}.mtx", i), std::ios::out);
+    std::string new_mesh = std::format("../data/laplace/{}.vtk", i);
+    std::ofstream omesh(new_mesh, std::ios::out);
+    omesh.precision(14);
+    mesh.PrintVTK(omesh);
+    cout << "New VTK mesh file: " << new_mesh << endl;
+
+    std::ofstream matfile(std::format("../data/laplace/{}.mtx", i),
+                          std::ios::out);
     A.PrintMM(matfile);
     matfile.close();
 
-    std::ofstream vecfile(std::format("../laplace/{}.rhs", i), std::ios::out);
+    std::ofstream vecfile(std::format("../data/laplace/{}.rhs", i),
+                          std::ios::out);
     B.Print(vecfile);
     vecfile.close();
 
-    std::ofstream bdyfile(std::format("../laplace/{}.bdy", i), std::ios::out);
+    std::ofstream bdyfile(std::format("../data/laplace/{}.bdy", i),
+                          std::ios::out);
     boundary_dofs.Save(bdyfile);
     bdyfile.close();
 
