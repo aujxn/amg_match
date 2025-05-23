@@ -2,15 +2,15 @@
 
 use crate::{
     hierarchy::Hierarchy,
-    interpolation::{smoothed_aggregation, smoothed_aggregation2, InterpolationType},
+    interpolation::{smoothed_aggregation2, InterpolationType},
     parallel_ops::spmv,
-    partitioner::{fix_small_aggregates, modularity_matching_partition},
+    partitioner::{BlockReductionStrategy, PartitionBuilder},
     preconditioner::{
         BlockSmootherType, Composite, LinearOperator, Multilevel, SmootherType,
         SymmetricGaussSeidel, L1,
     },
     solver::{Iterative, IterativeMethod},
-    utils::{format_duration, inner_product, norm, normalize, normalize_mat, orthonormalize_mgs},
+    utils::{format_duration, inner_product, norm, normalize, orthonormalize_mgs},
     CsrMatrix, Matrix, Vector,
 };
 use ndarray_linalg::Norm;
@@ -29,6 +29,7 @@ pub struct AdaptiveBuilder {
     test_iters: Option<usize>,
     // TODO max test duration?
     solve_coarsest_exactly: bool,
+    // coarsest_size: usize,
     smoothing_steps: usize,
     smoother_type: SmootherType,
     interpolation_type: InterpolationType,
@@ -289,11 +290,11 @@ impl AdaptiveBuilder {
         let dim = self.mat.rows();
 
         // Find initial near null to get the iterations started
-        let fine_l1 = Arc::new(SymmetricGaussSeidel::new(self.mat.clone()));
+        let fine_smoother = Arc::new(SymmetricGaussSeidel::new(self.mat.clone()));
         let stationary = Iterative::new(self.mat.clone(), None)
             .with_solver(IterativeMethod::StationaryIteration)
-            .with_max_iter(25)
-            .with_preconditioner(fine_l1.clone());
+            .with_max_iter(10)
+            .with_preconditioner(fine_smoother.clone());
         let zeros = Vector::from(vec![0.0; dim]);
         let mut near_nullspace: Vec<Vector> = (0..self.near_null_dim)
             .map(|_| Vector::random(dim, Uniform::new(-1., 1.)))
@@ -324,7 +325,6 @@ impl AdaptiveBuilder {
                     *a = *b;
                 }
             }
-            //let mut max_agg_size = Some((self.coarsening_factor.ceil() as usize + 2) * self.block_size);
 
             loop {
                 let mut near_null = Vector::zeros(ndofs);
@@ -332,32 +332,28 @@ impl AdaptiveBuilder {
                     near_null += &vec.to_owned();
                 }
                 near_null /= near_null.norm_l2();
-                let cf = self.coarsening_factor * (self.near_null_dim / block_size) as f64;
-                let max_agg_size = Some(cf.ceil() as usize * block_size + 2);
-                let mut partition = modularity_matching_partition(
-                    current_mat.clone(),
-                    &near_null,
-                    cf,
-                    max_agg_size,
-                    block_size,
-                );
-                fix_small_aggregates(self.near_null_dim, &mut partition, &near_null, &current_mat);
+                let arc_nn = Arc::new(near_null.clone());
 
-                while partition.cf(block_size) < cf {
-                    info!("Target CF of {:.2} not achieved with current CF of {:.2}, coarsening and matching again", self.coarsening_factor, partition.cf(block_size));
-                    let (coarse_near_null, _r, _p, mat_coarse) =
-                        smoothed_aggregation(&current_mat, &partition, &near_null, 1, 0.66);
-                    let target_cf = cf / partition.cf(block_size);
-                    let max_agg_size = Some(target_cf.ceil() as usize);
-                    let new_partition = modularity_matching_partition(
-                        Arc::new(mat_coarse),
-                        &coarse_near_null,
-                        target_cf,
-                        max_agg_size,
-                        1,
-                    );
-                    partition.compose(&new_partition);
+                let mut partition_builder = PartitionBuilder::new(current_mat.clone(), arc_nn);
+                let cf = self.coarsening_factor * (self.near_null_dim as f64 / block_size as f64);
+                partition_builder.max_agg_size = Some((cf * 1.2).ceil() as usize);
+                let mut min_agg = ((cf.ceil() + 2.) / 2.0).floor();
+                let min_agg_for_sa = (self.near_null_dim as f64 / block_size as f64).ceil();
+                if min_agg < min_agg_for_sa {
+                    min_agg = min_agg_for_sa;
                 }
+                if min_agg < 1. {
+                    min_agg = 1.;
+                }
+                partition_builder.min_agg_size = Some(min_agg as usize);
+                partition_builder.coarsening_factor = cf;
+                if block_size > 1 {
+                    partition_builder.vector_dim = block_size;
+                    partition_builder.block_reduction_strategy =
+                        Some(BlockReductionStrategy::default());
+                }
+                let partition = partition_builder.build();
+
                 let (coarse_near_nullspace, r, p, mat_coarse) =
                     smoothed_aggregation2(&current_mat, &partition, block_size, &matrix_nullspace);
                 current_mat = Arc::new(mat_coarse);
@@ -388,6 +384,7 @@ impl AdaptiveBuilder {
                     .unwrap_or(&hierarchy.get_mat(0))
                     .rows()
                     < 100 * self.near_null_dim
+                //< 2000
                 {
                     break;
                 }
@@ -409,6 +406,7 @@ impl AdaptiveBuilder {
                 }
             }
             info!("Hierarchy info: {:?}", hierarchy);
+            // TODO this shoud be in Debug impl along with interp::info...
             hierarchy.print_table();
 
             let ml1 = Arc::new(Multilevel::new(
@@ -419,12 +417,10 @@ impl AdaptiveBuilder {
                 self.mu,
             ));
             preconditioner.push(ml1);
-            //return (preconditioner, test_data, hist);
 
             near_nullspace = (0..self.near_null_dim)
                 .map(|_| Vector::random(dim, Uniform::new(-1., 1.)))
                 .collect();
-            //orthonormalize_mgs(&mut near_nullspace, ip_op);
             let (convergence_rate, convergence_history) = find_near_null_multi(
                 self.mat.clone(),
                 &preconditioner,

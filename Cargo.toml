@@ -32,6 +32,7 @@ bytemuck = "1.21.0"
 npyz = "0.8.3"
 ndarray-rand = "0.15.0"
 faer = "0.21.4"
+indicatif = {version = "*", features = ["rayon"]}
 
 [dev-dependencies]
 test-generator = "0"
@@ -47,3 +48,4 @@ overflow-checks = true
 [profile.release]
 codegen-units = 1
 opt-level = 3
+debug = true

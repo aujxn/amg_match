@@ -33,6 +33,8 @@ int main(int argc, char *argv[]) {
   args.ParseCheck();
 
   Mesh mesh(mesh_file);
+  // Mesh mesh = Mesh::MakeCartesian3D(10, 10, 10, Element::TETRAHEDRON, 100,
+  // 100, 100);
   int dim = mesh.Dimension();
   for (int i = 0; i < refinements; ++i) {
     mesh.UniformRefinement();
@@ -48,14 +50,15 @@ int main(int argc, char *argv[]) {
   GridFunction x(&fespace);
   x = 0.0;
 
-  ConstantCoefficient one(1.0);
+  ConstantCoefficient f(1000.0);
   LinearForm b(&fespace);
-  b.AddDomainIntegrator(new DomainLFIntegrator(one));
+  b.AddDomainIntegrator(new DomainLFIntegrator(f));
   b.Assemble();
 
-  double epsilon = 1e-4;
+  double epsilon = 1e-3;
   double theta = (60.0 / 180.0) * 3.1415;
-  double phi = (27.0 / 180.0) * 3.1415;
+  // double phi = (27.0 / 180.0) * 3.1415;
+  double phi = 0.0;
 
   MatrixConstantCoefficient *diffusion_coef;
 
@@ -99,23 +102,27 @@ int main(int argc, char *argv[]) {
   a.FormLinearSystem(boundary_dofs, x, b, A, X, B);
   cout << "Size of linear system: " << A.Height() << endl;
 
-  std::ofstream matfile(
-      std::format("../data/anisotropy/anisotropy_{}d.mtx", dim), std::ios::out);
+  std::ofstream matfile(std::format("../data/anisotropy/anisotropy_{}d_{}r.mtx",
+                                    dim, refinements),
+                        std::ios::out);
   A.PrintMM(matfile);
   matfile.close();
 
-  std::ofstream vecfile(
-      std::format("../data/anisotropy/anisotropy_{}d.rhs", dim), std::ios::out);
+  std::ofstream vecfile(std::format("../data/anisotropy/anisotropy_{}d_{}r.rhs",
+                                    dim, refinements),
+                        std::ios::out);
   B.Print(vecfile);
   vecfile.close();
 
-  std::ofstream bdyfile(
-      std::format("../data/anisotropy/anisotropy_{}d.bdy", dim), std::ios::out);
+  std::ofstream bdyfile(std::format("../data/anisotropy/anisotropy_{}d_{}r.bdy",
+                                    dim, refinements),
+                        std::ios::out);
   boundary_dofs.Save(bdyfile);
   bdyfile.close();
 
   std::ofstream coordsfile(
-      std::format("../data/anisotropy/anisotropy_{}d.coords", dim),
+      std::format("../data/anisotropy/anisotropy_{}d_{}r.coords", dim,
+                  refinements),
       std::ios::out);
 
   FiniteElementSpace fes2(&mesh, &fec, mesh.SpaceDimension());
@@ -133,10 +140,13 @@ int main(int argc, char *argv[]) {
     coordsfile << endl;
   }
 
+  /*
   ofstream omesh("../anisotropy/test.vtk");
   omesh.precision(14);
   mesh.PrintVTK(omesh);
   cout << "New VTK mesh file: " << mesh_file << endl;
+  */
+
   /*
   GridFunction W_coords(&fespace);
   {

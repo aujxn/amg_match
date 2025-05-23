@@ -8,7 +8,7 @@ use sprs::is_symmetric;
 use crate::interpolation::{
     classical, smoothed_aggregation, smoothed_aggregation2, InterpolationInfo, InterpolationType,
 };
-use crate::partitioner::{cf_aggregation, modularity_matching_partition, Partition};
+use crate::partitioner::{BlockReductionStrategy, Partition, PartitionBuilder};
 use crate::{CsrMatrix, Matrix, Vector};
 
 #[derive(Clone)]
@@ -63,6 +63,7 @@ impl Hierarchy {
         }
     }
 
+    /*
     pub fn consolidate(&mut self, cf: f64) {
         let mut new_restrictions = Vec::new();
         let mut new_interpolations = Vec::new();
@@ -100,6 +101,7 @@ impl Hierarchy {
         self.vdims = new_vdims;
         self.near_nulls = new_near_nulls;
     }
+    */
 
     pub fn push_level(
         &mut self,
@@ -214,16 +216,18 @@ impl Hierarchy {
         normalized_nn /= near_null.norm();
         self.near_nulls.push(Arc::new(normalized_nn));
 
+        let mut builder = PartitionBuilder::new(fine_mat.clone(), Arc::new(near_null.clone()));
+        builder.coarsening_factor = coarsening_factor;
+        builder.max_agg_size = Some(coarsening_factor.ceil() as usize);
+        if block_size > 1 {
+            builder.block_reduction_strategy = Some(BlockReductionStrategy::default());
+            builder.vector_dim = block_size;
+        }
+
         let (coarse_near_null, r, p, mut mat_coarse) = match interpolation_type {
             InterpolationType::Classical => classical(&fine_mat, near_null),
             InterpolationType::SmoothedAggregation((smoothing_steps, jacobi_weight)) => {
-                let partition = modularity_matching_partition(
-                    fine_mat.clone(),
-                    near_null,
-                    coarsening_factor,
-                    Some(coarsening_factor.ceil() as usize),
-                    block_size,
-                );
+                let partition = builder.build();
 
                 /*
                 let mut max_w: Vec<Option<usize>> = vec![None; partition.agg_to_node.len()];
@@ -259,13 +263,7 @@ impl Hierarchy {
                 //smoothed_aggregation2(&fine_mat, &partition, near_null, &coarse_indices)
             }
             InterpolationType::UnsmoothedAggregation => {
-                let partition = modularity_matching_partition(
-                    fine_mat.clone(),
-                    near_null,
-                    coarsening_factor,
-                    Some(coarsening_factor.ceil() as usize),
-                    block_size,
-                );
+                let partition = builder.build();
 
                 /*
                 let (partition, _coarse_indices) =

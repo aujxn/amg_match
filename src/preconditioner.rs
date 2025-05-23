@@ -4,17 +4,16 @@
 
 use crate::hierarchy::Hierarchy;
 use crate::parallel_ops::spmv;
-use crate::partitioner::{
-    block_strength, metis_n, modularity_matching_partition, reduce_block, Partition,
-};
+use crate::partitioner::{BlockReductionStrategy, Partition, PartitionBuilder};
 use crate::solver::{Direct, Iterative, IterativeMethod};
 use crate::{CooMatrix, CsrMatrix, Matrix, Vector};
 use core::f64;
+use indicatif::ParallelProgressIterator;
 use ndarray::{par_azip, Axis};
 use ndarray_linalg::{hstack, FactorizeC, Norm, SolveC, SVD, UPLO};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use sprs::linalg::trisolve::{lsolve_csr_dense_rhs as lsolve, usolve_csr_dense_rhs as usolve};
-use sprs::{is_symmetric, FillInReduction};
+use sprs::FillInReduction;
 use sprs_ldl::Ldl;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -109,12 +108,10 @@ pub enum SmootherType {
     IncompleteCholesky,
     /// A more advanced smoother which uses rank-1 corrections to the matrix to delete entries off
     /// of a prescribed block diagonal. Diagonal blocks are specified by partitioning the matrix
-    /// into the specified number of blocks. Using the number of processors as the number of blocks
-    /// will provide decent CPU saturation but processors that finish early will be waiting for the
-    /// others to finish. Using many more blocks than the number of processors will eventually
-    /// degrade the preconditioner but can result in better saturation. For using a pre-specified
-    /// partition, don't use the provided helpers which consume this enum and build the multilevel
-    /// operator using the `MultilevelBuilder`.
+    /// into the specified block sizes (second parameter). Choose a block size to provide more
+    /// blocks than available CPUs. Warning: Some [`BlockSmootherType`] variants have quadratic or
+    /// even cubic algorithmic and memory scaling with block size. For details see documentaion for
+    /// [`BlockSmootherType`].
     ///
     /// Any solver / smoother which is A-convergent should still be A-convergent when used
     /// in this block form. Each block component is applied in a `rayon` parallel iterator, so by
@@ -171,49 +168,37 @@ pub fn build_smoother(
             Arc::new(SymmetricGaussSeidel::new(mat))
         }
         SmootherType::IncompleteCholesky => Arc::new(IncompleteCholesky::new(mat)),
-        SmootherType::DiagonalCompensatedBlock(block_smoother, n_parts) => {
+        SmootherType::DiagonalCompensatedBlock(block_smoother, block_size) => {
             /*
             let strength = block_strength(&mat, vdim);
             let near_null = Vector::ones(strength.rows());
             let partition = metis_n(&near_null, Arc::new(strength), n_parts);
             */
-            let (_, strength, near_null) = reduce_block(&mat, &near_null, vdim);
-            let partition = metis_n(&near_null, strength, n_parts);
-
-            let mut node_to_agg = Vec::new();
-            let mut agg_to_node = Vec::new();
-            for agg_id in partition.node_to_agg {
-                for _ in 0..vdim {
-                    node_to_agg.push(agg_id);
-                }
+            let cf;
+            if vdim * mat.rows() / block_size < 32 {
+                cf = mat.rows() as f64 / (32.0 * vdim as f64);
+            } else {
+                cf = block_size as f64 / vdim as f64;
             }
-            for agg in partition.agg_to_node {
-                let mut new_agg = BTreeSet::new();
-                for node_id in agg {
-                    let new_base = node_id * vdim;
-                    for offset in 0..vdim {
-                        new_agg.insert(new_base + offset);
-                    }
-                }
-                agg_to_node.push(new_agg);
-            }
-            let partition = Partition {
-                mat: mat.clone(),
-                node_to_agg,
-                agg_to_node,
-            };
-            /*
-            let max_size = (mat.rows() / n_parts) + 3;
-            let target_cf = mat.rows() as f64 / (n_parts as f64);
-            let partition = modularity_matching_partition(
-                mat.clone(),
-                &*near_null,
-                target_cf,
-                Some(max_size),
+            info!(
+                "Building smoother: {:.2} cf, {} vdim, and {} len nn",
+                cf,
                 vdim,
+                near_null.len()
             );
-            */
+            let mut builder = PartitionBuilder::new(mat.clone(), near_null);
+            builder.coarsening_factor = cf;
+            let max_agg = (cf * 1.1).ceil();
+            let min_agg = (max_agg / 1.5).floor();
+            builder.max_agg_size = Some(max_agg as usize);
+            builder.min_agg_size = Some(min_agg as usize);
+            if vdim > 1 {
+                builder.vector_dim = vdim;
+                builder.block_reduction_strategy = Some(BlockReductionStrategy::default());
+            }
+            let partition = builder.build();
 
+            partition.info();
             Arc::new(BlockSmoother::new(
                 &*mat,
                 Arc::new(partition),
@@ -332,8 +317,9 @@ impl BlockSmoother {
         let blocks: Vec<Arc<dyn LinearOperator + Send + Sync>> = partition
             .agg_to_node
             .par_iter()
+            .progress_count(partition.agg_to_node.len() as u64)
             .map(|agg| {
-                let mut csr = if vdim == 1 {
+                let csr = if vdim == 1 {
                     Self::diagonally_compensate(agg, mat)
                 } else {
                     Self::diagonally_compensate_vector(agg, mat, vdim)
@@ -362,10 +348,12 @@ impl BlockSmoother {
                 }
 
                 // TODO maybe not needed / helpful and this implementation is lazy and inefficient
+                /*
                 if !is_symmetric(&csr) {
                     csr = &csr.view() + &csr.transpose_view();
                     csr.map_inplace(|v| v * 0.5);
                 }
+                */
 
                 match smoother {
                     BlockSmootherType::GaussSeidel => {

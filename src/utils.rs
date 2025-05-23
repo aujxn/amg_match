@@ -4,10 +4,11 @@
 use indexmap::IndexSet;
 use ndarray::{Array, Array2, ArrayView2, ArrayViewMut2, Axis};
 use ndarray_linalg::lobpcg::{lobpcg, LobpcgResult};
-use ndarray_linalg::Norm;
+use ndarray_linalg::{EigValsh, Norm, UPLO};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use sprs::io::read_matrix_market;
+use std::f64;
 use std::sync::Arc;
 use std::{
     fmt::Display,
@@ -17,11 +18,9 @@ use std::{
     time::Duration,
 };
 
-use crate::hierarchy::Hierarchy;
-use crate::interpolation::InterpolationType;
 use crate::parallel_ops::spmv;
-use crate::preconditioner::{build_smoother, LinearOperator, Multilevel, SmootherType};
-use crate::{CooMatrix, CsrMatrix, Vector};
+use crate::preconditioner::{build_smoother, SmootherType};
+use crate::{CooMatrix, CsrMatrix, Matrix, Vector};
 
 pub fn load_system(
     prefix: &str,
@@ -153,6 +152,7 @@ pub fn load_rbms(prefix: &str) -> Result<Vec<Vector>, Box<dyn std::error::Error>
 
     Ok(rbms)
 }
+
 pub fn load_boundary_dofs<P: AsRef<Path>>(path: P) -> Vec<usize> {
     let file = File::open(path).unwrap();
     let reader = BufReader::new(file);
@@ -359,6 +359,72 @@ pub fn normalize_mat(mat: &mut CsrMatrix) -> f64 {
     //1e-3 * eigs[0]
     *mat /= eigs[0];
     eigs[0]
+}
+
+pub fn generalized_lanczos(
+    c_mat: &CsrMatrix,
+    b_mat: &CsrMatrix,
+    start: &Vector,
+    max_iter: usize,
+    tol_basis: f64,
+    tol_eig: f64,
+) -> Vector {
+    let mut alphas = Vec::new();
+    let mut betas = Vec::new();
+    let mut basis_vecs = Vec::new();
+    let mut eigvals = Vector::zeros(1);
+    let mut prev_lambda_max = f64::MAX;
+    let mut delta_lambda = 0.0;
+
+    let start_norm = norm(start, b_mat);
+    basis_vecs.push(start / start_norm);
+
+    for j in 0..max_iter {
+        let vj = basis_vecs.last().unwrap();
+        let uj = spmv(c_mat, &spmv(b_mat, vj));
+        let z = spmv(b_mat, &uj);
+        let alpha_j = vj.dot(&z);
+        let wj = uj - alpha_j * vj;
+        let beta_next = norm(&wj, b_mat);
+        let v_next = wj / beta_next;
+        basis_vecs.push(v_next);
+        alphas.push(alpha_j);
+        betas.push(beta_next);
+
+        if beta_next < tol_basis {
+            break;
+        }
+        // todo don't need to really do this...
+        //orthonormalize_mgs(&mut basis_vecs, Some(b_mat));
+
+        if j > 0 {
+            let mut tri_diag = Matrix::zeros((j + 1, j + 1));
+            for (i, alpha) in alphas.iter().enumerate() {
+                tri_diag[[i, i]] = *alpha;
+            }
+            for (i, beta) in betas.iter().take(j).enumerate() {
+                tri_diag[[i, i + 1]] = *beta;
+                // only need upper part for eigsolver
+                tri_diag[[i + 1, i]] = *beta;
+            }
+            // TODO should use better algorithm than this...
+            // like implicit QR w/Wilkinson or Bisection + Sturm
+            eigvals = tri_diag.eigvalsh(UPLO::Upper).unwrap();
+            //println!("{:.2e}", eigvals);
+            let lambda_max = eigvals[j];
+            delta_lambda = (lambda_max - prev_lambda_max).abs();
+            if delta_lambda < tol_eig {
+                break;
+            }
+            prev_lambda_max = lambda_max;
+        }
+    }
+    let lambda_min = eigvals[0];
+    let j = eigvals.len();
+    let lambda_max = eigvals[j - 1];
+    info!("Lanczos result: norm of B^-1 A: {:.2e} in {} iters and (tol_basis, tol_eig) ({:.2e}, {:.2e}) with condition number: {:.2e}", lambda_max, j, betas.last().unwrap(), delta_lambda, lambda_max / lambda_min);
+    trace!("{:.2e}", eigvals);
+    return eigvals;
 }
 
 pub fn format_duration(duration: &Duration) -> String {

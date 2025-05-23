@@ -1,15 +1,10 @@
-use rayon::prelude::ParallelSliceMut;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::{f64, usize};
 
-use chrono::offset;
-use ndarray::{concatenate, stack, ArrayBase, Axis};
-use ndarray_linalg::{hstack, InverseInto, Norm, QRInto};
+use ndarray_linalg::{InverseInto, Norm, QRInto};
 use rand::Rng;
 
-use crate::preconditioner::L1;
-use crate::utils::normalize_mat;
 use crate::Matrix;
 use crate::{partitioner::Partition, CooMatrix, CsrMatrix, Vector};
 
@@ -195,6 +190,7 @@ pub fn block_jacobi(mat: &CsrMatrix, block_size: usize, p: &CsrMatrix) -> CsrMat
     let ndofs = mat.rows();
     let n_blocks = ndofs / block_size;
     let mut d_inv = CooMatrix::new((ndofs, ndofs));
+    //let mut d = CooMatrix::new((ndofs, ndofs));
 
     for block_idx in 0..n_blocks {
         let start = block_idx * block_size;
@@ -207,6 +203,15 @@ pub fn block_jacobi(mat: &CsrMatrix, block_size: usize, p: &CsrMatrix) -> CsrMat
                 }
             }
         }
+
+        /*
+        for i in 0..block_size {
+            for j in 0..block_size {
+                d.add_triplet(start + i, start + j, block[[i, j]]);
+            }
+        }
+        */
+
         block = block.inv_into().unwrap();
         for i in 0..block_size {
             for j in 0..block_size {
@@ -215,11 +220,25 @@ pub fn block_jacobi(mat: &CsrMatrix, block_size: usize, p: &CsrMatrix) -> CsrMat
         }
     }
 
+    /*
+    let d = d.to_csr();
+    let guess = Vector::random(mat.cols(), Uniform::new(-1., 1.));
+    let max_iter = 15;
+    let tol_basis = 1e-12;
+    let tol_eig = 1e-12;
+    */
+
     let d_inv = d_inv.to_csr();
+    //let eigs = generalized_lanczos(&d_inv, mat, &guess, max_iter, tol_basis, tol_eig);
+
+    //   let eigs = generalized_lanczos(mat, &d_inv, &guess, max_iter, tol_basis, tol_eig);
+    //let eigs = generalized_lanczos(mat, &d, &guess, max_iter, tol_basis, tol_eig);
+    //let eigs = generalized_lanczos(&d, mat, &guess, max_iter, tol_basis, tol_eig);
+    //let norm = eigs[eigs.len() - 1];
     let mut d_inv_a = &d_inv * mat;
-    //let norm = normalize_mat(&mut d_inv_a);
-    //info!("Norm of D^-1 A: {:.2e}", norm);
-    //d_inv_a *= 4.0 / 3.0;
+    //d_inv_a *= 4.0 / (3.0 * norm);
+    //d_inv_a *= 3.0 / (4.0 * norm);
+    //d_inv_a /= norm;
     d_inv_a *= 0.66;
     let smoothed = &d_inv_a * &*p;
     let new_p = &*p - &smoothed;
@@ -330,7 +349,11 @@ pub fn smoothed_aggregation2(
     p = &p - &smoothed;
     */
     //if block_size == 6 {
-    p = block_jacobi(fine_mat, block_size, &p);
+    if block_size == 1 {
+        smooth_interpolation(fine_mat, &mut p, 1, 0.66);
+    } else {
+        p = block_jacobi(fine_mat, block_size, &p);
+    };
     //}
     //
     //let postsmooth_info = InterpolationInfo::new(&p);

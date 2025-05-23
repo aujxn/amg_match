@@ -10,7 +10,6 @@ use ndarray::{par_azip, Array2, OwnedRepr};
 use ndarray_linalg::{cholesky::*, Norm};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

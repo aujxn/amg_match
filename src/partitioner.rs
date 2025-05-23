@@ -3,13 +3,13 @@
 //! this code into other projects as well.
 
 use metis::Graph;
-use ndarray_linalg::{EigVals, Eigh, OperationNorm, Scalar};
+use ndarray_linalg::{EigVals, Eigh, Scalar};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
-use sprs::TriMatBase;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::interpolation::{smooth_interpolation, smoothed_aggregation};
+use crate::interpolation::smoothed_aggregation;
 use crate::{CooMatrix, CsrMatrix, Matrix, Vector};
 
 /// A non-overlapping partition of square matrix (or 'graph').
@@ -20,6 +20,51 @@ pub struct Partition {
 }
 
 impl Partition {
+    pub fn refine(
+        &mut self,
+        n_passes: usize,
+        mat: &CsrMatrix,
+        near_null: &Vector,
+        max_agg_size: Option<usize>,
+    ) {
+        let (strength, row_sums, inverse_total) = build_weighted_matrix_csr(&mat, &near_null);
+        #[cfg(debug_assertions)]
+        self.validate();
+        //self.info();
+        refine_partition(
+            self,
+            &strength,
+            &row_sums,
+            inverse_total,
+            max_agg_size,
+            n_passes,
+        );
+        #[cfg(debug_assertions)]
+        self.validate();
+    }
+
+    pub fn update_node_to_agg(&mut self) {
+        for (agg_id, agg) in self.agg_to_node.iter().enumerate() {
+            for idx in agg.iter().copied() {
+                self.node_to_agg[idx] = agg_id;
+            }
+        }
+    }
+
+    pub fn update_agg_to_node(&mut self) {
+        let n_aggs: usize = self
+            .node_to_agg
+            .iter()
+            .copied()
+            .max()
+            .expect("You tried to update an empty partition");
+        let mut new_aggs = vec![BTreeSet::new(); n_aggs + 1];
+        for (node_id, agg_id) in self.node_to_agg.iter().copied().enumerate() {
+            new_aggs[agg_id].insert(node_id);
+        }
+        self.agg_to_node = new_aggs;
+    }
+
     pub fn trivial(mat: Arc<CsrMatrix>) -> Self {
         let node_to_agg = (0..mat.rows()).collect();
         let agg_to_node = (0..mat.rows()).map(|i| BTreeSet::from([i])).collect();
@@ -31,6 +76,10 @@ impl Partition {
     }
 
     pub fn compose(&mut self, other: &Partition) {
+        #[cfg(debug_assertions)]
+        self.validate();
+        #[cfg(debug_assertions)]
+        other.validate();
         assert_eq!(self.agg_to_node.len(), other.node_to_agg.len());
         let mut new_agg_to_node = vec![BTreeSet::new(); other.agg_to_node.len()];
         for (i, agg_id) in self.node_to_agg.iter_mut().enumerate() {
@@ -38,10 +87,44 @@ impl Partition {
             new_agg_to_node[*agg_id].insert(i);
         }
         self.agg_to_node = new_agg_to_node;
+        #[cfg(debug_assertions)]
+        self.validate();
     }
 
-    pub fn cf(&self, block_size: usize) -> f64 {
-        (self.node_to_agg.len() / block_size) as f64 / self.agg_to_node.len() as f64
+    pub fn cf(&self) -> f64 {
+        self.node_to_agg.len() as f64 / self.agg_to_node.len() as f64
+    }
+
+    pub fn validate(&self) {
+        let mut visited = vec![false; self.node_to_agg.len()];
+        for (agg_id, agg) in self.agg_to_node.iter().enumerate() {
+            for node_id in agg.iter().copied() {
+                assert_eq!(agg_id, self.node_to_agg[node_id]);
+                assert!(!visited[node_id]);
+                visited[node_id] = true;
+            }
+        }
+        assert!(visited.into_iter().all(|visited| visited));
+    }
+
+    pub fn info(&self) {
+        let mut max_agg = usize::MIN;
+        let mut min_agg = usize::MAX;
+        for agg in self.agg_to_node.iter() {
+            if agg.len() > max_agg {
+                max_agg = agg.len();
+            }
+            if agg.len() < min_agg {
+                min_agg = agg.len();
+            }
+        }
+        info!(
+            "Partition has {} aggs ({:.2} avg size) with min size of {} and max size of {}",
+            self.agg_to_node.len(),
+            self.node_to_agg.len() as f64 / self.agg_to_node.len() as f64,
+            min_agg,
+            max_agg
+        );
     }
 }
 
@@ -88,7 +171,9 @@ pub fn metis_n(near_null: &'_ Vector, mat: Arc<CsrMatrix>, n_parts: usize) -> Pa
     let mut node_to_agg = Vec::with_capacity(mat.rows());
     let mut agg_to_node = vec![BTreeSet::new(); n_parts];
 
-    for (i, agg) in partition.into_iter().map(|agg| agg as usize).enumerate() {
+    for (i, agg) in partition.into_iter().enumerate() {
+        assert!(agg >= 0);
+        let agg = agg as usize;
         node_to_agg.push(agg);
         agg_to_node[agg].insert(i);
     }
@@ -97,7 +182,8 @@ pub fn metis_n(near_null: &'_ Vector, mat: Arc<CsrMatrix>, n_parts: usize) -> Pa
     {
         let all: BTreeSet<usize> = (0..mat.rows()).collect();
         let mut running = BTreeSet::new();
-        for agg in agg_to_node.iter() {
+        for (agg_id, agg) in agg_to_node.iter().enumerate() {
+            assert!(agg.len() > 1, "Agg {} has {} nodes", agg_id, agg.len());
             assert!(running.is_disjoint(agg));
             running.extend(agg);
         }
@@ -177,25 +263,37 @@ pub fn fix_small_aggregates(
             new_aggs.push(agg);
             new_node_to_agg[node_id] = agg_id;
         }
+
+        assert_eq!(
+            partition.agg_to_node.len() - new_aggs.len(),
+            too_small.len()
+        );
+
         for (i, j, _) in wants_to_merge {
             if too_small.contains(&i) && !too_small.contains(&j) {
                 let agg_id = new_node_to_agg[j];
                 new_aggs[agg_id].insert(i);
                 too_small.remove(&i);
+                assert_eq!(new_node_to_agg[i], 0);
                 new_node_to_agg[i] = agg_id;
             } else if too_small.contains(&j) && !too_small.contains(&i) {
                 let agg_id = new_node_to_agg[i];
                 new_aggs[agg_id].insert(j);
                 too_small.remove(&j);
+                assert_eq!(new_node_to_agg[j], 0);
                 new_node_to_agg[j] = agg_id;
             } else if too_small.contains(&j) && too_small.contains(&i) {
-                let agg_id = new_node_to_agg.len();
+                let agg_id = new_aggs.len();
                 let mut agg = BTreeSet::new();
                 agg.insert(i);
                 agg.insert(j);
                 new_aggs.push(agg);
+                assert_eq!(new_node_to_agg[i], 0);
+                assert_eq!(new_node_to_agg[j], 0);
                 new_node_to_agg[i] = agg_id;
                 new_node_to_agg[j] = agg_id;
+                too_small.remove(&i);
+                too_small.remove(&j);
             }
             if too_small.is_empty() {
                 break;
@@ -211,57 +309,367 @@ pub fn fix_small_aggregates(
     }
 }
 
+pub fn refine_partition(
+    partition: &mut Partition,
+    strength: &CsrMatrix,
+    row_sums: &Vector,
+    inverse_total: f64,
+    max_agg_size: Option<usize>,
+    n_passes: usize,
+) {
+    let neighbors: Vec<HashMap<usize, f64>> = strength
+        .outer_iterator()
+        .map(|row| row.iter().map(|x| (x.0, *x.1)).collect())
+        .collect();
+
+    for pass in 0..n_passes {
+        let mut swaps: Vec<(usize, usize, f64)> = partition
+            .node_to_agg
+            .par_iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(node_i, agg_id)| {
+                let mut out_deg: HashMap<usize, f64> = HashMap::new();
+                let agg = &partition.agg_to_node[agg_id];
+                let neighborhood = &neighbors[node_i];
+
+                let in_deg: f64 = agg
+                    .iter()
+                    .copied()
+                    .map(|node_j| {
+                        let a_ij = neighborhood.get(&node_j).copied().unwrap_or(0.0);
+                        a_ij - row_sums[node_i] * row_sums[node_j] * inverse_total
+                    })
+                    .sum();
+
+                for node_j in neighborhood.iter().map(|(j, _)| *j) {
+                    if !agg.contains(&node_j) {
+                        let agg_j = partition.node_to_agg[node_j];
+                        assert_ne!(
+                            agg_j, agg_id,
+                            "Node {} from agg {} is connected to node {} from agg {}.",
+                            node_i, agg_id, node_j, agg_j
+                        );
+                        if out_deg.get(&agg_j).is_none() {
+                            let deg: f64 = partition.agg_to_node[agg_j]
+                                .iter()
+                                .copied()
+                                .map(|node_j| {
+                                    let a_ij = neighborhood.get(&node_j).copied().unwrap_or(0.0);
+                                    a_ij - row_sums[node_i] * row_sums[node_j] * inverse_total
+                                })
+                                .sum();
+                            out_deg.insert(agg_j, deg);
+                        }
+                    }
+                }
+
+                match max_agg_size {
+                    Some(max) => {
+                        let mut out_deg: Vec<(usize, f64)> = out_deg
+                            .into_iter()
+                            .filter(|(_new_agg, deg)| *deg > in_deg)
+                            .collect();
+                        //out_deg.par_sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                        out_deg.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+                        out_deg
+                            .into_iter()
+                            .find(|(new_agg, _deg)| partition.agg_to_node[*new_agg].len() < max)
+                    }
+                    None => out_deg
+                        .into_iter()
+                        .filter(|(_new_agg, deg)| *deg > in_deg)
+                        .max_by(|a, b| {
+                            a.1.partial_cmp(&b.1)
+                                .expect(&format!("can't compare {} and {}", a.1, b.1))
+                        }),
+                }
+                .map(|(new_agg, deg)| (node_i, new_agg, deg - in_deg))
+            })
+            .collect();
+
+        let mut alive = vec![true; partition.node_to_agg.len()];
+        swaps.par_sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+
+        if swaps.is_empty() {
+            //trace!("Pass {} is local minimum with no swaps.", pass);
+            break;
+        }
+        //trace!("Pass {} performing {} swaps.", pass, swaps.len());
+        let mut true_swaps = 0;
+        for (node_id, new_agg, _) in swaps {
+            if alive[node_id] {
+                let old_agg = partition.node_to_agg[node_id];
+                assert_ne!(new_agg, old_agg);
+                partition.node_to_agg[node_id] = new_agg;
+                let result = partition.agg_to_node[old_agg].remove(&node_id);
+                assert!(result);
+                partition.agg_to_node[new_agg].insert(node_id);
+                true_swaps += 1;
+
+                for (neighbor, _) in neighbors[node_id].iter() {
+                    alive[*neighbor] = false;
+                }
+            }
+        }
+        if pass % 10 == 0 {
+            trace!("Pass {}: {} actual swaps.", pass, true_swaps);
+            // TODO calculate actual modularity here
+        }
+        let old_agg_count = partition.agg_to_node.len();
+        partition.agg_to_node.retain(|agg| !agg.is_empty());
+        let new_agg_count = partition.agg_to_node.len();
+
+        if old_agg_count > new_agg_count {
+            for (agg_id, agg) in partition.agg_to_node.iter().enumerate() {
+                for node_id in agg.iter().copied() {
+                    partition.node_to_agg[node_id] = agg_id;
+                }
+            }
+        }
+        //partition.info();
+        #[cfg(debug_assertions)]
+        partition.validate();
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone)]
+pub enum BlockReductionStrategy {
+    #[default]
+    VectorMax,
+    SpectralRadius,
+    L2Norm,
+    FrobNorm,
+}
+
+#[derive(Default, Clone)]
+pub enum StrengthOfConnection {
+    #[default]
+    /// For challenging problems with anisotropies, heterogeneous problems, degenerate elements,
+    /// and complex geometries the modularity approach works best
+    ModularityMatrix,
+    /// With provided threshold parameter
+    Classical(f64),
+    /// You can provide your own weights for the strength of connection graph
+    Custom(Arc<CsrMatrix>),
+}
+
+#[derive(Default, Copy, Clone)]
+pub enum PartitionAlgorithm {
+    #[default]
+    /// Heavy weight matching
+    GreedyMatching,
+    /// Hybrid modified independent set
+    Hmis,
+    /// Parallel modified independent set
+    Pmis,
+    /// External graph partitioner, will crash if number of partitions is large
+    Metis,
+}
+
+pub struct PartitionBuilder {
+    pub mat: Arc<CsrMatrix>,
+    pub near_null: Arc<Vector>,
+    pub coarsening_factor: f64,
+    pub max_agg_size: Option<usize>,
+    pub min_agg_size: Option<usize>,
+    pub max_refinement_iters: usize,
+    pub vector_dim: usize,
+    pub block_reduction_strategy: Option<BlockReductionStrategy>,
+    pub strength: StrengthOfConnection,
+    pub algo: PartitionAlgorithm,
+}
+
+impl PartitionBuilder {
+    pub fn new(mat: Arc<CsrMatrix>, near_null: Arc<Vector>) -> Self {
+        Self {
+            mat,
+            near_null,
+            coarsening_factor: 8.0,
+            max_agg_size: None,
+            min_agg_size: None,
+            max_refinement_iters: 50,
+            vector_dim: 1,
+            block_reduction_strategy: None,
+            strength: StrengthOfConnection::default(),
+            algo: PartitionAlgorithm::default(),
+        }
+    }
+
+    pub fn set_matrix(&mut self, mat: Arc<CsrMatrix>, near_null: Arc<Vector>) {
+        self.mat = mat;
+        self.near_null = near_null;
+    }
+
+    pub fn build(&self) -> Partition {
+        /* TODO list:
+         *    - block_reduction impls
+         *    - strength impls
+         *    - algo impls
+         */
+        self.validate();
+
+        let (mut block_partition, scalar_mat, scalar_nn) =
+            if self.vector_dim > 1 && self.block_reduction_strategy.is_some() {
+                match self.block_reduction_strategy.unwrap() {
+                    BlockReductionStrategy::VectorMax => {
+                        reduce_block(self.mat.clone(), &self.near_null, self.vector_dim)
+                    }
+                    _ => unimplemented!(),
+                }
+            } else {
+                (
+                    Partition::trivial(self.mat.clone()),
+                    self.mat.clone(),
+                    self.near_null.clone(),
+                )
+            };
+
+        let mut partition = Partition::trivial(scalar_mat.clone());
+        // TODO refactor this monster block
+        match self.strength {
+            StrengthOfConnection::ModularityMatrix => {
+                match self.algo {
+                    PartitionAlgorithm::GreedyMatching => {
+                        modularity_matching(
+                            scalar_mat.clone(),
+                            &scalar_nn,
+                            self.coarsening_factor,
+                            self.max_agg_size,
+                            &mut partition,
+                        );
+                        if self.max_refinement_iters > 0 {
+                            partition.refine(
+                                self.max_refinement_iters,
+                                &scalar_mat,
+                                &scalar_nn,
+                                self.max_agg_size,
+                            );
+                        }
+
+                        let mut cf = partition.cf();
+                        while cf < self.coarsening_factor {
+                            trace!("Target CF of {:.2} not achieved with current CF of {:.2}, coarsening and matching again", self.coarsening_factor, cf);
+                            // TODO do full block SA? will it help?
+                            let (coarse_near_null, _r, _p, mat_coarse) =
+                                smoothed_aggregation(&scalar_mat, &partition, &scalar_nn, 1, 0.66);
+                            let match_count = modularity_matching(
+                                Arc::new(mat_coarse),
+                                &coarse_near_null,
+                                self.coarsening_factor,
+                                self.max_agg_size,
+                                &mut partition,
+                            );
+                            if match_count == 0 {
+                                warn!("Cannot coarsen further with provided parameters, terminating early with CF of {:.2} and target CF of {:.2}", cf, self.coarsening_factor);
+                                break;
+                            }
+
+                            if self.max_refinement_iters > 0 {
+                                partition.refine(
+                                    self.max_refinement_iters,
+                                    &scalar_mat,
+                                    &scalar_nn,
+                                    self.max_agg_size,
+                                );
+                            }
+                            cf = partition.cf();
+                        }
+
+                        block_partition.compose(&partition);
+                        block_partition.info();
+                        if let Some(min_agg) = self.min_agg_size {
+                            fix_small_aggregates(
+                                min_agg,
+                                &mut block_partition,
+                                &self.near_null,
+                                &self.mat,
+                            );
+                        }
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            _ => unimplemented!(),
+        }
+
+        block_partition
+    }
+
+    pub fn validate(&self) {
+        assert_eq!(self.mat.rows(), self.mat.cols());
+        assert_eq!(self.mat.cols(), self.near_null.len());
+        if let Some(max_agg) = self.max_agg_size {
+            if self.coarsening_factor > max_agg as f64 {
+                error!("Provided max aggregate size is {} which is larger than provided coarsening factor of {:.3} which is an impossible request. Algorithm will terminate before desired coarsening is achieved.", max_agg, self.coarsening_factor)
+            }
+            if let Some(min_agg) = self.min_agg_size {
+                if min_agg as f64 > max_agg as f64 / 2. {
+                    warn!("Provided min aggregate size is {} and max aggregate size is {}. Min aggregate size should be at least half of Max aggregate size for current implementation.", min_agg, max_agg)
+                }
+            }
+        }
+        if self.block_reduction_strategy.is_some() && self.vector_dim == 1 {
+            error!("Block reduction strategy is set to {:?} but vector dim is 1. Ignoring block reduction strategy...", self.block_reduction_strategy);
+        }
+        if self.block_reduction_strategy.is_none() && self.vector_dim > 1 {
+            warn!("Block reduction strategy is not set but vector dim is {}. Ignoring vector structure and treating matrix as scalar problem...", self.vector_dim);
+        }
+    }
+}
+
+/// Low level API for the greedy matching algorithm used for graph partitioning. Generally,
+/// building a partitioner with [`PartitionBuilder`] is the recommended API but we expose this for
+/// advanced usage.
+///
 /// Partition a symmetric matrix (undirected graph) with greedy matching of modularity weights.
 /// Performs pairwise matching until the desired coarsening factor is reached:
 ///
 /// `fine_size / coarse_size > coarsening_factor`
 ///
 /// To achieve balanced aggregates, choose a `max_agg_size = ceil(coarsening_factor)` or `ceil(coarsening_factor) + 1`.
-pub fn modularity_matching_partition(
+///
+/// The final argument allows one to continue an existing partition to match on. To start a new
+/// partition, use [`Partition::trivial`] and provide the same matrix as the `mat` argument as
+/// provided to the trivial partition. When continuing an existing partition, the matrix should
+/// relate aggregates of the existing partition which can be constructed using the
+/// [`interpolation`](module@interpolation) module.
+pub fn modularity_matching(
     mat: Arc<CsrMatrix>,
     near_null: &Vector,
     coarsening_factor: f64,
     max_agg_size: Option<usize>,
-    block_size: usize,
-) -> Partition {
+    partition: &mut Partition,
+) -> usize {
     // TODO should probably force unmatched into a "pair" each pass to prevent singletons
+    let fine_ndofs = partition.mat.rows() as f64;
     let ndofs = mat.rows();
-    let mut fine_ndofs = ndofs as f64;
-    let arc_mat = mat.clone();
-    let (mut aggs, mat, near_null) = if block_size == 1 {
-        let aggs = (0..ndofs)
-            .map(|i| {
-                let mut agg = BTreeSet::new();
-                agg.insert(i);
-                agg
-            })
-            .collect();
-        (aggs, mat, near_null.clone())
-    } else {
-        fine_ndofs /= block_size as f64;
-        reduce_block(&arc_mat, near_null, block_size)
-    };
+    let mut coarse_ndofs = ndofs as f64;
 
     let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix_coosym(&mat, &near_null);
+    let starting_agg_count = partition.agg_to_node.len();
 
     loop {
         let target_matches =
-            Some(((aggs.len() as f64 - (fine_ndofs as f64 / coarsening_factor)).ceil()) as usize);
-        //info!("Target: {:?}", target_matches);
+            Some(((coarse_ndofs - (fine_ndofs / coarsening_factor)).ceil()) as usize);
+
         let matches = greedy_matching(
             &mut a_bar,
             &mut row_sums,
-            &mut aggs,
+            &mut partition.agg_to_node,
             inverse_total,
             max_agg_size,
             target_matches,
         );
-        let coarse_ndofs = aggs.len() as f64;
-        let current_cf = fine_ndofs / coarse_ndofs;
+        coarse_ndofs = partition.agg_to_node.len() as f64;
+        let current_cf = partition.cf();
 
         if matches == 0 {
             trace!("Greedy partitioner terminated because no more matches are possible. target cf: {:.2} achieved: {:.2}", coarsening_factor, current_cf);
             break;
+        } else {
+            //trace!("Greedy partitioner step finished with {} matches. target cf: {:.2} achieved: {:.2}", matches, coarsening_factor, current_cf);
         }
         if current_cf > coarsening_factor {
             trace!(
@@ -273,30 +681,13 @@ pub fn modularity_matching_partition(
         }
     }
 
-    let mut node_to_agg = vec![0; ndofs];
-    for (agg_id, agg) in aggs.iter().enumerate() {
-        for idx in agg.iter().cloned() {
-            node_to_agg[idx] = agg_id;
-        }
-    }
+    partition.update_node_to_agg();
 
     #[cfg(debug_assertions)]
-    {
-        let all: BTreeSet<usize> = (0..ndofs).collect();
-        let mut running = BTreeSet::new();
-        for agg in aggs.iter() {
-            assert!(running.is_disjoint(agg));
-            running.extend(agg);
-        }
-        assert!(running.is_subset(&all));
-        assert!(running.symmetric_difference(&all).next().is_none());
-    }
+    partition.validate();
 
-    Partition {
-        mat: arc_mat,
-        node_to_agg,
-        agg_to_node: aggs,
-    }
+    let ending_agg_count = partition.agg_to_node.len();
+    starting_agg_count - ending_agg_count
 }
 
 pub fn block_strength(mat: &CsrMatrix, block_size: usize) -> CsrMatrix {
@@ -378,10 +769,10 @@ pub fn block_strength(mat: &CsrMatrix, block_size: usize) -> CsrMatrix {
 }
 
 pub fn reduce_block(
-    mat: &CsrMatrix,
+    mat: Arc<CsrMatrix>,
     near_null: &Vector,
     block_size: usize,
-) -> (Vec<BTreeSet<usize>>, Arc<CsrMatrix>, Vector) {
+) -> (Partition, Arc<CsrMatrix>, Arc<Vector>) {
     assert_eq!(near_null.len() % block_size, 0);
 
     let n_nodes = near_null.len() / block_size;
@@ -416,9 +807,77 @@ pub fn reduce_block(
 
     let p = p.to_csr();
     let pt = p.transpose_view();
-    let reduced = &pt * &(mat * &p);
+    let reduced = &pt * &(&*mat * &p);
 
-    (aggs, Arc::new(reduced.to_csr()), coarse_nearnull)
+    let node_to_agg = (0..mat.rows())
+        .map(|node_idx| node_idx / block_size)
+        .collect();
+    let partition = Partition {
+        mat,
+        agg_to_node: aggs,
+        node_to_agg,
+    };
+
+    (
+        partition,
+        Arc::new(reduced.to_csr()),
+        Arc::new(coarse_nearnull),
+    )
+}
+
+fn build_weighted_matrix_csr(mat: &CsrMatrix, near_null: &Vector) -> (CsrMatrix, Vector, f64) {
+    let mut row_sums: Vector = Vector::from_elem(mat.rows(), 0.0);
+    let mut total: f64 = 0.0;
+    let mut mat_bar = CooMatrix::new(mat.shape());
+
+    for (i, row) in mat.outer_iterator().enumerate() {
+        for (j, val) in row.iter().filter(|(j, _)| i != *j) {
+            let strength_ij = -val * near_null[i] * near_null[j];
+            mat_bar.add_triplet(i, j, strength_ij);
+            if i > j {
+                row_sums[i] += strength_ij;
+                row_sums[j] += strength_ij;
+                total += 2.0 * strength_ij;
+            }
+        }
+    }
+
+    // Some sanity checks since everthing here on is based on the assumption that
+    // $Aw \approx 0$ giving that the row-sums of $\bar{A}$ are positive. Things close to 0 and
+    // negative are fine, just set them to 0, but output a warning with how close.
+    //let mut counter = 0;
+    let mut total_bad = 0.0;
+    let mut min = 0.0;
+
+    for sum in row_sums.iter_mut() {
+        if *sum < 0.0 {
+            //counter += 1;
+            if *sum < min {
+                min = *sum;
+            }
+            total_bad += *sum;
+            *sum = 0.0;
+        }
+    }
+
+    /*
+        if counter > 0 {
+            warn!(
+                "{} of {} rows had negative rowsums. Average negative: {:.1e}, worst negative: {:.1e}",
+                counter,
+                row_sums.len(),
+                total_bad / (counter as f64),
+                min
+            );
+        }
+    */
+
+    let mut inv_total = 1.0 / (total - total_bad);
+    if !inv_total.is_finite() {
+        inv_total = 0.0;
+    }
+
+    (mat_bar.to_csr(), row_sums, inv_total)
 }
 
 fn build_weighted_matrix_coosym(

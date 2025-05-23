@@ -23,9 +23,15 @@ int main(int argc, char *argv[]) {
   args.ParseCheck();
 
   Mesh serial_mesh(mesh_file);
+  // Mesh serial_mesh = Mesh::MakeCartesian3D(10, 10, 10, Element::TETRAHEDRON,
+  // 100, 100, 100);
   ParMesh mesh(MPI_COMM_WORLD, serial_mesh);
   serial_mesh.Clear(); // the serial mesh is no longer needed
   int dim = mesh.Dimension();
+  if (Mpi::Root()) {
+    cout << "Mesh dim: " << dim << endl;
+  }
+
   for (int i = 0; i < refinements; ++i) {
     mesh.UniformRefinement();
   }
@@ -43,15 +49,16 @@ int main(int argc, char *argv[]) {
   ParGridFunction x(&fespace);
   x = 0.0;
 
-  ConstantCoefficient one(1.0);
+  ConstantCoefficient f(1000.0);
   ParLinearForm b(&fespace);
-  b.AddDomainIntegrator(new DomainLFIntegrator(one));
+  b.AddDomainIntegrator(new DomainLFIntegrator(f));
   b.Assemble();
 
   // double epsilon = 1e-6;
-  double epsilon = 1e-4;
+  double epsilon = 1e-3;
   double theta = (60.0 / 180.0) * 3.1415;
-  double phi = (27.0 / 180.0) * 3.1415;
+  // double phi = (27.0 / 180.0) * 3.1415;
+  double phi = 0.0;
 
   MatrixConstantCoefficient *diffusion_coef;
 
@@ -65,6 +72,7 @@ int main(int argc, char *argv[]) {
     coef.Elem(0, 0) += epsilon;
     coef.Elem(1, 1) += epsilon;
     coef.Elem(2, 2) += epsilon;
+
     // cout << "Coefficient matrix: ";
     // coef.Print();
 
@@ -110,14 +118,14 @@ int main(int argc, char *argv[]) {
     timer.Start();
   }
 
-  // CGSolver solver(MPI_COMM_WORLD);
-  SLISolver solver(MPI_COMM_WORLD);
-  //  M.SetRelaxType(18);
-  // M.SetCycleNumSweeps(3, 3);
+  CGSolver solver(MPI_COMM_WORLD);
+  // SLISolver solver(MPI_COMM_WORLD);
+  //       M.SetRelaxType(18);
+  //      M.SetCycleNumSweeps(3, 3);
   solver.SetRelTol(1e-12);
   solver.SetMaxIter(10000);
   mfem::IterativeSolver::PrintLevel pl;
-  solver.SetPrintLevel(pl.Summary());
+  solver.SetPrintLevel(pl.Iterations());
   solver.SetOperator(A);
   solver.SetPreconditioner(M);
   solver.Mult(B, X);

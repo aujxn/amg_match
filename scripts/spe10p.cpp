@@ -91,8 +91,8 @@ int main(int argc, char *argv[]) {
   // M.SetCycleType(2);
   CGSolver solver(MPI_COMM_WORLD);
   // SLISolver solver(MPI_COMM_WORLD);
-  M.SetRelaxType(18);
-  M.SetCycleNumSweeps(3, 3);
+  // M.SetRelaxType(18);
+  // M.SetCycleNumSweeps(3, 3);
   solver.SetRelTol(1e-12);
   solver.SetMaxIter(10000);
   solver.SetPrintLevel(1);

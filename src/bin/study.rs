@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::{fs::File, io::Write, time::Duration};
 
-use amg_match::hierarchy::Hierarchy;
 use amg_match::interpolation::InterpolationType;
-use amg_match::preconditioner::{BlockSmootherType, Multilevel, SmootherType};
+use amg_match::preconditioner::{BlockSmootherType, SmootherType};
 use amg_match::{
     adaptive::AdaptiveBuilder,
     preconditioner::Composite,
@@ -11,7 +10,6 @@ use amg_match::{
     utils::{format_duration, load_system},
 };
 use amg_match::{CsrMatrix, Vector};
-use ndarray_linalg::hstack;
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use plotters::prelude::*;
@@ -75,11 +73,12 @@ fn main() {
     pretty_env_logger::init();
 
     let mfem_mats = [
-        ("data/anisotropy", "anisotropy_2d"),
+        //("data/anisotropy", "anisotropy_2d"),
+        ("data/anisotropy", "anisotropy_3d_2r"),
         //("data/spe10", "spe10_0"),
         //("data/elasticity/4", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
-        //("data/laplace", "1"),
+        //("data/laplace", "6"),
     ];
 
     for (prefix, name) in mfem_mats {
@@ -116,6 +115,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     {
         let transpose = mat.transpose_view().to_csr();
 
+        #[cfg(debug_assertions)]
         for (i, (csr_row, transposed_row)) in mat
             .outer_iterator()
             .zip(transpose.outer_iterator())
@@ -126,7 +126,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
                 if vt != v {
                     let rel_err = (v - vt).abs() / v.abs().max(vt.abs());
                     let abs_err = (v - vt).abs();
-                    assert!(rel_err.min(abs_err) < 1e-12, "Symmetry check failed. A_{},{} is {:.3e} but A_{},{} is {:.3e}. Relative error: {:.3e}, Absolute error: {:.3e}", 
+                    assert!(rel_err.min(abs_err) < 1e-12, "Symmetry check failed. A_{},{} is {:.3e} but A_{},{} is {:.3e}. Relative error: {:.3e}, Absolute error: {:.3e}",
                         i, j, v, j, i, vt,
                         rel_err, abs_err);
                 }
@@ -135,16 +135,19 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 12;
-    //let coarsening_factor = 16.0;
-    let coarsening_factor = 6.0;
-    let test_iters = 100;
+    let max_components = 8;
+    let coarsening_factor = 16.0;
+    //let coarsening_factor = 8.0;
+    let test_iters = 70;
 
     let smoother_type = SmootherType::DiagonalCompensatedBlock(
-        //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
-        BlockSmootherType::GaussSeidel,
+        BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+        //BlockSmootherType::DenseCholesky,
+        //BlockSmootherType::GaussSeidel,
         //BlockSmootherType::IncompleteCholesky,
-        16,
+        //BlockSmootherType::ConjugateGradient(1e-12),
+        1024,
+        //256,
     );
     //let smoother_type = SmootherType::L1;
     //let smoother_type = SmootherType::GaussSeidel;
@@ -156,9 +159,9 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         .with_smoother(smoother_type)
         .with_interpolator(interp_type)
         .with_smoothing_steps(1)
-        .cycle_type(2)
+        .cycle_type(1)
         //.set_block_size(3)
-        .set_near_null_dim(3)
+        .set_near_null_dim(6)
         .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
@@ -245,7 +248,7 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
     let epsilon = 1e-12;
     let num_tests = 2;
     let mut all_results = vec![Vec::new(); num_tests];
-    let max_minutes = 2;
+    let max_minutes = 5;
 
     let dim = mat.rows();
     info!("Solving {}", name);
@@ -275,7 +278,7 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
                 .with_log_interval(LogInterval::Time(Duration::from_secs(10)))
         };
         let num_components = pc.components().len();
-        let max_iter = 500 / ((2 * (num_components - 1)) + 1);
+        let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
         let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
             .with_solver(method)
             .with_max_iter(max_iter);
