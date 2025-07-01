@@ -16,7 +16,7 @@ def read_gf(file, skip=0):
 
     return np.array(vals)
 
-for r in range(2,6):
+for r in range(5,6):
     mat = mmread(f"../data/elasticity/{r}/elasticity_3d.mtx")
     mat = mat.tobsr(blocksize=(3,3))
     #mat = mat.tocsr()

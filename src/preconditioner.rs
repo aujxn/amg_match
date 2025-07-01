@@ -669,9 +669,9 @@ impl MultilevelBuilder {
 //      - test spd of precon again
 pub struct Multilevel {
     pub hierarchy: Hierarchy,
-    forward_smoothers: Vec<Arc<dyn LinearOperator + Sync + Send>>,
-    backward_smoothers: Option<Vec<Arc<dyn LinearOperator + Sync + Send>>>,
-    mu: usize,
+    pub forward_smoothers: Vec<Arc<dyn LinearOperator + Sync + Send>>,
+    pub backward_smoothers: Option<Vec<Arc<dyn LinearOperator + Sync + Send>>>,
+    pub mu: usize,
 }
 
 impl LinearOperator for Multilevel {

@@ -74,7 +74,8 @@ fn main() {
 
     let mfem_mats = [
         //("data/anisotropy", "anisotropy_2d"),
-        ("data/anisotropy", "anisotropy_3d_2r"),
+        //("data/anisotropy", "anisotropy_3d_2r"),
+        ("data/lanl/cg/", "ref4_p1"),
         //("data/spe10", "spe10_0"),
         //("data/elasticity/4", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
@@ -135,10 +136,10 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 8;
-    let coarsening_factor = 16.0;
-    //let coarsening_factor = 8.0;
-    let test_iters = 70;
+    let max_components = 12;
+    //let coarsening_factor = 16.0;
+    let coarsening_factor = 8.0;
+    let test_iters = 100;
 
     let smoother_type = SmootherType::DiagonalCompensatedBlock(
         BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
@@ -161,7 +162,7 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         .with_smoothing_steps(1)
         .cycle_type(1)
         //.set_block_size(3)
-        .set_near_null_dim(6)
+        .set_near_null_dim(8)
         .with_max_test_iters(test_iters);
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
@@ -278,7 +279,7 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
                 .with_log_interval(LogInterval::Time(Duration::from_secs(10)))
         };
         let num_components = pc.components().len();
-        let max_iter = 2000 / ((2 * (num_components - 1)) + 1);
+        let max_iter = 300 / ((2 * (num_components - 1)) + 1);
         let solver = base_solver(mat.clone(), pc.clone(), guess.clone())
             .with_solver(method)
             .with_max_iter(max_iter);

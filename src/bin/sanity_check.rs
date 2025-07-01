@@ -16,11 +16,19 @@ extern crate log;
 fn main() {
     pretty_env_logger::init();
 
-    let epsilon = 1e-8;
+    let epsilon = 1e-12;
     let mut results: Vec<(usize, usize, usize)> = Vec::new();
     //let mut results: Vec<(usize, usize)> = Vec::new();
-    let method = IterativeMethod::StationaryIteration;
-    //let method = IterativeMethod::ConjugateGradient;
+    //let method = IterativeMethod::StationaryIteration;
+    let method = IterativeMethod::ConjugateGradient;
+
+    let smoother = SmootherType::DiagonalCompensatedBlock(
+        //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+        //BlockSmootherType::GaussSeidel,
+        BlockSmootherType::IncompleteCholesky,
+        64,
+    );
+    let interpolator = InterpolationType::SmoothedAggregation((1, 0.66));
 
     for i in 2..8 {
         let prefix = "data/laplace";
@@ -37,16 +45,8 @@ fn main() {
 
         let adaptive_builder = AdaptiveBuilder::new(mat.clone())
             .with_max_components(1)
-            //.with_smoother(SmootherType::L1)
-            .with_smoother(SmootherType::DiagonalCompensatedBlock(
-                BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
-                //BlockSmootherType::GaussSeidel,
-                16,
-            ))
-            //.with_smoother(SmootherType::BlockL1)
-            //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
-            .with_interpolator(InterpolationType::Classical)
-            //.with_interpolator(InterpolationType::UnsmoothedAggregation)
+            .with_smoother(smoother)
+            .with_interpolator(interpolator)
             .with_smoothing_steps(1)
             .with_max_test_iters(10)
             .with_coarsening_factor(cf);
@@ -54,21 +54,7 @@ fn main() {
         let (multi_pc, _, _) = adaptive_builder.build();
         let multi_pc = Arc::new(multi_pc);
 
-        let adaptive_builder = AdaptiveBuilder::new(mat.clone())
-            .with_max_components(1)
-            .with_max_level(2)
-            //.with_smoother(SmootherType::L1)
-            .with_smoother(SmootherType::DiagonalCompensatedBlock(
-                BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
-                //BlockSmootherType::GaussSeidel,
-                16,
-            ))
-            //.with_interpolator(InterpolationType::SmoothedAggregation((1, 0.66)))
-            .with_interpolator(InterpolationType::Classical)
-            //.with_interpolator(InterpolationType::UnsmoothedAggregation)
-            .with_smoothing_steps(1)
-            .with_max_test_iters(10)
-            .with_coarsening_factor(cf);
+        let adaptive_builder = adaptive_builder.with_max_level(2);
         let (two_pc, _, _) = adaptive_builder.build();
         let two_pc = Arc::new(two_pc);
 

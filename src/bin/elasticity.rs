@@ -1,29 +1,23 @@
 use std::sync::Arc;
-use std::{fs::File, io::Write, time::Duration};
 
 use amg_match::hierarchy::Hierarchy;
-use amg_match::interpolation::{smoothed_aggregation, smoothed_aggregation2, InterpolationType};
-use amg_match::partitioner::modularity_matching_partition;
+use amg_match::interpolation::smoothed_aggregation2;
+use amg_match::partitioner::{BlockReductionStrategy, PartitionBuilder};
 use amg_match::preconditioner::{
-    BlockSmootherType, LinearOperator, Multilevel, SmootherType, SymmetricGaussSeidel, L1,
+    BlockSmoother, BlockSmootherType, LinearOperator, Multilevel, SmootherType,
+    SymmetricGaussSeidel, L1,
 };
+use amg_match::solver::Direct;
+use amg_match::utils::orthonormalize_mgs;
 use amg_match::{
-    adaptive::AdaptiveBuilder,
-    preconditioner::Composite,
-    solver::{Iterative, IterativeMethod, LogInterval, SolveInfo},
-    utils::{format_duration, load_system},
+    solver::{Iterative, IterativeMethod, LogInterval},
+    utils::load_system,
 };
-use amg_match::{CooMatrix, CsrMatrix, Vector};
-use chrono::format::format;
-use ndarray::linalg::{general_mat_mul, general_mat_vec_mul};
-use ndarray::{stack, Array, Array6, Axis};
-use ndarray_linalg::krylov::{AppendResult, Orthogonalizer, MGS};
-use ndarray_linalg::{InnerProduct, Norm, SVDInto};
+use amg_match::{CsrMatrix, Vector};
+use ndarray::{stack, Axis};
+use ndarray_linalg::Norm;
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
-use plotters::prelude::*;
-use serde::{Deserialize, Serialize};
-use sprs::io::read_matrix_market;
 
 #[macro_use]
 extern crate log;
@@ -31,29 +25,58 @@ extern crate log;
 fn main() {
     pretty_env_logger::init();
 
-    let prefix = "data/elasticity/2";
-    let name = "elasticity_3d";
+    let mut results = Vec::new();
+    for refine in 2..7 {
+        let prefix = format!("data/elasticity/{}", refine);
+        let name = "elasticity_3d";
 
-    let (mat, b, _coords, rbms, truedofs_map) = load_system(prefix, name, false);
-    let nrows = b.len();
-    let rbm_smoothing_steps = 10;
-    let rbms = smooth_rbms(
-        rbms.unwrap(),
-        mat.clone(),
-        &truedofs_map,
-        rbm_smoothing_steps,
-    );
-    //value_aggregation(mat, b, &truedofs_map);
-    //let pc = build_pc(mat, name);
-    //eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
+        let (mat, b, _coords, rbms, truedofs_map) = load_system(&prefix, name, false);
+        let rbm_smoothing_steps = 10;
+        let rbms = smooth_rbms(
+            rbms.unwrap(),
+            mat.clone(),
+            &truedofs_map,
+            rbm_smoothing_steps,
+        );
+        //value_aggregation(mat, b, &truedofs_map);
+        //let pc = build_pc(mat, name);
+        //eval_nearnull_and_rbm_spaces(rbms, Arc::new(pc));
 
-    sa_test(mat, &b, &rbms);
+        let result = sa_test(mat, &b, &rbms);
+        results.push((refine, result));
+
+        println!(
+            "{:>8}  {:>8}  {:>13}  {:>17}  {:>12}  {:>17}  {:>12}",
+            "refine",
+            "ndofs",
+            "op complexity",
+            "stationary block",
+            "cg block",
+            "stationary scalar",
+            "cg scalar"
+        );
+
+        println!(
+            "{:-<8}  {:-<8}  {:-<13}  {:-<17}  {:-<12}  {:-<17}  {:-<12}",
+            "", "", "", "", "", "", "",
+        );
+
+        for (refine, result) in results.iter() {
+            println!(
+                "{:>8}  {:>8}  {:>13.2}  {:>17}  {:>12}  {:>17}  {:>12}",
+                refine, result.0, result.1, result.2, result.3, result.4, result.5
+            );
+        }
+    }
 }
 
-fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
-    let mut coarsening_factor = 16.0;
+fn sa_test(
+    mat: Arc<CsrMatrix>,
+    b: &Vector,
+    smooth_rbms: &Vec<Vector>,
+) -> (usize, f64, usize, usize, usize, usize) {
+    let coarsening_factor = 12.0;
     let smoothing_steps = 10;
-    let mut max_agg_size = Some(18 * 3);
     let mut block_size = 3;
     let mut ndofs = b.len();
     let mut current_mat = mat.clone();
@@ -83,6 +106,7 @@ fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
             .with_preconditioner(Arc::new(l1));
 
         //smoother.apply_input(&zeros, &mut near_null);
+        //let mut basis = Vec::new();
         for mut col in near_nullspace.columns_mut() {
             let mut col_own = col.to_owned();
             smoother.apply_input(&zeros, &mut col_own);
@@ -91,32 +115,32 @@ fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
                 .zip(col_own.iter())
                 .for_each(|(a, b)| *a = *b);
         }
+        //let ip_op = None;
+        //orthonormalize_mgs(&mut near_nullspace, ip_op);
         near_null = near_nullspace.sum_axis(Axis(1));
         near_null /= near_null.norm_l2();
 
-        let mut partition = modularity_matching_partition(
-            current_mat.clone(),
-            &near_null,
-            coarsening_factor,
-            max_agg_size,
-            block_size,
-        );
-
-        while partition.cf(block_size) < coarsening_factor {
-            info!("Target CF of {:.2} not achieved with current CF of {:.2}, coarsening and matching again", coarsening_factor, partition.cf(block_size));
-            let (coarse_near_null, _r, _p, mat_coarse) =
-                smoothed_aggregation(&current_mat, &partition, &near_null, 1, 0.66);
-            let target_cf = coarsening_factor / partition.cf(block_size);
-            let max_agg_size = Some(target_cf.ceil() as usize);
-            let new_partition = modularity_matching_partition(
-                Arc::new(mat_coarse),
-                &coarse_near_null,
-                target_cf,
-                max_agg_size,
-                1,
-            );
-            partition.compose(&new_partition);
+        let arc_nn = Arc::new(near_null.clone());
+        let near_null_dim = 6;
+        let mut partition_builder = PartitionBuilder::new(current_mat.clone(), arc_nn);
+        let cf = coarsening_factor * (near_null_dim as f64 / block_size as f64);
+        partition_builder.max_agg_size = Some((cf * 1.5).ceil() as usize);
+        let mut min_agg = ((cf.ceil() + 2.) / 2.0).floor();
+        let min_agg_for_sa = (near_null_dim as f64 / block_size as f64).ceil();
+        if min_agg < min_agg_for_sa {
+            min_agg = min_agg_for_sa;
         }
+        if min_agg < 1. {
+            min_agg = 1.;
+        }
+        partition_builder.min_agg_size = Some(min_agg as usize);
+        partition_builder.coarsening_factor = cf;
+        if block_size > 1 {
+            partition_builder.vector_dim = block_size;
+            partition_builder.block_reduction_strategy = Some(BlockReductionStrategy::default());
+        }
+        let partition = partition_builder.build();
+
         let (coarse_near_nullspace, r, p, mat_coarse) =
             smoothed_aggregation2(&current_mat, &partition, block_size, &near_nullspace);
         current_mat = Arc::new(mat_coarse);
@@ -135,28 +159,68 @@ fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
         near_nullspace = coarse_near_nullspace;
 
         block_size = 6;
-        coarsening_factor = 7.0;
-        max_agg_size = Some(8 * 6);
     }
 
     info!("Hierarchy info: {:?}", hierarchy);
     hierarchy.print_table();
     println!("{:?}", hierarchy.vdims);
 
-    /*
-    hierarchy.consolidate(coarsening_factor);
-    info!("Hierarchy info (consolidated): {:?}", hierarchy);
-    hierarchy.print_table();
-    println!("{:?}", hierarchy.vdims);
-    */
+    let mut hierarchy_scalar = hierarchy.clone();
+    for val in hierarchy_scalar.vdims.iter_mut() {
+        *val = 1;
+    }
+    let mut smoothers = Vec::new();
+    let mut smoothers_scalar = Vec::new();
 
-    //let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::IncompleteCholesky, 16);
-    let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::GaussSeidel, 16);
-    //let smoother_type = SmootherType::DiagonalCompensatedBlock(BlockSmootherType::DenseCholesky, 16);
-    //let smoother_type = SmootherType::GaussSeidel;
-    //let smoother_type = SmootherType::IncompleteCholesky;
-    let ml = Arc::new(Multilevel::new(hierarchy, true, smoother_type, 1, 1));
+    let compensated_block_size = 500;
+    let block_smoother_type = BlockSmootherType::GaussSeidel;
+    //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse);
 
+    let (fine_smoother_block, fine_smoother_scalar) = build_smoothers(
+        mat.clone(),
+        block_smoother_type,
+        compensated_block_size,
+        hierarchy.get_near_null(0).clone(),
+        hierarchy.vdims[0],
+    );
+
+    smoothers.push(fine_smoother_block);
+    smoothers_scalar.push(fine_smoother_scalar);
+
+    let coarse_index = hierarchy.get_coarse_mats().len() - 1;
+    for (level, mat) in hierarchy.get_coarse_mats().iter().enumerate() {
+        if level == coarse_index {
+            let solver = Arc::new(Direct::new(&mat));
+            smoothers.push(solver.clone());
+            smoothers_scalar.push(solver);
+        } else {
+            let (block, scalar) = build_smoothers(
+                mat.clone(),
+                block_smoother_type,
+                compensated_block_size,
+                hierarchy.get_near_null(level + 1).clone(),
+                hierarchy.vdims[level + 1],
+            );
+
+            smoothers.push(block);
+            smoothers_scalar.push(scalar);
+        }
+    }
+
+    let ml = Arc::new(Multilevel {
+        hierarchy: hierarchy.clone(),
+        forward_smoothers: smoothers,
+        backward_smoothers: None,
+        mu: 1,
+    });
+    let ml_scalar = Arc::new(Multilevel {
+        hierarchy: hierarchy.clone(),
+        forward_smoothers: smoothers_scalar,
+        backward_smoothers: None,
+        mu: 1,
+    });
+
+    let op_comp = ml.get_hierarchy().op_complexity();
     let epsilon = 1e-12;
     let max_iter = 1000;
     let guess = Vector::random(mat.rows(), Uniform::new(-1., 1.));
@@ -167,9 +231,83 @@ fn sa_test(mat: Arc<CsrMatrix>, b: &Vector, smooth_rbms: &Vec<Vector>) {
         .with_log_interval(LogInterval::Iterations(10))
         .with_max_iter(max_iter);
 
-    solver.solve(b);
+    let (_, solve_info) = solver.solve(b);
+    let stationary_block = solve_info.iterations;
+
     solver = solver.with_solver(IterativeMethod::ConjugateGradient);
-    solver.solve(b);
+    let (_, solve_info) = solver.solve(b);
+    let cg_block = solve_info.iterations;
+
+    solver = solver.with_preconditioner(ml_scalar);
+    solver = solver.with_solver(IterativeMethod::StationaryIteration);
+    let (_, solve_info) = solver.solve(b);
+    let stationary_scalar = solve_info.iterations;
+
+    solver = solver.with_solver(IterativeMethod::ConjugateGradient);
+    let (_, solve_info) = solver.solve(b);
+    let cg_scalar = solve_info.iterations;
+
+    (
+        b.len(),
+        op_comp,
+        stationary_block,
+        cg_block,
+        stationary_scalar,
+        cg_scalar,
+    )
+}
+
+fn build_smoothers(
+    mat: Arc<CsrMatrix>,
+    smoother: BlockSmootherType,
+    block_size: usize,
+    near_null: Arc<Vector>,
+    vdim: usize,
+) -> (
+    Arc<dyn LinearOperator + Sync + Send>,
+    Arc<dyn LinearOperator + Sync + Send>,
+) {
+    let cf;
+    if vdim * mat.rows() / block_size < 32 {
+        cf = mat.rows() as f64 / (32.0 * vdim as f64);
+    } else {
+        cf = block_size as f64 / vdim as f64;
+    }
+    info!(
+        "Building smoother: {:.2} cf, {} vdim, and {} len nn",
+        cf,
+        vdim,
+        near_null.len()
+    );
+    let mut builder = PartitionBuilder::new(mat.clone(), near_null);
+    builder.coarsening_factor = cf;
+    let max_agg = (cf * 1.1).ceil();
+    let min_agg = (max_agg / 1.5).floor();
+    builder.max_agg_size = Some(max_agg as usize);
+    builder.min_agg_size = Some(min_agg as usize);
+    builder.vector_dim = vdim;
+    builder.block_reduction_strategy = Some(BlockReductionStrategy::default());
+    let partition = Arc::new(builder.build());
+
+    partition.info();
+    let smoother_block = Arc::new(BlockSmoother::new(&*mat, partition.clone(), smoother, vdim));
+    let smoother_scalar = Arc::new(BlockSmoother::new(&*mat, partition, smoother, 1));
+
+    let zeros = Vector::from(vec![0.0; mat.cols()]);
+    let forward_solver = Iterative::new(mat.clone(), Some(zeros.clone()))
+        .with_solver(IterativeMethod::StationaryIteration)
+        .with_max_iter(1)
+        .with_preconditioner(smoother_block)
+        .with_relative_tolerance(1e-8)
+        .with_absolute_tolerance(f64::EPSILON);
+
+    let forward_solver_scalar = Iterative::new(mat.clone(), Some(zeros.clone()))
+        .with_solver(IterativeMethod::StationaryIteration)
+        .with_max_iter(1)
+        .with_preconditioner(smoother_scalar)
+        .with_relative_tolerance(1e-8)
+        .with_absolute_tolerance(f64::EPSILON);
+    (Arc::new(forward_solver), Arc::new(forward_solver_scalar))
 }
 
 /*
@@ -270,14 +408,25 @@ fn smooth_rbms(
         .with_solver(IterativeMethod::StationaryIteration)
         .with_preconditioner(Arc::new(l1));
 
-    rbms.into_iter()
+    let mut smooth_rbms: Vec<Vector> = rbms
+        .into_iter()
         .map(|rbm| {
+            /*
             let mut free = truedofs_map * &rbm;
             smoother.apply_input(&zeros, &mut free);
             free /= free.norm();
             free
+            */
+            truedofs_map * &rbm
         })
-        .collect()
+        .collect();
+    let ip_op = None;
+    orthonormalize_mgs(&mut smooth_rbms, ip_op);
+    for vec in smooth_rbms.iter_mut() {
+        smoother.apply_input(&zeros, vec);
+    }
+    orthonormalize_mgs(&mut smooth_rbms, ip_op);
+    smooth_rbms
 }
 
 /*

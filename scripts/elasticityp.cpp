@@ -68,20 +68,13 @@ int main(int argc, char *argv[]) {
     return 3;
   }
 
-  {
-    for (int l = 0; l < refinements; l++) {
-      mesh->UniformRefinement();
-    }
-  }
   ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
   delete mesh;
-  /*
-{
-  for (int l = 0; l < refinements; l++) {
-    pmesh->UniformRefinement();
+  {
+    for (int l = 0; l < refinements; l++) {
+      pmesh->UniformRefinement();
+    }
   }
-}
-  */
 
   //    Define a parallel finite element space on the parallel mesh. Here we
   //    use vector finite elements, i.e. dim copies of a scalar finite element

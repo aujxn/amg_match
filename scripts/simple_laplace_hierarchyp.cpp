@@ -27,13 +27,15 @@ int main(int argc, char *argv[]) {
   Hypre::Init();
   const char *mesh_file = "../data/meshes/beam-tri.vtk";
   int order = 1;
-  int refinements = 10;
+  int refinements = 8;
 
   Mesh serial_mesh(mesh_file);
   ParMesh mesh(MPI_COMM_WORLD, serial_mesh);
   serial_mesh.Clear(); // the serial mesh is no longer needed
-  for (int i = 0; i < refinements; ++i) {
+  mesh.UniformRefinement();
 
+  for (int i = 2; i < refinements; ++i) {
+    mesh.UniformRefinement();
     H1_FECollection fec(order, mesh.Dimension());
     ParFiniteElementSpace fespace(&mesh, &fec);
     HYPRE_BigInt total_num_dofs = fespace.GlobalTrueVSize();
@@ -66,20 +68,18 @@ int main(int argc, char *argv[]) {
     }
 
     HypreBoomerAMG M(A);
-    M.SetInterpolation(0);
+    // M.SetInterpolation(0);
 
-    // CGSolver solver(MPI_COMM_WORLD);
-    SLISolver solver(MPI_COMM_WORLD);
-    // M.SetCycleNumSweeps(3, 3);
-    solver.SetRelTol(1e-8);
+    CGSolver solver(MPI_COMM_WORLD);
+    // SLISolver solver(MPI_COMM_WORLD);
+    //  M.SetCycleNumSweeps(3, 3);
+    solver.SetRelTol(1e-12);
     solver.SetMaxIter(10000);
     mfem::IterativeSolver::PrintLevel pl;
     solver.SetPrintLevel(pl.Summary());
     solver.SetOperator(A);
     solver.SetPreconditioner(M);
     solver.Mult(B, X);
-
-    mesh.UniformRefinement();
   }
   return 0;
 }
