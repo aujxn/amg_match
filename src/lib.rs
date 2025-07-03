@@ -51,3 +51,52 @@ pub type CooMatrix = TriMatBase<Vec<usize>, Vec<f64>>;
 pub type Vector = Array1<f64>;
 pub type Matrix = Array2<f64>;
 pub type Cholesky = LdlNumeric<f64, usize>;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use chrono::Local;
+use lazy_static::lazy_static;
+
+// Lazily-initialised output directory.
+lazy_static! {
+    static ref OUTPUT_DIR: PathBuf = {
+        // 1. Ensure a base “output” folder exists (keeps things tidy).
+        let base = Path::new("output");
+        fs::create_dir_all(base)
+            .expect("Failed to create base output directory");
+
+        // 2. Pick a timestamped sub-folder name.
+        //    If it already exists, keep trying with _1, _2, …
+        let ts = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
+        for suffix in 0u32.. {
+            let candidate = if suffix == 0 {
+                base.join(&ts)
+            } else {
+                base.join(format!("{}_{}", ts, suffix))
+            };
+
+            if !candidate.exists() {
+                fs::create_dir_all(&candidate)
+                    .expect("Failed to create unique output directory");
+                return candidate;
+            }
+        }
+        unreachable!("u32 exhausted while searching for unique directory name")
+    };
+}
+
+/// Helper to build paths inside the output directory.
+///
+/// ```
+/// use std::io::Write;
+///
+/// let path = output_path("example.txt");
+/// let mut f = fs::File::create(&path)?;
+/// writeln!(f, "Hello, world!")?;
+///
+/// println!("Wrote to {}", path.display());
+/// ```
+pub fn output_path<S: AsRef<Path>>(file: S) -> PathBuf {
+    OUTPUT_DIR.join(file)
+}

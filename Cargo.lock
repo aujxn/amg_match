@@ -45,12 +45,14 @@ dependencies = [
  "image 0.25.5",
  "indexmap 1.9.3",
  "indicatif",
+ "lazy_static",
  "log",
  "metis",
  "ndarray",
  "ndarray-linalg",
  "ndarray-rand",
  "npyz",
+ "openblas-src",
  "plotters",
  "pretty_env_logger",
  "rand 0.9.0",
@@ -63,6 +65,8 @@ dependencies = [
  "structopt",
  "strum",
  "strum_macros",
+ "suitesparse_camd_sys",
+ "suitesparse_ldl_sys",
  "test-generator",
 ]
 
@@ -2488,12 +2492,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "suitesparse-src"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b2d4282b8c4261df4d4c69fe0025e500082f855a7677dee71abf911ccec4ac4"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "suitesparse_camd_sys"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a347cc5c6302c90a4571f0c8bd910eb63bbd2979f01aed685bc26c3ac1720d"
 dependencies = [
  "libc",
+ "suitesparse-src",
 ]
 
 [[package]]
@@ -2503,6 +2517,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdc6127eaeb2d3a6c3f3a2104e55cda4e25ac6d60a3f3a5598a79f965d07b41b"
 dependencies = [
  "libc",
+ "suitesparse-src",
 ]
 
 [[package]]

@@ -4,11 +4,12 @@ use std::{f64, usize};
 
 use ndarray_linalg::{InverseInto, Norm, QRInto};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::Matrix;
 use crate::{partitioner::Partition, CooMatrix, CsrMatrix, Vector};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum InterpolationType {
     UnsmoothedAggregation,
     SmoothedAggregation((usize, f64)),

@@ -20,6 +20,15 @@ pub struct Partition {
 }
 
 impl Partition {
+    pub fn from_node_to_agg(mat: Arc<CsrMatrix>, node_to_agg: Vec<usize>) -> Self {
+        let mut new_part = Self {
+            mat,
+            agg_to_node: Vec::new(),
+            node_to_agg,
+        };
+        new_part.update_agg_to_node();
+        new_part
+    }
     pub fn refine(
         &mut self,
         n_passes: usize,

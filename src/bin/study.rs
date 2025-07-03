@@ -9,7 +9,7 @@ use amg_match::{
     solver::{Iterative, IterativeMethod, LogInterval, SolveInfo},
     utils::{format_duration, load_system},
 };
-use amg_match::{CsrMatrix, Vector};
+use amg_match::{output_path, CsrMatrix, Vector};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 use plotters::prelude::*;
@@ -75,7 +75,7 @@ fn main() {
     let mfem_mats = [
         //("data/anisotropy", "anisotropy_2d"),
         //("data/anisotropy", "anisotropy_3d_2r"),
-        ("data/lanl/cg/", "ref4_p1"),
+        ("data/lanl/cg", "ref1_p1"),
         //("data/spe10", "spe10_0"),
         //("data/elasticity/4", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
@@ -136,13 +136,14 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 12;
+    let max_components = 4;
     //let coarsening_factor = 16.0;
     let coarsening_factor = 8.0;
-    let test_iters = 100;
+    let test_iters = 50;
 
     let smoother_type = SmootherType::DiagonalCompensatedBlock(
-        BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+        //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
+        BlockSmootherType::AutoCholesky,
         //BlockSmootherType::DenseCholesky,
         //BlockSmootherType::GaussSeidel,
         //BlockSmootherType::IncompleteCholesky,
@@ -159,11 +160,18 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         .with_coarsening_factor(coarsening_factor)
         .with_smoother(smoother_type)
         .with_interpolator(interp_type)
-        .with_smoothing_steps(1)
-        .cycle_type(1)
+        .with_smoothing_steps(3)
+        .cycle_type(2)
         //.set_block_size(3)
-        .set_near_null_dim(8)
+        .set_near_null_dim(12)
         .with_max_test_iters(test_iters);
+
+    let config_filename = "adaptive_config.json";
+    let config_path = output_path(config_filename);
+    trace!("config string path: {:?}", config_path);
+    let mut file = File::create(config_path).unwrap();
+    let serialized = serde_json::to_string(&adaptive_builder).unwrap();
+    file.write_all(&serialized.as_bytes()).unwrap();
 
     info!("Starting {} CF-{:.0}", name, coarsening_factor);
     let timer = std::time::Instant::now();
@@ -326,9 +334,10 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
 }
 
 fn save_plot_raw_data(title: &str, serialized: String) {
-    let data_filename = format!("images/{}.json", title);
-    trace!("Plot data filename: {}", data_filename);
-    let mut file = File::create(data_filename).unwrap();
+    let data_filename = format!("{}.json", title);
+    let data_path = output_path(data_filename);
+    trace!("Plot data path: {:?}", data_path);
+    let mut file = File::create(data_path).unwrap();
     file.write_all(&serialized.as_bytes()).unwrap();
 }
 
@@ -336,7 +345,8 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
     let serialized = serde_json::to_string(&data).unwrap();
     save_plot_raw_data(title, serialized);
 
-    let filename = format!("images/{}.png", title);
+    let filename = format!("{}.png", title);
+    let filename = output_path(filename);
     let root = BitMapBackend::new(&filename, (900, 600)).into_drawing_area();
     root.fill(&WHITE).unwrap();
 
@@ -447,14 +457,15 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
         .border_style(&BLACK)
         .draw()
         .unwrap();
-    trace!("Plotting filename: {}", filename);
+    trace!("Plotting filename: {:?}", filename);
 }
 
 fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: usize) {
     let serialized = serde_json::to_string(&(data, step_size)).unwrap();
     save_plot_raw_data(title, serialized);
 
-    let filename = format!("images/{}.png", title);
+    let filename = format!("{}.png", title);
+    let filename = output_path(filename);
     let root = BitMapBackend::new(&filename, (900, 600)).into_drawing_area();
     root.fill(&WHITE).unwrap();
 
@@ -553,5 +564,5 @@ fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: usize)
         .border_style(&BLACK)
         .draw()
         .unwrap();
-    trace!("Plotting filename: {}", filename);
+    trace!("Plotting history: {:?}", filename);
 }

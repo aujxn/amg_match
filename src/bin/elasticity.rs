@@ -150,6 +150,7 @@ fn sa_test(
             Arc::new(r),
             Arc::new(p),
             Arc::new(partition),
+            Arc::new(near_nullspace),
             Arc::new(near_null),
             block_size,
         );

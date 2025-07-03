@@ -5,6 +5,7 @@
 /data
 /venv
 /build
+/output
 *.html
 *.svg
 *.png

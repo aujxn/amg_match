@@ -1,8 +1,9 @@
 //! This module contains the code to construct the adaptive preconditioner.
 
 use crate::{
-    hierarchy::Hierarchy,
+    hierarchy::{Hierarchy, HierarchyData},
     interpolation::{smoothed_aggregation2, InterpolationType},
+    output_path,
     parallel_ops::spmv,
     partitioner::{BlockReductionStrategy, PartitionBuilder},
     preconditioner::{
@@ -15,11 +16,14 @@ use crate::{
 };
 use ndarray_linalg::Norm;
 use ndarray_rand::{rand_distr::Uniform, RandomExt};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fmt::Write as _, usize};
+use std::{fmt::Write as _, fs::File, io::Write, usize};
 
+#[derive(Serialize, Deserialize)]
 pub struct AdaptiveBuilder {
+    #[serde(skip_serializing)]
     mat: Arc<CsrMatrix>,
     coarsening_factor: f64,
     max_level: Option<usize>,
@@ -243,8 +247,8 @@ impl AdaptiveBuilder {
                     .unwrap_or(&hierarchy.get_mat(0))
                     .clone();
 
-                //let coarse_smoother = Arc::new(L1::new(&current_a));
-                let coarse_smoother = Arc::new(SymmetricGaussSeidel::new(current_a.clone()));
+                let coarse_smoother = Arc::new(L1::new(&current_a));
+                //let coarse_smoother = Arc::new(SymmetricGaussSeidel::new(current_a.clone()));
                 find_near_null_coarse(current_a, coarse_smoother, &mut near_null, 3);
             }
             info!("Hierarchy info: {:?}", hierarchy);
@@ -290,7 +294,8 @@ impl AdaptiveBuilder {
         let dim = self.mat.rows();
 
         // Find initial near null to get the iterations started
-        let fine_smoother = Arc::new(SymmetricGaussSeidel::new(self.mat.clone()));
+        //let fine_smoother = Arc::new(SymmetricGaussSeidel::new(self.mat.clone()));
+        let fine_smoother = Arc::new(L1::new(&self.mat));
         let stationary = Iterative::new(self.mat.clone(), None)
             .with_solver(IterativeMethod::StationaryIteration)
             .with_max_iter(10)
@@ -363,6 +368,7 @@ impl AdaptiveBuilder {
                     Arc::new(r),
                     Arc::new(p),
                     Arc::new(partition),
+                    Arc::new(matrix_nullspace),
                     Arc::new(near_null),
                     block_size,
                 );
@@ -389,7 +395,7 @@ impl AdaptiveBuilder {
                     break;
                 }
 
-                let coarse_smoother = Arc::new(SymmetricGaussSeidel::new(current_mat.clone()));
+                let coarse_smoother = Arc::new(L1::new(&current_mat));
                 let stationary = Iterative::new(current_mat.clone(), None)
                     .with_solver(IterativeMethod::StationaryIteration)
                     .with_max_iter(5)
@@ -408,6 +414,13 @@ impl AdaptiveBuilder {
             info!("Hierarchy info: {:?}", hierarchy);
             // TODO this shoud be in Debug impl along with interp::info...
             hierarchy.print_table();
+
+            let filename = format!("hierarchy_{}.json", preconditioner.components().len());
+            let path = output_path(filename);
+            let data: HierarchyData = hierarchy.clone().into();
+            let mut file = File::create(path).unwrap();
+            let serialized = serde_json::to_string(&data).unwrap();
+            file.write_all(&serialized.as_bytes()).unwrap();
 
             let ml1 = Arc::new(Multilevel::new(
                 hierarchy,
@@ -556,6 +569,7 @@ fn find_near_null_multi(
 ) -> (f64, Vec<f64>) {
     let mut iter = 0;
     let max_iter = test_iters.unwrap_or(usize::MAX);
+    let max_time = Duration::from_secs(3000);
     let start = Instant::now();
     let mut last_log = start;
     let log_interval = Duration::from_secs(10);
@@ -653,7 +667,7 @@ fn find_near_null_multi(
         }
 
         //if old_convergence_factor / convergence_factor > 0.999 || iter >= max_iter {
-        if iter >= max_iter {
+        if iter >= max_iter || elapsed > max_time {
             info!(
                 "{} components:\n\tconvergence factor: {:.3}\n\tconvergence factor per cycle: {:.3}\n\tsearch iters: {}\n\tsearch time: {}",
                 composite_preconditioner.components().len(),

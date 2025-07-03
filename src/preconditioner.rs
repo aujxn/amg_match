@@ -12,6 +12,7 @@ use indicatif::ParallelProgressIterator;
 use ndarray::{par_azip, Axis};
 use ndarray_linalg::{hstack, FactorizeC, Norm, SolveC, SVD, UPLO};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 use sprs::linalg::trisolve::{lsolve_csr_dense_rhs as lsolve, usolve_csr_dense_rhs as usolve};
 use sprs::FillInReduction;
 use sprs_ldl::Ldl;
@@ -88,7 +89,7 @@ pub enum GaussSeidelDirection {
 /// Smoother options for constructing preconditioners. All smoothers should be A-convergent as
 /// preconditioners for Stationary Linear Iterations or Conjugate Gradient as long as the matrix
 /// `A` is SPD.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SmootherType {
     /// An L1-scaled Jacobi smoother. Application is a diagonal matrix so this smoother has a low
@@ -123,7 +124,7 @@ pub enum SmootherType {
 
 /// The `SmootherType::DiagonalCompenstatedBlock` can be solved or smoothed with different options
 /// specified here. For more customization you will have to build your smoother yourself.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BlockSmootherType {
     /// Performs one symmetric Gauss-Seidel sweep per block.
@@ -135,11 +136,11 @@ pub enum BlockSmootherType {
     /// If the sparsity of a block is below 30% then solve with sparse Cholesky decomposition but
     /// otherwise just use dense Cholesky decompositions. Warning: large blocks can consume lots of
     /// memory even when the sparse decomposition is done.
-    AutoCholesky(FillInReduction),
+    AutoCholesky,
     /// Solve each block by cacheing a sparse Cholesky decomposition of each block using the
     /// provided reordering. Warning: If blocks are large and the reordering approach doesn't
     /// effectively reduce fill in this can consume lots of memory.
-    SparseCholesky(FillInReduction),
+    SparseCholesky,
     /// Solve each block by cacheing a dense Cholesky decomposition of each block. Warning: if the
     /// blocks are large this can consume all available memory very quickly.
     DenseCholesky,
@@ -364,7 +365,8 @@ impl BlockSmoother {
                         let block_smoother: Arc<dyn LinearOperator + Send + Sync> = Arc::new(IncompleteCholesky::new(Arc::new(csr)));
                         block_smoother
                     },
-                    BlockSmootherType::AutoCholesky(fill_in_reduction) => {
+                    //BlockSmootherType::AutoCholesky(fill_in_reduction) => {
+                    BlockSmootherType::AutoCholesky => {
                         if csr.density() > 0.3 {
                             let dense = csr.to_dense();
 
@@ -379,7 +381,8 @@ impl BlockSmoother {
                         } else {
                             let chol = Ldl::new()
                                 .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-                                .fill_in_reduction(fill_in_reduction)
+                                //.fill_in_reduction(fill_in_reduction)
+                                .fill_in_reduction(FillInReduction::CAMDSuiteSparse)
                                 .numeric(csr.view())
                                 .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
                             let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {
@@ -391,11 +394,13 @@ impl BlockSmoother {
                     BlockSmootherType::DenseCholesky=> {
                         Arc::new(Direct::new(&Arc::new(csr)))
                     },
-                    BlockSmootherType::SparseCholesky(fill_in_reduction)=> {
+                    //BlockSmootherType::SparseCholesky(fill_in_reduction)=> {
+                    BlockSmootherType::SparseCholesky => {
 
                         let chol = Ldl::new()
                             .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-                            .fill_in_reduction(fill_in_reduction)
+                            //.fill_in_reduction(fill_in_reduction)
+                            .fill_in_reduction(FillInReduction::CAMDSuiteSparse)
                             .numeric(csr.view())
                             .expect("Constructing block Jacobi smoother failed because the restriction to an aggregate isn't SPD... Make sure A is SPD.");
                         let f: Arc<dyn LinearOperator + Sync + Send> = Arc::new(move |in_vec: &Vector| -> Vector {

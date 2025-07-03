@@ -3,6 +3,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use ndarray_linalg::Norm;
+use serde::{Deserialize, Serialize};
 use sprs::is_symmetric;
 
 use crate::interpolation::{
@@ -13,13 +14,39 @@ use crate::{CsrMatrix, Matrix, Vector};
 
 #[derive(Clone)]
 pub struct Hierarchy {
+    //#[serde(skip)]
     mat: Arc<CsrMatrix>,
     restrictions: Vec<Arc<CsrMatrix>>,
     interpolations: Vec<Arc<CsrMatrix>>,
     coarse_mats: Vec<Arc<CsrMatrix>>,
     partitions: Vec<Arc<Partition>>,
+    candidates: Vec<Arc<Matrix>>,
     near_nulls: Vec<Arc<Vector>>,
     pub vdims: Vec<usize>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HierarchyData {
+    interpolations: Vec<Arc<CsrMatrix>>,
+    // only node_to_agg for each level needed to reconstruct
+    partitions: Vec<Vec<usize>>,
+    candidates: Vec<Arc<Matrix>>,
+    vdims: Vec<usize>,
+}
+
+impl From<Hierarchy> for HierarchyData {
+    fn from(item: Hierarchy) -> Self {
+        HierarchyData {
+            interpolations: item.interpolations.clone(),
+            partitions: item
+                .partitions
+                .iter()
+                .map(|p| p.node_to_agg.clone())
+                .collect(),
+            candidates: item.candidates.clone(),
+            vdims: item.vdims.clone(),
+        }
+    }
 }
 
 impl fmt::Debug for Hierarchy {
@@ -58,6 +85,7 @@ impl Hierarchy {
             interpolations: Vec::new(),
             coarse_mats: Vec::new(),
             partitions: Vec::new(),
+            candidates: Vec::new(),
             near_nulls: Vec::new(),
             vdims: Vec::new(),
         }
@@ -109,6 +137,7 @@ impl Hierarchy {
         r: Arc<CsrMatrix>,
         p: Arc<CsrMatrix>,
         partition: Arc<Partition>,
+        candidates: Arc<Matrix>,
         near_null: Arc<Vector>,
         vdim: usize,
     ) {
@@ -117,56 +146,42 @@ impl Hierarchy {
         self.interpolations.push(p);
         self.partitions.push(partition);
         self.near_nulls.push(near_null);
+        self.candidates.push(candidates);
         self.vdims.push(vdim);
     }
 
-    pub fn from_partitions(
-        fine_mat: Arc<CsrMatrix>,
-        partitions: Vec<Arc<Partition>>,
-        near_null: &Matrix,
-    ) -> Self {
+    pub fn from_data(fine_mat: Arc<CsrMatrix>, data: HierarchyData) -> Self {
         let mut mat = (*fine_mat).clone();
         let mut restrictions = Vec::new();
-        let mut interpolations = Vec::new();
-        let mut coarse_mats = Vec::new();
-        let mut near_nulls = Vec::new();
-        let mut vdims = Vec::new();
-        let mut next_near_null = near_null.clone();
-        let mut block_size = 1;
-        vdims.push(block_size);
+        let mut coarse_mats: Vec<Arc<CsrMatrix>> = Vec::new();
+        let mut partitions = Vec::new();
 
-        let mut collapsed = Vector::zeros(next_near_null.nrows());
-        for near_null in next_near_null.columns().into_iter() {
-            collapsed = collapsed + near_null;
-        }
-        near_nulls.push(Arc::new(collapsed));
-
-        for partition in partitions.iter() {
-            let (coarse_near_null, r, p, mat_coarse) =
-                smoothed_aggregation2(&mat, &**partition, block_size, &next_near_null);
+        for (interpolation, node_to_agg) in
+            data.interpolations.iter().zip(data.partitions.into_iter())
+        {
+            let p = &**interpolation;
+            let r = p.transpose_view().to_csr();
+            let mat_coarse = &r * &(&mat * p);
+            let partition = if coarse_mats.is_empty() {
+                Partition::from_node_to_agg(fine_mat.clone(), node_to_agg)
+            } else {
+                Partition::from_node_to_agg(coarse_mats.last().unwrap().clone(), node_to_agg)
+            };
+            partitions.push(Arc::new(partition));
             mat = mat_coarse.clone();
             coarse_mats.push(Arc::new(mat_coarse));
-            interpolations.push(Arc::new(p));
             restrictions.push(Arc::new(r));
-            next_near_null = coarse_near_null.clone();
-            block_size = next_near_null.ncols();
-            //near_nulls.push(Arc::new(next_near_null.column(0).to_owned()));
-            let mut collapsed = Vector::zeros(next_near_null.nrows());
-            for near_null in next_near_null.columns().into_iter() {
-                collapsed = collapsed + near_null;
-            }
-            near_nulls.push(Arc::new(collapsed));
-            vdims.push(block_size);
         }
 
         Self {
             mat: fine_mat,
             restrictions,
-            interpolations,
+            interpolations: data.interpolations,
             coarse_mats,
             partitions,
-            near_nulls,
-            vdims,
+            candidates: data.candidates,
+            near_nulls: Vec::new(),
+            vdims: data.vdims,
         }
     }
 
