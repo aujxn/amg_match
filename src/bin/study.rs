@@ -16,6 +16,11 @@ use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
 use sprs::io::read_matrix_market;
 
+use log::LevelFilter;
+use log4rs::append::file::FileAppender;
+use log4rs::config::{Appender, Config, Root};
+use log4rs::encode::pattern::PatternEncoder;
+
 /*
 * TODO
 * - redo cg tests with new convergence norm
@@ -70,12 +75,31 @@ struct Opt {
  */
 
 fn main() {
-    pretty_env_logger::init();
+    //pretty_env_logger::init();
 
+    let log_path = output_path("output.log");
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+        .build(log_path)
+        .unwrap();
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(
+            Root::builder()
+                .appender("logfile")
+                .build(LevelFilter::Trace),
+        )
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
+
+    let args: Vec<String> = std::env::args().collect();
     let mfem_mats = [
         //("data/anisotropy", "anisotropy_2d"),
         //("data/anisotropy", "anisotropy_3d_2r"),
-        ("data/lanl/cg", "ref1_p1"),
+        //("data/lanl/cg", "ref4_p1"),
+        ("data/lanl/cg", &args[1]),
         //("data/spe10", "spe10_0"),
         //("data/elasticity/4", "elasticity_3d"),
         //("data/laplace/3d", "3d_laplace_1"),
@@ -136,10 +160,10 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
 
     info!("nrows: {} nnz: {}", mat.rows(), mat.nnz());
-    let max_components = 4;
+    let max_components = 15;
     //let coarsening_factor = 16.0;
-    let coarsening_factor = 8.0;
-    let test_iters = 50;
+    let coarsening_factor = 6.0;
+    let test_iters = 100;
 
     let smoother_type = SmootherType::DiagonalCompensatedBlock(
         //BlockSmootherType::AutoCholesky(sprs::FillInReduction::CAMDSuiteSparse),
@@ -160,13 +184,13 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
         .with_coarsening_factor(coarsening_factor)
         .with_smoother(smoother_type)
         .with_interpolator(interp_type)
-        .with_smoothing_steps(3)
-        .cycle_type(2)
+        .with_smoothing_steps(1)
+        .cycle_type(1)
         //.set_block_size(3)
-        .set_near_null_dim(12)
+        .set_near_null_dim(32)
         .with_max_test_iters(test_iters);
 
-    let config_filename = "adaptive_config.json";
+    let config_filename = "adaptive.json";
     let config_path = output_path(config_filename);
     trace!("config string path: {:?}", config_path);
     let mut file = File::create(config_path).unwrap();
@@ -219,10 +243,13 @@ fn study(mat: Arc<CsrMatrix>, b: Vector, name: &str) -> Composite {
     }
     */
 
+    /*
     let mut step_size = pc.components().len() / 6;
     if step_size == 0 {
-        step_size += 1;
+    step_size += 1;
     }
+    */
+    let step_size = 1;
 
     let construction_time = timer.elapsed();
     info!(
@@ -267,13 +294,18 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
 
     let log_result = |solver_type: IterativeMethod, solve_results: &Vec<SolveResults>| {
         info!("{:?} Results", solver_type);
-        info!("{:>15} {:>15} {:>15}", "components", "iters", "v-cycles",);
+        info!(
+            "{:>15} {:>15} {:>15} {:>15} {:>15}",
+            "components", "converged", "iters", "v-cycles", "seconds"
+        );
         for result in solve_results.iter() {
             info!(
-                "{:15} {:15} {:15}",
+                "{:15} {:15} {:15} {:>15} {:>15}",
                 result.num_components,
+                result.solve_info.converged,
                 result.solve_info.iterations,
                 result.solve_info.iterations * ((2 * (result.num_components - 1)) + 1),
+                result.solve_info.time.as_secs(),
             );
         }
     };
@@ -303,16 +335,14 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
             solve_info,
         });
         log_result(method, &results);
-        let title = format!("{}_{:?}", name, method);
-        plot_test_solve(&title, &results);
     };
 
-    while pc.components().len() > 0 {
-        let methods = [
-            IterativeMethod::StationaryIteration,
-            IterativeMethod::ConjugateGradient,
-        ];
+    let methods = [
+        IterativeMethod::StationaryIteration,
+        IterativeMethod::ConjugateGradient,
+    ];
 
+    while pc.components().len() > 0 {
         //let methods = [IterativeMethod::StationaryIteration];
         let mut counter = 0;
         for method in methods.iter() {
@@ -331,20 +361,24 @@ fn test_solve(name: &str, mat: Arc<CsrMatrix>, b: &Vector, mut pc: Composite, st
             let _ = pc.components_mut().pop();
         }
     }
-}
 
-fn save_plot_raw_data(title: &str, serialized: String) {
-    let data_filename = format!("{}.json", title);
-    let data_path = output_path(data_filename);
-    trace!("Plot data path: {:?}", data_path);
-    let mut file = File::create(data_path).unwrap();
-    file.write_all(&serialized.as_bytes()).unwrap();
+    for (method, data) in methods.iter().zip(all_results.iter()) {
+        let title = format!("{:?}", method);
+        let data_filename = format!("{}.json", title);
+        let data_path = output_path(data_filename);
+        trace!("Plot data path: {:?}", data_path);
+        let mut data_file = File::create(data_path).unwrap();
+        let serialized = serde_json::to_string(data).unwrap();
+        data_file.write_all(&serialized.as_bytes()).unwrap();
+    }
+
+    for (method, data) in methods.iter().zip(all_results.iter()) {
+        let title = format!("{:?}", method);
+        plot_test_solve(&title, data);
+    }
 }
 
 fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
-    let serialized = serde_json::to_string(&data).unwrap();
-    save_plot_raw_data(title, serialized);
-
     let filename = format!("{}.png", title);
     let filename = output_path(filename);
     let root = BitMapBackend::new(&filename, (900, 600)).into_drawing_area();
@@ -461,8 +495,8 @@ fn plot_test_solve(title: &str, data: &Vec<SolveResults>) {
 }
 
 fn plot_convergence_history(title: &str, data: &Vec<Vec<f64>>, step_size: usize) {
-    let serialized = serde_json::to_string(&(data, step_size)).unwrap();
-    save_plot_raw_data(title, serialized);
+    //let serialized = serde_json::to_string(&(data, step_size)).unwrap();
+    //save_plot_raw_data(title, serialized);
 
     let filename = format!("{}.png", title);
     let filename = output_path(filename);

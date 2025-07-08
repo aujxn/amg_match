@@ -32,6 +32,7 @@
 use ndarray::{Array1, Array2};
 use sprs::{CsMatBase, TriMatBase};
 use sprs_ldl::LdlNumeric;
+use num_cpus;
 
 #[macro_use]
 extern crate log;
@@ -61,29 +62,38 @@ use lazy_static::lazy_static;
 // Lazily-initialised output directory.
 lazy_static! {
     static ref OUTPUT_DIR: PathBuf = {
-        // 1. Ensure a base “output” folder exists (keeps things tidy).
-        let base = Path::new("output");
-        fs::create_dir_all(base)
-            .expect("Failed to create base output directory");
 
-        // 2. Pick a timestamped sub-folder name.
-        //    If it already exists, keep trying with _1, _2, …
-        let ts = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
-        for suffix in 0u32.. {
-            let candidate = if suffix == 0 {
-                base.join(&ts)
-            } else {
-                base.join(format!("{}_{}", ts, suffix))
-            };
+        let slurm_job_id = std::env::var("SLURM_JOB_ID");
+        match slurm_job_id {
+            Ok(id) => {
+                // if we are on the orca cluster save to scratch
+                let base = Path::new("/scratch/ajn6-amg");
+                let slurm_job_name = std::env::var("SLURM_JOB_NAME").unwrap();
+                return base.join(format!("{}-{}", slurm_job_name, id));
+            },
+            Err(_) => {
+                let base = Path::new("./output");
+                fs::create_dir_all(base)
+                    .expect("Failed to create base output directory");
+                let ts = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
+                for suffix in 0u32.. {
+                    let candidate = if suffix == 0 {
+                        base.join(&ts)
+                    } else {
+                        base.join(format!("{}_{}", ts, suffix))
+                    };
 
-            if !candidate.exists() {
-                fs::create_dir_all(&candidate)
-                    .expect("Failed to create unique output directory");
-                return candidate;
+                    if !candidate.exists() {
+                        fs::create_dir_all(&candidate)
+                            .expect("Failed to create unique output directory");
+                        return candidate;
+                    }
+                }
+                unreachable!("u32 exhausted while searching for unique directory name")
             }
         }
-        unreachable!("u32 exhausted while searching for unique directory name")
     };
+    static ref N_CPUS: usize = num_cpus::get();
 }
 
 /// Helper to build paths inside the output directory.

@@ -290,6 +290,21 @@ impl AdaptiveBuilder {
         let mut preconditioner = Composite::new(self.mat.clone());
         let test_data = Vec::new();
         let hist = Vec::new();
+        let results_filename = "results.txt";
+        let path = output_path(results_filename);
+        let mut results_file = File::create(path).unwrap();
+        let slurm_job_id = std::env::var("SLURM_JOB_ID");
+        let slurm_job_name = std::env::var("SLURM_JOB_NAME");
+        if slurm_job_id.is_ok() && slurm_job_name.is_ok() {
+            results_file.write_all(
+                format!(
+                    "job name: {}, job ID: {}\n",
+                    slurm_job_name.unwrap(),
+                    slurm_job_id.unwrap()
+                )
+                .as_bytes(),
+            );
+        }
 
         let dim = self.mat.rows();
 
@@ -352,6 +367,17 @@ impl AdaptiveBuilder {
                 }
                 partition_builder.min_agg_size = Some(min_agg as usize);
                 partition_builder.coarsening_factor = cf;
+                //partition_builder.max_refinement_iters = 0;
+
+                /*
+                let near_nulls: Vec<Arc<Vector>> = matrix_nullspace
+                    .columns()
+                    .into_iter()
+                    .map(|col| Arc::new(col.to_owned()))
+                    .collect();
+                partition_builder.near_nulls = Some(near_nulls);
+                */
+
                 if block_size > 1 {
                     partition_builder.vector_dim = block_size;
                     partition_builder.block_reduction_strategy =
@@ -422,6 +448,7 @@ impl AdaptiveBuilder {
             let serialized = serde_json::to_string(&data).unwrap();
             file.write_all(&serialized.as_bytes()).unwrap();
 
+            let complexity = hierarchy.op_complexity();
             let ml1 = Arc::new(Multilevel::new(
                 hierarchy,
                 self.solve_coarsest_exactly,
@@ -440,6 +467,13 @@ impl AdaptiveBuilder {
                 &mut near_nullspace,
                 self.test_iters,
             );
+            let results_string: String = format!(
+                "{}: {:.3}, {:.3}\n",
+                preconditioner.components().len(),
+                complexity,
+                convergence_rate
+            );
+            results_file.write_all(results_string.as_bytes()).unwrap();
 
             if let Some(max_components) = self.max_components {
                 if preconditioner.components().len() >= max_components {
@@ -574,6 +608,7 @@ fn find_near_null_multi(
     let mut last_log = start;
     let log_interval = Duration::from_secs(10);
     //let zeros = Vector::from(vec![0.0; mat.rows()]);
+    let cycles = ((composite_preconditioner.components().len() * 2) - 1) as f64;
     let mut old_convergence_factor = 0.0;
     let mut history = Vec::new();
     //let ip_op = Some(mat.as_ref());
@@ -654,7 +689,6 @@ fn find_near_null_multi(
         let elapsed = now - start;
         let elapsed_secs = elapsed.as_millis() as f64 / 1000.0;
 
-        let cycles = ((composite_preconditioner.components().len() * 2) - 1) as f64;
         if now - last_log > log_interval {
             trace!(
                 "iteration {}:\n\ttotal search time: {:.0}s\n\tConvergence Factor: {:.3}\n\t CF per cycle: {:.3}",
@@ -676,7 +710,7 @@ fn find_near_null_multi(
                 iter,
                 format_duration(&elapsed)
             );
-            return (convergence_factor, history);
+            return (convergence_factor.powf(1.0 / cycles), history);
         }
         old_convergence_factor = convergence_factor;
     }

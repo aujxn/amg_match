@@ -7,6 +7,7 @@ use crate::parallel_ops::spmv;
 use crate::partitioner::{BlockReductionStrategy, Partition, PartitionBuilder};
 use crate::solver::{Direct, Iterative, IterativeMethod};
 use crate::{CooMatrix, CsrMatrix, Matrix, Vector};
+use crate::N_CPUS;
 use core::f64;
 use indicatif::ParallelProgressIterator;
 use ndarray::{par_azip, Axis};
@@ -147,6 +148,105 @@ pub enum BlockSmootherType {
     /// Solve each block to a relative accuracy provided (1e-6 is probably okay most the time but
     /// problem dependent) iteratively with conjugate gradient.
     ConjugateGradient(f64),
+}
+
+pub enum BlockSmootherPartition {
+    BlockSize(usize),
+    NumBlocks(usize),
+    Partition(Partition),
+}
+
+pub struct BlockSmootherBuilder {
+    pub mat: Arc<CsrMatrix>,
+    pub smoother: BlockSmootherType,
+    pub near_nulls: Arc<Matrix>,
+    pub vdim: usize,
+    pub partition_config: BlockSmootherPartition,
+}
+
+impl BlockSmootherBuilder {
+    pub fn new(mat: Arc<CsrMatrix>, smoother: BlockSmootherType, near_nulls: Arc<Matrix>, partition_config: BlockSmootherPartition) -> Self {
+        Self {
+            mat,
+            smoother,
+            near_nulls,
+            vdim: 1,
+            partition_config: partition_config,
+        }
+    }
+
+    pub fn build(&self) -> Arc<dyn LinearOperator + Send + Sync> {
+        /*
+        let strength = block_strength(&mat, vdim);
+        let near_null = Vector::ones(strength.rows());
+        let partition = metis_n(&near_null, Arc::new(strength), n_parts);
+        */
+        let vdim = self.vdim;
+        let mat = &self.mat;
+        let cf = match &self.partition_config {
+            BlockSmootherPartition::BlockSize(block_size) => {
+
+                if mat.rows() / block_size < *N_CPUS {
+                    (mat.rows() / vdim) as f64 / *N_CPUS as f64
+                } else {
+                    *block_size as f64 / vdim as f64
+                }
+            },
+            BlockSmootherPartition::NumBlocks(blocks) => {
+                self.mat.rows() as f64 / *blocks as f64
+            },
+            BlockSmootherPartition::Partition(partition) => {
+                return 
+                Arc::new(BlockSmoother::new(
+                    &*mat,
+                    Arc::new(partition.clone()),
+                    self.smoother,
+                    vdim,
+                ));
+            },
+        };
+        /*
+        let near_nulls_vec: Vec<Arc<Vector>> = self.near_nulls
+        .columns()
+        .into_iter()
+        .map(|col| Arc::new(col.to_owned()))
+        .collect();
+        info!(
+        "Building smoother: {:.2} cf, {} vdim, and {} len nn",
+        cf,
+        vdim,
+        near_nulls_vec.len()
+        );
+        let mut builder = PartitionBuilder::new(mat.clone(), near_nulls_vec[0].clone());
+        */
+
+        let mut near_null = Vector::zeros(mat.rows());
+        for vec in self.near_nulls.columns() {
+            near_null += &vec.to_owned();
+        }
+        near_null /= near_null.norm_l2();
+        let mut builder = PartitionBuilder::new(mat.clone(), Arc::new(near_null));
+        builder.coarsening_factor = cf;
+        let max_agg = (cf * 1.1).ceil();
+        let min_agg = (max_agg / 1.5).floor();
+        //let min_agg = (cf / 2.0).floor();
+        builder.max_agg_size = Some(max_agg as usize);
+        builder.min_agg_size = Some(min_agg as usize);
+        if vdim > 1 {
+            builder.vector_dim = vdim;
+            builder.block_reduction_strategy = Some(BlockReductionStrategy::default());
+        }
+        //builder.near_nulls = Some(near_nulls_vec);
+        let partition = builder.build();
+
+        partition.info();
+        Arc::new(BlockSmoother::new(
+            &*mat,
+            Arc::new(partition),
+            self.smoother,
+            vdim,
+        ))
+    }
 }
 
 pub fn build_smoother(
@@ -697,6 +797,10 @@ impl Multilevel {
         let stationary = IterativeMethod::StationaryIteration;
         let pcg = IterativeMethod::ConjugateGradient;
 
+        let candidates = hierarchy.get_candidates();
+        let mut smoother_builder = BlockSmootherBuilder::new(fine_mat.clone(), BlockSmootherType::AutoCholesky, candidates[0].clone(), BlockSmootherPartition::BlockSize(1024));
+
+        /*
         let fine_smoother = build_smoother(
             fine_mat.clone(),
             smoother,
@@ -704,6 +808,9 @@ impl Multilevel {
             false,
             hierarchy.vdims[0],
         );
+        */
+        let fine_smoother = smoother_builder.build();
+
         let zeros = Vector::from(vec![0.0; fine_mat.cols()]);
         let forward_solver = Iterative::new(fine_mat.clone(), Some(zeros.clone()))
             .with_solver(stationary)
@@ -731,6 +838,7 @@ impl Multilevel {
                             // If the coarse problem is small or mostly dense then use dense direct
                             // decomposition method
                             solver = Arc::new(Direct::new(&mat));
+                            trace!("Coarse solver is dense direct because matrix has {} rows with density {:.2}", mat.rows(), mat.density());
                         } else {
                             // Otherwise solve with PCG to decent accuracy
                             let pc = Arc::new(L1::new(mat));
@@ -756,6 +864,7 @@ impl Multilevel {
                             );
                         }
                     } else {
+                        /*
                         let smoother = build_smoother(
                             mat.clone(),
                             smoother,
@@ -763,6 +872,11 @@ impl Multilevel {
                             false,
                             hierarchy.vdims[i + 1],
                         );
+                        */
+                        smoother_builder.mat = mat.clone();
+                        smoother_builder.near_nulls = candidates[i+1].clone();
+                        smoother_builder.vdim = hierarchy.vdims[i+1];
+                        let smoother = smoother_builder.build();
                         solver = Arc::new(
                             Iterative::new(mat.clone(), Some(zeros))
                                 .with_solver(stationary)

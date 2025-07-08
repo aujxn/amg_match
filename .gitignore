@@ -6,6 +6,7 @@
 /venv
 /build
 /output
+/logs
 *.html
 *.svg
 *.png

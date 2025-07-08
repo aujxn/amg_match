@@ -326,6 +326,10 @@ impl Hierarchy {
         &self.near_nulls[level]
     }
 
+    pub fn get_candidate(&self, level: usize) -> &Arc<Matrix> {
+        &self.candidates[level]
+    }
+
     /// Get a reference to the matrices Vec.
     pub fn get_coarse_mats(&self) -> &[Arc<CsrMatrix>] {
         &self.coarse_mats
@@ -348,6 +352,10 @@ impl Hierarchy {
 
     pub fn get_near_nulls(&self) -> &Vec<Arc<Vector>> {
         &self.near_nulls
+    }
+
+    pub fn get_candidates(&self) -> &Vec<Arc<Matrix>> {
+        &self.candidates
     }
 
     pub fn get_mat(&self, level: usize) -> Arc<CsrMatrix> {

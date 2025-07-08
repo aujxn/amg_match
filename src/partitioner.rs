@@ -9,10 +9,11 @@ use rayon::slice::ParallelSliceMut;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::interpolation::smoothed_aggregation;
+use crate::interpolation::{smoothed_aggregation, smoothed_aggregation2};
 use crate::{CooMatrix, CsrMatrix, Matrix, Vector};
 
 /// A non-overlapping partition of square matrix (or 'graph').
+#[derive(Clone)]
 pub struct Partition {
     pub mat: Arc<CsrMatrix>,
     pub node_to_agg: Vec<usize>,
@@ -480,6 +481,7 @@ pub enum PartitionAlgorithm {
 pub struct PartitionBuilder {
     pub mat: Arc<CsrMatrix>,
     pub near_null: Arc<Vector>,
+    pub near_nulls: Option<Vec<Arc<Vector>>>,
     pub coarsening_factor: f64,
     pub max_agg_size: Option<usize>,
     pub min_agg_size: Option<usize>,
@@ -495,10 +497,11 @@ impl PartitionBuilder {
         Self {
             mat,
             near_null,
+            near_nulls: None,
             coarsening_factor: 8.0,
             max_agg_size: None,
             min_agg_size: None,
-            max_refinement_iters: 50,
+            max_refinement_iters: 300,
             vector_dim: 1,
             block_reduction_strategy: None,
             strength: StrengthOfConnection::default(),
@@ -518,6 +521,12 @@ impl PartitionBuilder {
          *    - algo impls
          */
         self.validate();
+
+        /* Works worse than using sum of near-nulls.... Probably delete once commited to git
+        if self.near_nulls.is_some() {
+            return self.build_multi();
+        }
+        */
 
         let (mut block_partition, scalar_mat, scalar_nn) =
             if self.vector_dim > 1 && self.block_reduction_strategy.is_some() {
@@ -541,9 +550,12 @@ impl PartitionBuilder {
             StrengthOfConnection::ModularityMatrix => {
                 match self.algo {
                     PartitionAlgorithm::GreedyMatching => {
+                        let (mut a_bar, mut row_sums, inverse_total) =
+                            build_weighted_matrix_coosym(&scalar_mat, &scalar_nn);
                         modularity_matching(
-                            scalar_mat.clone(),
-                            &scalar_nn,
+                            &mut a_bar,
+                            &mut row_sums,
+                            inverse_total,
                             self.coarsening_factor,
                             self.max_agg_size,
                             &mut partition,
@@ -563,9 +575,12 @@ impl PartitionBuilder {
                             // TODO do full block SA? will it help?
                             let (coarse_near_null, _r, _p, mat_coarse) =
                                 smoothed_aggregation(&scalar_mat, &partition, &scalar_nn, 1, 0.66);
+                            let (mut a_bar, mut row_sums, inverse_total) =
+                                build_weighted_matrix_coosym(&mat_coarse, &coarse_near_null);
                             let match_count = modularity_matching(
-                                Arc::new(mat_coarse),
-                                &coarse_near_null,
+                                &mut a_bar,
+                                &mut row_sums,
+                                inverse_total,
                                 self.coarsening_factor,
                                 self.max_agg_size,
                                 &mut partition,
@@ -606,6 +621,142 @@ impl PartitionBuilder {
         block_partition
     }
 
+    /* Worse than using sum of near-nulls.... Probably delete once commited to git
+    pub fn build_multi(&self) -> Partition {
+        let near_nulls = self.near_nulls.as_ref().unwrap();
+        let (mut mat_bar, mut row_sums, inv_total) =
+            build_weighted_matrix_csr_vec(&*self.mat, near_nulls);
+        let mut block_partition;
+
+        if self.vector_dim > 1 {
+            let (starting_partition, scalar_strength, scalar_rowsums) =
+                reduce_block_simple(self.mat.clone(), &mat_bar, &row_sums, self.vector_dim);
+            block_partition = starting_partition;
+            mat_bar = scalar_strength;
+            row_sums = scalar_rowsums;
+        } else {
+            block_partition = Partition::trivial(self.mat.clone());
+        }
+
+        // need to convert strength mat to coosym for matching function...
+        let mut coosym = Vec::new();
+
+        for (i, row) in mat_bar.outer_iterator().enumerate() {
+            for (j, val) in row.iter().filter(|(j, _)| i < *j) {
+                coosym.push((i, j, *val));
+            }
+        }
+        let mut partition = Partition::trivial(Arc::new(CsrMatrix::zero(mat_bar.shape())));
+        let old_rowsums = row_sums.clone();
+
+        let mut match_history = Vec::new();
+
+        // here now mostly copy logic from standard build fn... Probably use block SA with original
+        // nearnull space to get new coarse nearnull space -> vector strength -> scalar strength
+        // again when coarsening cannot continue.
+        let matches = modularity_matching(
+            &mut coosym,
+            &mut row_sums,
+            inv_total,
+            self.coarsening_factor,
+            self.max_agg_size,
+            &mut partition,
+        );
+        match_history.push(matches);
+        if self.max_refinement_iters > 0 {
+            refine_partition(
+                &mut partition,
+                &mat_bar,
+                &old_rowsums,
+                inv_total,
+                self.max_agg_size,
+                self.max_refinement_iters,
+            );
+        }
+
+        let mut cf = partition.cf();
+        let ndofs = near_nulls[0].len();
+        let nn_dim = near_nulls.len();
+        let mut matrix_nullspace = Matrix::zeros((ndofs, nn_dim));
+        for (i, mut col) in matrix_nullspace.columns_mut().into_iter().enumerate() {
+            for (a, b) in col.iter_mut().zip(near_nulls[i].iter()) {
+                *a = *b;
+            }
+        }
+        while cf < self.coarsening_factor {
+            trace!("Target CF of {:.2} not achieved with current CF of {:.2}, coarsening and matching again", self.coarsening_factor, cf);
+            let mut block_copy = block_partition.clone();
+            block_copy.compose(&partition);
+            if let Some(min_agg) = self.min_agg_size {
+                fix_small_aggregates(
+                    min_agg,
+                    &mut block_copy,
+                    &self.near_null,
+                    &self.mat,
+                );
+            }
+            partition.node_to_agg = block_copy.node_to_agg.iter().enumerate().filter(|(i, _)| i % self.vector_dim == 0).map(|(_, v)| *v).collect();
+            partition.update_agg_to_node();
+            let (coarse_near_null, _r, _p, mat_coarse) =
+                smoothed_aggregation2(&self.mat, &block_copy, self.vector_dim, &matrix_nullspace);
+            let coarse_near_null_vec: Vec<Arc<Vector>> = coarse_near_null
+                .columns()
+                .into_iter()
+                .map(|col| Arc::new(col.to_owned()))
+                .collect();
+
+            let (coarse_mat_bar, row_sums, inv_total) =
+                build_weighted_matrix_csr_vec(&mat_coarse, &coarse_near_null_vec);
+            let (_partition, coarse_mat_bar, mut row_sums) =
+                reduce_block_simple(self.mat.clone(), &coarse_mat_bar, &row_sums, nn_dim);
+
+            coosym = Vec::new();
+
+            for (i, row) in coarse_mat_bar.outer_iterator().enumerate() {
+                for (j, val) in row.iter().filter(|(j, _)| i < *j) {
+                    coosym.push((i, j, *val));
+                }
+            }
+            let match_count = modularity_matching(
+                &mut coosym,
+                &mut row_sums,
+                inv_total,
+                self.coarsening_factor,
+                self.max_agg_size,
+                &mut partition,
+            );
+            if match_count == 0 {
+                warn!("Cannot coarsen further with provided parameters, terminating early with CF of {:.2} and target CF of {:.2}", cf, self.coarsening_factor);
+                break;
+            }
+            match_history.push(match_count);
+
+            if self.max_refinement_iters > 0 {
+                refine_partition(
+                    &mut partition,
+                    &mat_bar,
+                    &old_rowsums,
+                    inv_total,
+                    self.max_agg_size,
+                    self.max_refinement_iters,
+                );
+            }
+            cf = partition.cf();
+        }
+        block_partition.compose(&partition);
+        if let Some(min_agg) = self.min_agg_size {
+            fix_small_aggregates(
+                min_agg,
+                &mut block_partition,
+                &self.near_null,
+                &self.mat,
+            );
+        }
+        trace!("Partitioning completed, matches each step: {:?}", match_history);
+        block_partition
+    }
+    */
+
     pub fn validate(&self) {
         assert_eq!(self.mat.rows(), self.mat.cols());
         assert_eq!(self.mat.cols(), self.near_null.len());
@@ -645,18 +796,18 @@ impl PartitionBuilder {
 /// relate aggregates of the existing partition which can be constructed using the
 /// [`interpolation`](module@interpolation) module.
 pub fn modularity_matching(
-    mat: Arc<CsrMatrix>,
-    near_null: &Vector,
+    strength_coosym: &mut Vec<(usize, usize, f64)>,
+    row_sums: &mut Vector,
+    inverse_total: f64,
     coarsening_factor: f64,
     max_agg_size: Option<usize>,
     partition: &mut Partition,
 ) -> usize {
     // TODO should probably force unmatched into a "pair" each pass to prevent singletons
     let fine_ndofs = partition.mat.rows() as f64;
-    let ndofs = mat.rows();
+    let ndofs = partition.agg_to_node.len();
     let mut coarse_ndofs = ndofs as f64;
 
-    let (mut a_bar, mut row_sums, inverse_total) = build_weighted_matrix_coosym(&mat, &near_null);
     let starting_agg_count = partition.agg_to_node.len();
 
     loop {
@@ -664,8 +815,8 @@ pub fn modularity_matching(
             Some(((coarse_ndofs - (fine_ndofs / coarsening_factor)).ceil()) as usize);
 
         let matches = greedy_matching(
-            &mut a_bar,
-            &mut row_sums,
+            strength_coosym,
+            row_sums,
             &mut partition.agg_to_node,
             inverse_total,
             max_agg_size,
@@ -834,6 +985,45 @@ pub fn reduce_block(
     )
 }
 
+pub fn reduce_block_simple(
+    mat: Arc<CsrMatrix>,
+    strength: &CsrMatrix,
+    vec: &Vector,
+    block_size: usize,
+) -> (Partition, CsrMatrix, Vector) {
+    assert_eq!(vec.len() % block_size, 0);
+
+    let n_nodes = vec.len() / block_size;
+    let mut aggs = Vec::with_capacity(n_nodes);
+    let mut p = CooMatrix::new((vec.len(), n_nodes));
+    let mut coarse_vec = Vector::zeros(n_nodes);
+
+    for node_idx in 0..n_nodes {
+        let start = node_idx * block_size;
+        let end = (node_idx + 1) * block_size;
+        aggs.push((start..end).collect());
+        for fine_idx in start..end {
+            coarse_vec[node_idx] += vec[fine_idx];
+            p.add_triplet(fine_idx, node_idx, 1.0);
+        }
+    }
+
+    let p = p.to_csr();
+    let pt = p.transpose_view();
+    let reduced = &pt * &(strength * &p);
+
+    let node_to_agg = (0..mat.rows())
+        .map(|node_idx| node_idx / block_size)
+        .collect();
+    let partition = Partition {
+        mat,
+        agg_to_node: aggs,
+        node_to_agg,
+    };
+
+    (partition, reduced.to_csr(), coarse_vec)
+}
+
 fn build_weighted_matrix_csr(mat: &CsrMatrix, near_null: &Vector) -> (CsrMatrix, Vector, f64) {
     let mut row_sums: Vector = Vector::from_elem(mat.rows(), 0.0);
     let mut total: f64 = 0.0;
@@ -842,6 +1032,67 @@ fn build_weighted_matrix_csr(mat: &CsrMatrix, near_null: &Vector) -> (CsrMatrix,
     for (i, row) in mat.outer_iterator().enumerate() {
         for (j, val) in row.iter().filter(|(j, _)| i != *j) {
             let strength_ij = -val * near_null[i] * near_null[j];
+            mat_bar.add_triplet(i, j, strength_ij);
+            if i > j {
+                row_sums[i] += strength_ij;
+                row_sums[j] += strength_ij;
+                total += 2.0 * strength_ij;
+            }
+        }
+    }
+
+    // Some sanity checks since everthing here on is based on the assumption that
+    // $Aw \approx 0$ giving that the row-sums of $\bar{A}$ are positive. Things close to 0 and
+    // negative are fine, just set them to 0, but output a warning with how close.
+    //let mut counter = 0;
+    let mut total_bad = 0.0;
+    let mut min = 0.0;
+
+    for sum in row_sums.iter_mut() {
+        if *sum < 0.0 {
+            //counter += 1;
+            if *sum < min {
+                min = *sum;
+            }
+            total_bad += *sum;
+            *sum = 0.0;
+        }
+    }
+
+    /*
+        if counter > 0 {
+            warn!(
+                "{} of {} rows had negative rowsums. Average negative: {:.1e}, worst negative: {:.1e}",
+                counter,
+                row_sums.len(),
+                total_bad / (counter as f64),
+                min
+            );
+        }
+    */
+
+    let mut inv_total = 1.0 / (total - total_bad);
+    if !inv_total.is_finite() {
+        inv_total = 0.0;
+    }
+
+    (mat_bar.to_csr(), row_sums, inv_total)
+}
+
+fn build_weighted_matrix_csr_vec(
+    mat: &CsrMatrix,
+    near_nulls: &Vec<Arc<Vector>>,
+) -> (CsrMatrix, Vector, f64) {
+    let mut row_sums: Vector = Vector::from_elem(mat.rows(), 0.0);
+    let mut total: f64 = 0.0;
+    let mut mat_bar = CooMatrix::new(mat.shape());
+
+    for (i, row) in mat.outer_iterator().enumerate() {
+        for (j, val) in row.iter().filter(|(j, _)| i != *j) {
+            let mut strength_ij = 0.0;
+            for near_null in near_nulls.iter() {
+                strength_ij = -val * near_null[i] * near_null[j];
+            }
             mat_bar.add_triplet(i, j, strength_ij);
             if i > j {
                 row_sums[i] += strength_ij;
